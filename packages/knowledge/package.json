@@ -1,0 +1,14 @@
+{
+  "name": "@workforce/knowledge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@workforce/ai-provider": "workspace:*",
+    "@workforce/database": "workspace:*",
+    "@workforce/shared": "workspace:*",
+    "mammoth": "^1.13.0",
+    "unpdf": "^2.2.1"
+  }
+}

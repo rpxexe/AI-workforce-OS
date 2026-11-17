@@ -1,0 +1,124 @@
+import { z } from "zod";
+
+export const EMPLOYEE_STATUSES = ["DRAFT", "ACTIVE", "PAUSED", "ARCHIVED"] as const;
+export type EmployeeStatus = (typeof EMPLOYEE_STATUSES)[number];
+
+/** Icon keys; the dashboard maps each to an icon. */
+export const AVATARS = ["bot", "headset", "briefcase", "sparkles", "shield", "cart", "calendar", "wrench"] as const;
+
+export const LANGUAGES = {
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+  pt: "Portuguese",
+  it: "Italian",
+  nl: "Dutch",
+  hi: "Hindi",
+  ar: "Arabic",
+  ja: "Japanese",
+  zh: "Chinese",
+} as const;
+
+export const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+
+const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM");
+
+const daySchema = z
+  .object({ day: z.enum(DAYS), enabled: z.boolean(), start: time, end: time })
+  .refine((d) => !d.enabled || d.start < d.end, { path: ["end"], message: "End must be after start" });
+
+const isTimeZone = (tz: string) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const workingHoursSchema = z.object({
+  timezone: z.string().refine(isTimeZone, "Unknown time zone"),
+  days: z
+    .array(daySchema)
+    .length(7)
+    .refine((days) => days.every((d, i) => d.day === DAYS[i]), "Days must be Monday to Sunday, in order"),
+});
+
+export const escalationSchema = z
+  .object({
+    enabled: z.boolean(),
+    contactEmail: z.union([z.literal(""), z.email("Enter a valid email")]),
+    onCustomerRequest: z.boolean(),
+    /** Hand off after this many failed attempts to help; 0 turns the trigger off. */
+    afterFailedAttempts: z.number().int().min(0).max(10),
+    handoffMessage: z.string().trim().max(500),
+  })
+  .refine((e) => !e.enabled || e.contactEmail !== "", {
+    path: ["contactEmail"],
+    message: "Add a contact email, or turn escalation off",
+  });
+
+/** Everything about an employee that is versioned. Shared by the dashboard form and the API. */
+export const employeeConfigSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(80),
+  description: z.string().trim().max(500),
+  role: z.string().trim().min(1, "Role is required").max(80),
+  personality: z.string().trim().max(2000),
+  systemInstructions: z.string().trim().max(20000),
+  goals: z.array(z.string().trim().min(1, "Goal cannot be empty").max(200)).max(20),
+  language: z.enum(Object.keys(LANGUAGES) as [keyof typeof LANGUAGES, ...(keyof typeof LANGUAGES)[]]),
+  avatar: z.enum(AVATARS),
+  workingHours: workingHoursSchema,
+  escalation: escalationSchema,
+});
+export type EmployeeConfig = z.infer<typeof employeeConfigSchema>;
+
+export const defaultEmployeeConfig = (timezone = "UTC"): EmployeeConfig => ({
+  name: "",
+  description: "",
+  role: "",
+  personality: "",
+  systemInstructions: "",
+  goals: [],
+  language: "en",
+  avatar: "bot",
+  workingHours: {
+    timezone,
+    days: DAYS.map((day, i) => ({ day, enabled: i < 5, start: "09:00", end: "17:00" })),
+  },
+  escalation: {
+    enabled: false,
+    contactEmail: "",
+    onCustomerRequest: true,
+    afterFailedAttempts: 3,
+    handoffMessage: "",
+  },
+});
+
+export const publishSchema = z.object({ version: z.number().int().positive() });
+/** DRAFT is not settable: it only describes an employee that has never been published. */
+export const setStatusSchema = z.object({ status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED"]) });
+
+// ---- API responses (dates are ISO strings) ----
+
+export type EmployeeVersion = EmployeeConfig & { number: number; createdBy: string; createdAt: string };
+
+export type EmployeeSummary = Pick<EmployeeConfig, "name" | "role" | "description" | "avatar" | "language"> & {
+  id: string;
+  status: EmployeeStatus;
+  latestVersion: number;
+  /** Version number serving production, or null if never published. */
+  publishedVersion: number | null;
+  updatedAt: string;
+};
+
+export type EmployeeDetail = {
+  id: string;
+  status: EmployeeStatus;
+  publishedVersion: number | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Newest first; never empty. */
+  versions: EmployeeVersion[];
+};

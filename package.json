@@ -1,0 +1,24 @@
+{
+  "name": "ai-workforce-os",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @workforce/api --filter @workforce/dashboard dev",
+    "typecheck": "tsc --noEmit && pnpm --filter @workforce/dashboard typecheck",
+    "lint": "eslint . && pnpm --filter @workforce/dashboard lint",
+    "test": "pnpm --filter @workforce/api test",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:generate": "pnpm --filter @workforce/database generate",
+    "db:migrate": "pnpm --filter @workforce/database migrate",
+    "postinstall": "pnpm db:generate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/node": "^24",
+    "eslint": "^9",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.73.0"
+  }
+}

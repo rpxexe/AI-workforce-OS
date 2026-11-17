@@ -1,0 +1,26 @@
+{
+  "name": "@workforce/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --env-file=../../.env src/server.ts",
+    "start": "node --env-file=../../.env src/server.ts",
+    "test": "node --env-file=../../.env --test \"src/*.test.ts\""
+  },
+  "dependencies": {
+    "@clerk/fastify": "^3.1.100",
+    "@fastify/cors": "^11.4.3",
+    "@fastify/websocket": "^11.3.7",
+    "@workforce/agent-runtime": "workspace:*",
+    "@workforce/ai-provider": "workspace:*",
+    "@workforce/database": "workspace:*",
+    "@workforce/knowledge": "workspace:*",
+    "@workforce/shared": "workspace:*",
+    "fastify": "^5.12.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
+  }
+}

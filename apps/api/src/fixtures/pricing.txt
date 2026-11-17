@@ -1,0 +1,11 @@
+Acme Cloud pricing, effective January 2027.
+
+The Starter plan costs $29 per month and includes 3 seats.
+
+The Team plan costs $99 per month and includes 10 seats.
+
+The Enterprise plan costs $499 per month and includes unlimited seats, single sign-on and a dedicated support manager.
+
+Annual billing gives a 15 percent discount on every plan.
+
+Refunds are available within 30 days of purchase.

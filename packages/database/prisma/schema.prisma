@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Tenant root. `id` is the Clerk organization id: Clerk owns the organization's profile,
+// members and roles, and this row exists so tenant data has something to hang off.
+model Organization {
+  id         String      @id
+  name       String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  workspaces Workspace[]
+  employees  AiEmployee[]
+  conversations Conversation[]
+  knowledgeSources KnowledgeSource[]
+}
+
+// A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
+model Workspace {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  createdAt      DateTime     @default(now())
+  employees      AiEmployee[]
+  conversations  Conversation[]
+  knowledgeSources KnowledgeSource[]
+
+  @@unique([organizationId, name])
+}
+
+enum EmployeeStatus {
+  DRAFT // never published
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+// Identity and operational state. All configuration lives in versions.
+model AiEmployee {
+  id             String         @id @default(cuid())
+  // Denormalized from the workspace so every query can filter on the tenant directly.
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  status         EmployeeStatus @default(DRAFT)
+
+  // The version serving production. Editing never changes it; only publishing moves this pointer.
+  publishedVersionId String?            @unique
+  publishedVersion   AiEmployeeVersion? @relation("Published", fields: [publishedVersionId], references: [id])
+
+  versions  AiEmployeeVersion[] @relation("Versions")
+  conversations Conversation[]
+  knowledgeSources EmployeeKnowledgeSource[]
+  createdBy String // Clerk user id
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@index([organizationId, workspaceId, status])
+  @@map("AIEmployee")
+}
+
+// Immutable snapshot of the configuration of an employee. Rows are only ever inserted.
+model AiEmployeeVersion {
+  id           String      @id @default(cuid())
+  employeeId   String
+  employee     AiEmployee  @relation("Versions", fields: [employeeId], references: [id], onDelete: Cascade)
+  publishedFor AiEmployee? @relation("Published")
+  number       Int // 1, 2, 3… per employee
+
+  name               String
+  description        String
+  role               String
+  personality        String
+  systemInstructions String
+  goals              String[]
+  language           String
+  avatar             String
+  workingHours       Json
+  escalation         Json
+
+  createdBy String // Clerk user id
+  createdAt DateTime @default(now())
+
+  @@unique([employeeId, number])
+  @@map("AIEmployeeVersion")
+}
+
+// One thread between a person and an AI employee. Every channel (test chat today; web chat,
+// WhatsApp and voice later) stores its turns here through the agent runtime.
+model Conversation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  employeeId     String
+  employee       AiEmployee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  channel        String       @default("test")
+  title          String // start of the first user message
+
+  messages  ConversationMessage[]
+  createdBy String // Clerk user id
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  @@index([organizationId, workspaceId, employeeId, updatedAt])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+model ConversationMessage {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+
+  // Set on assistant messages only: which configuration answered, and what it cost.
+  employeeVersion Int?
+  provider        String?
+  model           String?
+  inputTokens     Int?
+  outputTokens    Int?
+  latencyMs       Int?
+  // Knowledge excerpts the reply was given: [{ documentId, documentName, sourceName, page }]
+  sources         Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// A named collection of company documents in a workspace. Employees answer from the sources
+// attached to them.
+model KnowledgeSource {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name           String
+  description    String       @default("")
+
+  documents KnowledgeDocument[]
+  chunks    KnowledgeChunk[]
+  employees EmployeeKnowledgeSource[]
+  createdBy String // Clerk user id
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+
+  @@unique([workspaceId, name])
+  @@index([organizationId, workspaceId])
+}
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+model KnowledgeDocument {
+  id             String          @id @default(cuid())
+  // Tenant columns are repeated on documents and chunks so every query filters on them directly.
+  organizationId String
+  workspaceId    String
+  sourceId       String
+  source         KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  name           String
+  kind           String // pdf | docx | txt | csv
+  sizeBytes      Int
+  // shortcut: the original file lives in Postgres so it can be reprocessed; move to object storage (R2) when wired
+  content        Bytes
+  status         DocumentStatus  @default(PENDING)
+  error          String?
+  chunkCount     Int             @default(0)
+
+  chunks      KnowledgeChunk[]
+  createdBy   String // Clerk user id
+  createdAt   DateTime         @default(now())
+  processedAt DateTime?
+
+  @@index([organizationId, workspaceId, sourceId])
+}
+
+model KnowledgeChunk {
+  id             String            @id
+  organizationId String
+  workspaceId    String
+  sourceId       String
+  source         KnowledgeSource   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  documentId     String
+  document       KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  index          Int // position in the document
+  page           Int? // PDF page, when known
+  content        String
+  embedding      Embedding?
+
+  @@unique([documentId, index])
+  @@index([organizationId, workspaceId, sourceId])
+}
+
+// Kept apart from the chunk so text can be re-embedded with another model without re-chunking.
+// Prisma cannot read or write the vector column; packages/knowledge uses SQL for it.
+// shortcut: no vector index (exact search); add HNSW in SQL when a workspace nears 50k chunks
+model Embedding {
+  chunkId String                      @id
+  chunk   KnowledgeChunk              @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  model   String
+  vector  Unsupported("vector(1536)")
+}
+
+// Which sources an employee answers from. Not versioned: attaching takes effect immediately.
+model EmployeeKnowledgeSource {
+  employeeId String
+  employee   AiEmployee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  sourceId   String
+  source     KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  createdAt  DateTime        @default(now())
+
+  @@id([employeeId, sourceId])
+}

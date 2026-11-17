@@ -1,0 +1,19 @@
+{
+  // Covers the API, shared packages and workers. The dashboard has its own (Next.js) tsconfig.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    // The API runs TypeScript directly on Node (type stripping), which rejects enums and the like.
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["apps/api/src", "packages/*/src", "packages/*/*.ts", "workers/*/src"]
+}

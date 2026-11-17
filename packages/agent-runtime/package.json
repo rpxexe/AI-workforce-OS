@@ -1,0 +1,13 @@
+{
+  "name": "@workforce/agent-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@workforce/ai-provider": "workspace:*",
+    "@workforce/database": "workspace:*",
+    "@workforce/shared": "workspace:*",
+    "@workforce/knowledge": "workspace:*"
+  }
+}

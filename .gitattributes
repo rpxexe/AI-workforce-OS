@@ -1,0 +1,3 @@
+# Sample documents are byte-exact fixtures: never convert their line endings.
+*.pdf binary
+*.docx binary
