@@ -20,7 +20,6 @@ Last updated: 2026-11-17, after Phase 4.
 - **Real signed-in flow untested**: sign-up, creating and switching organizations, and the
   dashboard calling the API with a real session token. Keys are in `.env` and both servers start.
 - **Test chat and Knowledge pages not exercised in a browser**; they typecheck, lint and build.
-- **Nothing is committed** to git yet.
 
 ## Verified so far
 
