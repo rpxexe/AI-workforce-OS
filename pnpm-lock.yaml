@@ -47,9 +47,24 @@ importers:
       '@workforce/knowledge':
         specifier: workspace:*
         version: link:../../packages/knowledge
+      '@workforce/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@workforce/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@workforce/stt':
+        specifier: workspace:*
+        version: link:../../packages/stt
+      '@workforce/telephony':
+        specifier: workspace:*
+        version: link:../../packages/telephony
+      '@workforce/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
+      '@workforce/tts':
+        specifier: workspace:*
+        version: link:../../packages/tts
       fastify:
         specifier: ^5.12.8
         version: 5.12.8
@@ -136,9 +151,15 @@ importers:
       '@workforce/knowledge':
         specifier: workspace:*
         version: link:../knowledge
+      '@workforce/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@workforce/shared':
         specifier: workspace:*
         version: link:../shared
+      '@workforce/tools':
+        specifier: workspace:*
+        version: link:../tools
 
   packages/ai-provider:
     dependencies:
@@ -177,7 +198,17 @@ importers:
         specifier: ^2.2.1
         version: 2.2.1
 
-  packages/memory: {}
+  packages/memory:
+    dependencies:
+      '@workforce/ai-provider':
+        specifier: workspace:*
+        version: link:../ai-provider
+      '@workforce/database':
+        specifier: workspace:*
+        version: link:../database
+      '@workforce/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/shared:
     dependencies:
@@ -185,11 +216,32 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
 
-  packages/stt: {}
+  packages/stt:
+    dependencies:
+      ws:
+        specifier: 8.23.0
+        version: 8.23.0
+    devDependencies:
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
 
   packages/telephony: {}
 
-  packages/tools: {}
+  packages/tools:
+    dependencies:
+      '@workforce/ai-provider':
+        specifier: workspace:*
+        version: link:../ai-provider
+      '@workforce/database':
+        specifier: workspace:*
+        version: link:../database
+      '@workforce/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
 
   packages/tts: {}
 

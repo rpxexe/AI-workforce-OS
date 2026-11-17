@@ -1,17 +1,46 @@
-export type ChatMessage = { role: "user" | "assistant"; content: string };
+/** A tool the model may call, described in JSON Schema. Provider-independent. */
+export type ToolSpec = { name: string; description: string; inputSchema: Record<string, unknown> };
+
+/** The model asking for a tool. `input` is whatever the model wrote: validate it before use. */
+export type ToolCall = { id: string; name: string; input: unknown };
+
+export type ToolResult = { callId: string; content: string; isError: boolean };
+
+export type ChatMessage =
+  | { role: "user"; content: string }
+  | {
+      role: "assistant";
+      content: string;
+      toolCalls?: ToolCall[];
+      /** The provider's own record of this turn (e.g. thinking blocks), replayed unchanged to the provider that made it. */
+      raw?: { provider: string; data: unknown };
+    }
+  /** The results of every call in the assistant message before it, in one message. */
+  | { role: "tool"; results: ToolResult[] };
 
 export type CompletionRequest = {
   system: string;
-  /** Oldest first; the last one is the message to answer. */
+  /** Oldest first; the last one is the message to answer (or tool results to continue from). */
   messages: ChatMessage[];
+  /** Tools the model may call this time. */
+  tools?: ToolSpec[];
   /** Aborting stops the request; the caller owns timeouts and cancellation. */
   signal: AbortSignal;
 };
 
 export type ProviderEvent =
   | { type: "text"; text: string }
-  /** Always the last event of a successful completion. */
-  | { type: "done"; inputTokens: number; outputTokens: number };
+  /**
+   * Always the last event of a successful completion. `toolCalls` is set when the model stopped
+   * to call tools; send their results back to continue. `raw` goes on the assistant message.
+   */
+  | {
+      type: "done";
+      inputTokens: number;
+      outputTokens: number;
+      toolCalls?: ToolCall[];
+      raw?: { provider: string; data: unknown };
+    };
 
 export interface AIProvider {
   /** Stored with each reply, e.g. "anthropic". */

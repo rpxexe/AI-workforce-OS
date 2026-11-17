@@ -2,8 +2,10 @@ import {
   AIProviderError,
   type AIProvider,
   type AIProviderErrorKind,
+  type ChatMessage,
   type EmbeddingProvider,
   type ProviderSettings,
+  type ToolCall,
 } from "./types.ts";
 
 type Vendor = {
@@ -17,7 +19,14 @@ type Vendor = {
 
 /** The parts of a streamed chat-completions chunk this provider reads. */
 type Chunk = {
-  choices?: { delta?: { content?: string | null }; finish_reason?: string | null }[];
+  choices?: {
+    delta?: {
+      content?: string | null;
+      /** Streamed in fragments: the first carries id and name, later ones more of `arguments`. */
+      tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[];
+    };
+    finish_reason?: string | null;
+  }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
   error?: { message?: string; code?: number | string };
 };
@@ -33,6 +42,34 @@ const kindOf = (status: number): AIProviderErrorKind =>
           ? "unavailable"
           : "invalid";
 
+/** Our messages in the chat-completions shape: tool results become one `tool` message per call. */
+const toWire = (m: ChatMessage): object[] => {
+  if (m.role === "user") return [m];
+  if (m.role === "tool") return m.results.map((r) => ({ role: "tool", tool_call_id: r.callId, content: r.content }));
+  return [
+    {
+      role: "assistant",
+      content: m.content || null,
+      ...(m.toolCalls?.length && {
+        tool_calls: m.toolCalls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: JSON.stringify(c.input) },
+        })),
+      }),
+    },
+  ];
+};
+
+/** The arguments as the model wrote them; unparseable JSON is passed on as text for validation to reject. */
+const parseArguments = (text: string): unknown => {
+  try {
+    return text.trim() === "" ? {} : JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+
 /**
  * Any service that speaks the OpenAI chat-completions streaming protocol: OpenRouter today;
  * OpenAI or a self-hosted endpoint is one more entry in `PROVIDERS`.
@@ -42,7 +79,7 @@ export const openAICompatibleProvider =
   ({ model = vendor.defaultModel, maxOutputTokens }: ProviderSettings, env: Record<string, string | undefined>): AIProvider => ({
     name: vendor.name,
     model,
-    async *stream({ system, messages, signal }) {
+    async *stream({ system, messages, tools, signal }) {
       const key = env[vendor.keyVar];
       if (!key) throw new AIProviderError("auth", `${vendor.keyVar} is not set`);
 
@@ -56,7 +93,13 @@ export const openAICompatibleProvider =
             max_tokens: maxOutputTokens,
             stream: true,
             stream_options: { include_usage: true },
-            messages: [{ role: "system", content: system }, ...messages],
+            messages: [{ role: "system", content: system }, ...messages.flatMap(toWire)],
+            ...(tools?.length && {
+              tools: tools.map((t) => ({
+                type: "function",
+                function: { name: t.name, description: t.description, parameters: t.inputSchema },
+              })),
+            }),
           }),
           signal,
         });
@@ -69,6 +112,8 @@ export const openAICompatibleProvider =
       }
 
       let usage: Chunk["usage"];
+      let finish: string | null | undefined;
+      const calls: { id: string; name: string; arguments: string }[] = [];
       let buffer = "";
       try {
         for await (const text of res.body.pipeThrough(new TextDecoderStream())) {
@@ -89,6 +134,13 @@ export const openAICompatibleProvider =
             if (choice?.finish_reason === "content_filter")
               throw new AIProviderError("refused", "The reply was blocked by the provider's content filter");
             if (choice?.delta?.content) yield { type: "text", text: choice.delta.content };
+            for (const part of choice?.delta?.tool_calls ?? []) {
+              const call = (calls[part.index] ??= { id: "", name: "", arguments: "" });
+              call.id ||= part.id ?? "";
+              call.name ||= part.function?.name ?? "";
+              call.arguments += part.function?.arguments ?? "";
+            }
+            finish = choice?.finish_reason ?? finish;
             usage = chunk.usage ?? usage;
           }
         }
@@ -96,8 +148,19 @@ export const openAICompatibleProvider =
         if (err instanceof AIProviderError) throw err;
         throw new AIProviderError("unavailable", `${vendor.name} stream broke`, err);
       }
-      // shortcut: a service that omits usage is recorded as 0 tokens, estimate them if one does
-      yield { type: "done", inputTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0 };
+      const toolCalls: ToolCall[] = calls
+        .filter(Boolean)
+        .map((c, i) => ({ id: c.id || `call_${i}`, name: c.name, input: parseArguments(c.arguments) }));
+      // Arguments cut off by the output limit would be run half-written.
+      if (toolCalls.length > 0 && finish === "length")
+        throw new AIProviderError("invalid", "The reply hit the output token limit while calling a tool");
+      yield {
+        type: "done",
+        // shortcut: a service that omits usage is recorded as 0 tokens, estimate them if one does
+        inputTokens: usage?.prompt_tokens ?? 0,
+        outputTokens: usage?.completion_tokens ?? 0,
+        ...(toolCalls.length > 0 && { toolCalls }),
+      };
     },
   });
 

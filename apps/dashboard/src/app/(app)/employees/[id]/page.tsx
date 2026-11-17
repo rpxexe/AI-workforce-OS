@@ -12,10 +12,8 @@ import {
   Pause,
   Pencil,
   Play,
-  Radio,
   Rocket,
   Undo2,
-  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -23,6 +21,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { EmployeeKnowledge } from "@/components/employees/employee-knowledge";
+import { EmployeePhone } from "@/components/employees/employee-phone";
+import { EmployeeTools } from "@/components/employees/employee-tools";
 import { DAY_LABELS, EmployeeAvatar, StatusBadge, formatDate } from "@/components/employees/meta";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
@@ -322,11 +322,16 @@ export default withWorkspace(function EmployeePage({ workspace }) {
         </Section>
 
         <Section title="Tools" description="Actions this employee can take in other systems.">
-          <NotConnected icon={Wrench} text="No tools connected. Tools are not available yet." />
+          <EmployeeTools workspaceId={workspace.id} employeeId={id} canEdit={isAdmin && !archived} />
         </Section>
 
-        <Section title="Channels" description="Where customers reach this employee.">
-          <NotConnected icon={Radio} text="No channels connected. Channels are not available yet." />
+        <Section title="Phone" description="Calls this employee answers and makes. Callers reach the published version.">
+          <EmployeePhone
+            workspaceId={workspace.id}
+            employeeId={id}
+            canEdit={isAdmin && !archived}
+            live={data.status === "ACTIVE" && data.publishedVersion !== null}
+          />
         </Section>
 
         <Section title="Analytics" description="How this employee is performing.">

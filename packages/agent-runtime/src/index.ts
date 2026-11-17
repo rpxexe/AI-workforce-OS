@@ -1,14 +1,20 @@
 // The one path from a user message to a saved reply. Every channel calls `runTurn`; none of
 // them talks to a provider or writes conversation rows itself.
+import { randomUUID } from "node:crypto";
 import {
   AIProviderError,
   type AIProvider,
   type AIProviderErrorKind,
+  type ChatMessage,
   type EmbeddingProvider,
+  type ToolCall,
+  type ToolSpec,
 } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
 import { retrieve } from "@workforce/knowledge";
-import type { ConversationMessage, ConversationSummary, EmployeeConfig, MessageSource } from "@workforce/shared";
+import type { MemoryService } from "@workforce/memory";
+import type { ConversationMessage, ConversationSummary, EmployeeConfig, MessageSource, MessageTool } from "@workforce/shared";
+import type { ToolExecutor } from "@workforce/tools";
 import { buildContext } from "./context.ts";
 
 export { buildContext, systemPrompt } from "./context.ts";
@@ -26,6 +32,13 @@ export type TurnInput = {
   conversationId?: string;
   /** The knowledge sources attached to the employee. Omit when there are none. */
   knowledge?: { embedder: EmbeddingProvider; sourceIds: string[] };
+  /**
+   * The customer the conversation is with, already identified. Their memory is recalled before
+   * the reply and updated after it, in the background; `onError` hears about failed updates.
+   */
+  customer?: { id: string; memory: MemoryService; onError: (err: unknown) => void };
+  /** The tools granted to the employee, described for the model. Omit when there are none. */
+  tools?: { executor: ToolExecutor; specs: ToolSpec[] };
   channel: string;
   userMessage: string;
   timeoutMs: number;
@@ -38,6 +51,9 @@ export type TurnEvent =
   | { type: "done"; conversation: ConversationSummary; messages: [ConversationMessage, ConversationMessage] }
   /** `message` is safe to show; `cause` is for the server log. */
   | { type: "error"; kind: AIProviderErrorKind | "timeout" | "internal"; message: string; cause?: unknown };
+
+/** Model calls per turn. The last one is not offered tools, so it has to answer. */
+const MAX_STEPS = 6;
 
 const MESSAGES: Record<Extract<TurnEvent, { type: "error" }>["kind"], string> = {
   timeout: "The AI provider took too long to respond. Try again.",
@@ -62,50 +78,99 @@ export const toMessage = (m: Prisma.ConversationMessageGetPayload<object>): Conv
   outputTokens: m.outputTokens,
   // Written only by runTurn below, in this shape.
   sources: (m.sources as MessageSource[] | null) ?? [],
+  tools: (m.tools as MessageTool[] | null) ?? [],
 });
 
 /**
- * Runs one turn: loads the history, finds the knowledge relevant to the message, streams the reply, then saves the user message and the
- * reply together. A turn that fails, times out or is cancelled saves nothing, so the stored
+ * Runs one turn: loads the history, recalls the customer, finds the knowledge relevant to the
+ * message, streams the reply (calling tools through the executor as the model asks), then saves
+ * the user message and the reply together and lets memory learn from the exchange. A turn that fails, times out or is cancelled saves nothing, so the stored
  * conversation only ever contains complete exchanges.
  */
 export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
-  const { provider, organizationId, workspaceId, employeeId, conversationId, userMessage } = input;
+  const { provider, organizationId, workspaceId, employeeId, conversationId, userMessage, customer, tools } = input;
   const timeout = AbortSignal.timeout(input.timeoutMs);
   const signal = input.signal ? AbortSignal.any([timeout, input.signal]) : timeout;
   const startedAt = new Date();
 
   try {
-    const history = conversationId
-      ? await prisma.conversationMessage.findMany({
-          where: { conversation: { id: conversationId, organizationId, workspaceId, employeeId } },
-          orderBy: { createdAt: "asc" },
-          select: { role: true, content: true },
-        })
-      : [];
-    const matches = input.knowledge
-      ? await retrieve({ organizationId, workspaceId, query: userMessage, signal, ...input.knowledge })
-      : [];
+    const [history, memory, matches] = await Promise.all([
+      conversationId
+        ? prisma.conversationMessage.findMany({
+            where: { conversation: { id: conversationId, organizationId, workspaceId, employeeId } },
+            orderBy: { createdAt: "asc" },
+            select: { role: true, content: true },
+          })
+        : [],
+      customer?.memory.recall({ organizationId, workspaceId, customerId: customer.id, conversationId }),
+      input.knowledge ? retrieve({ organizationId, workspaceId, query: userMessage, signal, ...input.knowledge }) : [],
+    ]);
     const context = buildContext(
       input.employee,
       history.map((m) => ({ role: m.role === "USER" ? "user" : "assistant", content: m.content })),
       userMessage,
       matches,
+      memory,
+      tools !== undefined,
+      input.channel,
     );
     // One entry per document and page, in the order the excerpts ranked.
     const sources = [...new Map(matches.map((m) => [`${m.documentId}:${m.page}`, m])).values()].map(
       ({ documentId, documentName, sourceName, page }): MessageSource => ({ documentId, documentName, sourceName, page }),
     );
 
+    // Known before saving, so tool audit rows and calendar events can point at it.
+    const id = conversationId ?? randomUUID();
+    const chat: ChatMessage[] = [...context.messages];
+    const toolsUsed: MessageTool[] = [];
+    const usage = { inputTokens: 0, outputTokens: 0 };
     let reply = "";
-    let usage: { inputTokens: number; outputTokens: number } | undefined;
-    for await (const event of provider.stream({ ...context, signal })) {
-      if (event.type === "text") {
-        reply += event.text;
-        yield event;
-      } else usage = event;
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      const offered = step < MAX_STEPS ? tools?.specs : undefined;
+      let stepText = "";
+      let calls: ToolCall[] = [];
+      let raw: { provider: string; data: unknown } | undefined;
+      let finished = false;
+      for await (const event of provider.stream({ system: context.system, messages: chat, tools: offered, signal })) {
+        if (event.type === "text") {
+          // Text from an earlier step stays in the reply, as its own paragraph.
+          const text = stepText === "" && reply.trim() !== "" ? `\n\n${event.text}` : event.text;
+          stepText += event.text;
+          reply += text;
+          yield { type: "text", text };
+        } else {
+          usage.inputTokens += event.inputTokens;
+          usage.outputTokens += event.outputTokens;
+          calls = event.toolCalls ?? [];
+          raw = event.raw;
+          finished = true;
+        }
+      }
+      if (!finished) throw new AIProviderError("unavailable", "The provider stream ended early");
+      if (calls.length === 0 || !tools || !offered) break;
+
+      chat.push({ role: "assistant", content: stepText, toolCalls: calls, raw });
+      const results = [];
+      // One at a time, in order: calls can depend on each other and have side effects.
+      for (const call of calls) {
+        const outcome = await tools.executor.execute(
+          call,
+          {
+            organizationId,
+            workspaceId,
+            employeeId,
+            conversationId: id,
+            customerId: customer?.id,
+            timezone: input.employee.workingHours.timezone,
+          },
+          signal,
+        );
+        toolsUsed.push({ executionId: outcome.executionId, tool: call.name, status: outcome.status });
+        results.push(outcome.result);
+      }
+      chat.push({ role: "tool", results });
     }
-    if (!usage || reply.trim() === "") throw new AIProviderError("unavailable", "The provider returned an empty reply");
+    if (reply.trim() === "") throw new AIProviderError("unavailable", "The provider returned an empty reply");
 
     // The reply is stamped at least 1 ms after the question so the pair always sorts in order.
     const finishedAt = new Date(Math.max(Date.now(), startedAt.getTime() + 1));
@@ -122,6 +187,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
         outputTokens: usage.outputTokens,
         latencyMs: finishedAt.getTime() - startedAt.getTime(),
         sources,
+        tools: toolsUsed,
       },
     ];
     const include = { messages: { orderBy: { createdAt: "desc" }, take: 2 } } satisfies Prisma.ConversationInclude;
@@ -133,6 +199,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
         })
       : await prisma.conversation.create({
           data: {
+            id,
             organizationId,
             workspaceId,
             employeeId,
@@ -140,11 +207,16 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
             title: userMessage.slice(0, 80),
             createdBy: input.userId,
             messages: { create: messages },
+            ...(customer && { customer: { create: { customerId: customer.id } } }),
           },
           include,
         });
     const [assistant, user] = saved.messages;
     if (!assistant || !user) throw new Error("Saved turn is missing its messages");
+    // Not awaited: the reply is done, and a failed extraction loses only what this turn taught.
+    customer?.memory
+      .remember({ organizationId, workspaceId, customerId: customer.id, conversationId: saved.id, customerMessage: userMessage, reply })
+      .catch(customer.onError);
     yield {
       type: "done",
       conversation: { id: saved.id, title: saved.title, updatedAt: saved.updatedAt.toISOString() },

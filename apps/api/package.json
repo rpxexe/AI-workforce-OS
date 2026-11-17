@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch --env-file=../../.env src/server.ts",
     "start": "node --env-file=../../.env src/server.ts",
-    "test": "node --env-file=../../.env --test \"src/*.test.ts\""
+    "test": "node --env-file=../../.env --test \"src/*.test.ts\"",
+    "try-call": "node --env-file=../../.env src/try-call.ts"
   },
   "dependencies": {
     "@clerk/fastify": "^3.1.100",
@@ -16,7 +17,12 @@
     "@workforce/ai-provider": "workspace:*",
     "@workforce/database": "workspace:*",
     "@workforce/knowledge": "workspace:*",
+    "@workforce/memory": "workspace:*",
+    "@workforce/tools": "workspace:*",
+    "@workforce/tts": "workspace:*",
     "@workforce/shared": "workspace:*",
+    "@workforce/stt": "workspace:*",
+    "@workforce/telephony": "workspace:*",
     "fastify": "^5.12.8",
     "zod": "^4.6.7"
   },

@@ -2,6 +2,8 @@ import { Readable } from "node:stream";
 import { runTurn, toMessage } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
+import type { MemoryService } from "@workforce/memory";
+import { toolRegistry, type ToolExecutor } from "@workforce/tools";
 import {
   sendMessageSchema,
   type ChatStreamEvent,
@@ -29,7 +31,13 @@ const frame = (event: ChatStreamEvent) => `data: ${JSON.stringify(event)}\n\n`;
 export function conversationRoutes(
   app: FastifyInstance,
   authenticate: Authenticate,
-  ai: { provider: () => AIProvider; embedder: () => EmbeddingProvider; timeoutMs: number },
+  ai: {
+    provider: () => AIProvider;
+    embedder: () => EmbeddingProvider;
+    memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+    tools: ToolExecutor;
+    timeoutMs: number;
+  },
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const base = "/workspaces/:workspaceId/employees/:id";
@@ -51,10 +59,17 @@ export function conversationRoutes(
     const scope = await inWorkspace(member(req), workspaceId);
     const conversation = await prisma.conversation.findFirst({
       where: { id: conversationId, employeeId: id, ...within(scope) },
-      include: { messages: { orderBy: { createdAt: "asc" } } },
+      include: {
+        messages: { orderBy: { createdAt: "asc" } },
+        customer: { select: { customer: { select: { externalId: true } } } },
+      },
     });
     if (!conversation) throw httpError(404, "Conversation not found");
-    return { ...toSummary(conversation), messages: conversation.messages.map(toMessage) };
+    return {
+      ...toSummary(conversation),
+      messages: conversation.messages.map(toMessage),
+      customer: conversation.customer?.customer.externalId ?? null,
+    };
   });
 
   // Answers with server-sent events (`ChatStreamEvent`). Everything that can be refused is
@@ -62,25 +77,34 @@ export function conversationRoutes(
   app.post(`${base}/messages`, async (req, reply) => {
     const { workspaceId, id } = employeeParams.parse(req.params);
     const scope = await inWorkspace(admin(req), workspaceId);
-    const { conversationId, message } = sendMessageSchema.parse(req.body);
+    const { conversationId, message, customer: externalId } = sendMessageSchema.parse(req.body);
 
     // Test chat talks to the latest version, published or not: that is what is being tested.
     const latest = await prisma.aiEmployeeVersion.findFirst({
       where: { employee: { id, ...within(scope) } },
       orderBy: { number: "desc" },
-      include: { employee: { select: { status: true, knowledgeSources: { select: { sourceId: true } } } } },
+      include: {
+        employee: {
+          select: { status: true, knowledgeSources: { select: { sourceId: true } }, tools: { select: { tool: true } } },
+        },
+      },
     });
     if (!latest) throw httpError(404, "Employee not found");
     if (latest.employee.status === "ARCHIVED") throw httpError(409, "Restore this employee before testing it");
+    // A conversation keeps the customer it started with.
+    let customerId: string | undefined;
     if (conversationId) {
       const conversation = await prisma.conversation.findFirst({
         where: { id: conversationId, employeeId: id, ...within(scope) },
-        select: { id: true },
+        select: { customer: { select: { customerId: true } } },
       });
       if (!conversation) throw httpError(404, "Conversation not found");
+      customerId = conversation.customer?.customerId;
     }
 
     const sourceIds = latest.employee.knowledgeSources.map((k) => k.sourceId);
+    // The model is only told about granted tools; the executor checks the grant again on every call.
+    const toolSpecs = toolRegistry.specs(latest.employee.tools.map((t) => t.tool));
     let provider: AIProvider;
     let knowledge: { embedder: EmbeddingProvider; sourceIds: string[] } | undefined;
     try {
@@ -91,6 +115,9 @@ export function conversationRoutes(
       req.log.error(err, "AI provider is misconfigured");
       throw httpError(503, "The AI provider is not configured correctly on the server.");
     }
+
+    const memory = ai.memory(provider, ai.timeoutMs);
+    if (!conversationId && externalId) customerId = await memory.identify(scope, externalId);
 
     // Stop paying for a reply nobody will read when the browser goes away.
     const gone = new AbortController();
@@ -106,6 +133,10 @@ export function conversationRoutes(
       employeeVersion: latest.number,
       conversationId,
       knowledge,
+      customer: customerId
+        ? { id: customerId, memory, onError: (err) => req.log.error(err, "Updating customer memory failed") }
+        : undefined,
+      tools: toolSpecs.length > 0 ? { executor: ai.tools, specs: toolSpecs } : undefined,
       channel: "test",
       userMessage: message,
       timeoutMs: ai.timeoutMs,
