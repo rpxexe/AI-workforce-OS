@@ -7,7 +7,9 @@ import { AIProviderError, providerFromEnv, type ProviderEvent } from "@workforce
 
 let server: Server;
 let respond: (status: number) => string | null = () => null;
-let received: { authorization?: string; body: { model: string; stream: boolean; messages: unknown[] } } | undefined;
+let received:
+  | { authorization?: string; body: { model: string; stream: boolean; messages: unknown[]; tools?: unknown[] } }
+  | undefined;
 
 before(async () => {
   server = createServer(async (req, res) => {
@@ -80,4 +82,64 @@ test("openrouter failures become AIProviderError kinds", async () => {
   assert.equal(await kindOf(run({ ...env(), OPENROUTER_API_KEY: "" })), "auth");
   assert.equal(await kindOf(run({ ...env(), OPENROUTER_BASE_URL: "http://127.0.0.1:1" })), "unavailable");
   assert.throws(() => providerFromEnv({ AI_PROVIDER: "nope" }), /not supported/);
+});
+
+test("openrouter tool calls: tools are sent, streamed call fragments are joined, results go back as tool messages", async () => {
+  const data = (chunk: object) => `data: ${JSON.stringify(chunk)}\n\n`;
+  const fragment = (index: number, fn: object, id?: string) => ({ choices: [{ delta: { tool_calls: [{ index, id, function: fn }] } }] });
+  respond = () =>
+    "200 " +
+    data({ choices: [{ delta: { content: "Booking." } }] }) +
+    data(fragment(0, { name: "calendar_book_meeting", arguments: "" }, "call_a")) +
+    data(fragment(0, { arguments: '{"date":"2026-11-18",' })) +
+    data(fragment(0, { arguments: '"time":"15:00"}' })) +
+    data(fragment(1, { name: "send_email", arguments: "not json" }, "call_b")) +
+    data({ choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 5, completion_tokens: 7 } }) +
+    "data: [DONE]\n\n";
+
+  const events: ProviderEvent[] = [];
+  const request = {
+    system: "Be brief.",
+    messages: [
+      { role: "user" as const, content: "Book it" },
+      {
+        role: "assistant" as const,
+        content: "",
+        toolCalls: [{ id: "call_0", name: "calendar_book_meeting", input: { date: "2026-11-17" } }],
+      },
+      { role: "tool" as const, results: [{ callId: "call_0", content: '{"status":"conflict"}', isError: false }] },
+    ],
+    tools: [{ name: "calendar_book_meeting", description: "Book", inputSchema: { type: "object" } }],
+    signal: AbortSignal.timeout(5000),
+  };
+  for await (const event of providerFromEnv(env()).stream(request)) events.push(event);
+
+  assert.deepEqual(events, [
+    { type: "text", text: "Booking." },
+    {
+      type: "done",
+      inputTokens: 5,
+      outputTokens: 7,
+      toolCalls: [
+        { id: "call_a", name: "calendar_book_meeting", input: { date: "2026-11-18", time: "15:00" } },
+        // Unparseable arguments are passed on as text, for the executor's validation to refuse.
+        { id: "call_b", name: "send_email", input: "not json" },
+      ],
+    },
+  ]);
+  assert.deepEqual(received?.body.tools, [
+    { type: "function", function: { name: "calendar_book_meeting", description: "Book", parameters: { type: "object" } } },
+  ]);
+  assert.deepEqual(received?.body.messages.slice(2), [
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_0", type: "function", function: { name: "calendar_book_meeting", arguments: '{"date":"2026-11-17"}' } }],
+    },
+    { role: "tool", tool_call_id: "call_0", content: '{"status":"conflict"}' },
+  ]);
+
+  // Arguments cut off by the output limit are never run.
+  respond = () => "200 " + data(fragment(0, { name: "x", arguments: '{"a":' }, "c")) + data({ choices: [{ delta: {}, finish_reason: "length" }] });
+  assert.equal(await kindOf(run()), "invalid");
 });

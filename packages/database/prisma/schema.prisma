@@ -18,6 +18,11 @@ model Organization {
   employees  AiEmployee[]
   conversations Conversation[]
   knowledgeSources KnowledgeSource[]
+  customers  Customer[]
+  toolExecutions ToolExecution[]
+  calendarEvents CalendarEvent[]
+  phoneNumbers   PhoneNumber[]
+  calls          Call[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -30,6 +35,7 @@ model Workspace {
   employees      AiEmployee[]
   conversations  Conversation[]
   knowledgeSources KnowledgeSource[]
+  customers      Customer[]
 
   @@unique([organizationId, name])
 }
@@ -58,6 +64,9 @@ model AiEmployee {
   versions  AiEmployeeVersion[] @relation("Versions")
   conversations Conversation[]
   knowledgeSources EmployeeKnowledgeSource[]
+  tools            ToolPermission[]
+  phoneNumbers     PhoneNumber[]
+  calls            Call[]
   createdBy String // Clerk user id
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
@@ -106,7 +115,9 @@ model Conversation {
   title          String // start of the first user message
 
   messages  ConversationMessage[]
-  createdBy String // Clerk user id
+  customer  CustomerConversation?
+  calls     Call[]
+  createdBy String // Clerk user id, or "voice" for conversations started by a phone call
   createdAt DateTime              @default(now())
   updatedAt DateTime              @updatedAt
 
@@ -134,6 +145,8 @@ model ConversationMessage {
   latencyMs       Int?
   // Knowledge excerpts the reply was given: [{ documentId, documentName, sourceName, page }]
   sources         Json?
+  // Tools called while writing the reply: [{ executionId, tool, status }]
+  tools           Json?
 
   createdAt DateTime @default(now())
 
@@ -229,4 +242,230 @@ model EmployeeKnowledgeSource {
   createdAt  DateTime        @default(now())
 
   @@id([employeeId, sourceId])
+}
+
+// A person AI employees talk to, identified by whatever the channel knows them by (email, phone,
+// chat visitor id). Customers belong to a workspace, so every employee in it shares their memory.
+model Customer {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  externalId     String
+
+  profile       CustomerProfile?
+  memories      CustomerMemory[]
+  conversations CustomerConversation[]
+  createdAt     DateTime         @default(now())
+  lastSeenAt    DateTime         @default(now())
+
+  @@unique([workspaceId, externalId])
+  @@index([organizationId, workspaceId, lastSeenAt])
+}
+
+// The customer's identity card, kept in step with their identity memories so a customer list
+// needs no extra query.
+model CustomerProfile {
+  customerId String   @id
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  name       String?
+  email      String?
+  phone      String?
+  company    String?
+  updatedAt  DateTime @updatedAt
+}
+
+// One remembered fact, extracted from conversations and validated before it is stored. A key
+// holds one value: learning it again replaces it.
+model CustomerMemory {
+  id             String   @id @default(cuid())
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  category       String // identity | preference | fact | lead | follow_up
+  key            String // snake_case, e.g. budget
+  value          String
+  conversationId String? // where it was last learned
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([customerId, key])
+}
+
+// Which customer a conversation was with, and a running summary of it for later conversations.
+model CustomerConversation {
+  conversationId String       @id
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  summary        String       @default("")
+  updatedAt      DateTime     @updatedAt
+
+  @@index([customerId, updatedAt])
+}
+
+// A tool an employee may use, with the settings an admin chose. Not versioned: granting or
+// revoking takes effect on the next tool call. `permissions` are the tool's permissions when it
+// was granted; if a tool later needs more, old grants stop working until an admin grants again.
+model ToolPermission {
+  employeeId  String
+  employee    AiEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  tool        String
+  config      Json
+  permissions String[]
+  grantedBy   String // Clerk user id
+  createdAt   DateTime   @default(now())
+
+  @@id([employeeId, tool])
+}
+
+enum ToolExecutionStatus {
+  SUCCEEDED
+  FAILED // ran (or tried to) and failed
+  DENIED // not permitted: never ran
+  INVALID // the model's input failed validation: never ran
+}
+
+// Audit log: one row per tool call the model made, whatever happened to it. Rows are only inserted.
+model ToolExecution {
+  id             String              @id // generated before the call; webhooks send it as the idempotency key
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  employeeId     String
+  conversationId String? // may name a conversation that was never saved, if the turn failed afterwards
+  customerId     String?
+  tool           String
+  status         ToolExecutionStatus
+  input          Json // as the model wrote it
+  output         Json?
+  error          String?
+  attempts       Int
+  durationMs     Int
+  createdAt      DateTime            @default(now())
+
+  @@index([organizationId, workspaceId, createdAt])
+  @@index([conversationId])
+}
+
+// The built-in calendar the booking tool writes to, one per workspace.
+// shortcut: stands in for Google or Microsoft calendars; add a provider behind the tool when one is chosen
+model CalendarEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  employeeId     String
+  customerId     String?
+  conversationId String?
+  title          String
+  startsAt       DateTime
+  endsAt         DateTime
+  timezone       String
+  attendeeName   String?
+  attendeeEmail  String?
+  notes          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([workspaceId, startsAt])
+}
+
+// A phone number answered by an AI employee. Calls to it go to the employee's published version.
+model PhoneNumber {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId      String
+  employeeId       String
+  employee         AiEmployee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  number           String       @unique // E.164, e.g. +14155550100
+  provider         String       @default("twilio")
+  providerNumberId String // Twilio's PN... sid
+  // What the employee says when it picks up. A template, since the model only speaks after the caller.
+  greeting         String
+  createdBy        String // Clerk user id
+  createdAt        DateTime     @default(now())
+
+  @@index([organizationId, workspaceId])
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  QUEUED
+  RINGING
+  IN_PROGRESS
+  COMPLETED
+  BUSY
+  NO_ANSWER
+  FAILED
+  CANCELED
+}
+
+// One phone call with an AI employee. What was said is stored twice on purpose: as the
+// conversation (through the agent runtime, like every channel) and as a timed transcript.
+model Call {
+  id              String           @id @default(cuid())
+  organizationId  String
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId     String
+  employeeId      String
+  employee        AiEmployee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeVersion Int // the published version that took the call
+  conversationId  String? // set after the first exchange is saved
+  conversation    Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customerId      String?
+  direction       CallDirection
+  status          CallStatus
+  from            String
+  to              String
+  provider        String           @default("twilio")
+  providerCallId  String?          @unique // Twilio CallSid
+  streamId        String?
+  greeting        String
+  error           String?
+  createdBy       String? // Clerk user id of whoever placed an outbound call
+  createdAt       DateTime         @default(now())
+  answeredAt      DateTime?
+  endedAt         DateTime?
+  durationSec     Int?
+
+  participants CallParticipant[]
+  transcript   CallTranscript[]
+
+  @@index([organizationId, workspaceId, createdAt])
+}
+
+enum CallParticipantRole {
+  CUSTOMER
+  EMPLOYEE
+}
+
+model CallParticipant {
+  id          String              @id @default(cuid())
+  callId      String
+  call        Call                @relation(fields: [callId], references: [id], onDelete: Cascade)
+  role        CallParticipantRole
+  phoneNumber String?
+  customerId  String?
+  employeeId  String?
+
+  @@index([callId])
+}
+
+// What each side said, in order. Employee lines cut off by the caller are marked interrupted.
+model CallTranscript {
+  id          String              @id @default(cuid())
+  callId      String
+  call        Call                @relation(fields: [callId], references: [id], onDelete: Cascade)
+  speaker     CallParticipantRole
+  text        String
+  offsetMs    Int // since the call was answered
+  interrupted Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+
+  @@index([callId, offsetMs])
 }

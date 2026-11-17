@@ -55,6 +55,59 @@ problem re-discovered.
 - **Refusal fallbacks are not enabled** on the Anthropic call: the parameter is a beta that some
   models reject, and `AI_MODEL` is free-form. A refusal is reported as an error instead.
 
+- **Customers belong to a workspace**, not to an employee: every employee in the workspace shares
+  what is known about a customer. The same email in two workspaces is two customers.
+- **Memory is key/value facts, not embedded message snippets.** The model proposes facts; a
+  deterministic validator (`parseExtraction`) decides what is stored. One value per key, so
+  "budget" is updated rather than accumulated. No vector search: a customer has tens of facts.
+- **Extraction runs after the reply, in the background**, so memory adds no latency to the reply.
+  The cost is a second model call per turn with a customer, on the same `AI_PROVIDER` and model.
+- **A conversation's customer is fixed when it starts.** Test chat sends `customer` only for new
+  conversations.
+- **Secrets are rejected by code, not only by prompt**: keys like password/otp/cvv and Luhn-valid
+  13 to 19 digit numbers never reach the database.
+
+- **Tools are granted to the employee, not to a version**, like knowledge: a grant takes effect on
+  the next message. The executor re-reads the grant on every call, so revoking stops the next call
+  even mid-turn.
+- **A grant covers the permissions the tool had when granted.** If a tool later declares a new
+  permission, existing grants are denied until an admin grants it again.
+- **Tool settings belong to the admin, arguments to the model.** The webhook URL and HTTP host list
+  are grant config; the model cannot name another destination.
+- **Retries are opt-in per tool and never after a timeout**, because the first try may have acted.
+  Calendar and email do not retry; GET requests and webhooks (idempotency key = execution id) do.
+- **Tool side effects survive a failed turn.** If the reply fails after a meeting was booked, the
+  meeting and its audit row stay, the conversation is not saved. The conversation id is generated
+  before the first tool call so audit rows and events can point at it.
+- **Calls in one model response run one at a time, in order**, since they may depend on each other.
+- **The calendar is built in and email is test mode**: no calendar or email provider has been chosen.
+  The booking tool converts local time with the employee's working-hours time zone.
+- **The current date and time are in the system prompt** (employee's time zone), so "tomorrow at
+  3 PM" can be resolved. This changes the prompt every minute; it already varied with knowledge.
+- **Anthropic tools use `eager_input_streaming`** (the SDK skill's default for streamed client
+  tools); the executor validates every input, which that requires.
+
+- **Deepgram for STT, ElevenLabs for TTS** (owner's choice), Twilio for telephony. All three are
+  called directly (fetch, `ws`), no SDKs. Twilio's audio, Deepgram's input and ElevenLabs' output are
+  all 8 kHz mu-law, so audio is never converted.
+- **TTS is one HTTP request per sentence**, started as soon as the sentence is complete, so the next
+  sentence is synthesized while the current one plays. ElevenLabs' WebSocket input buffers text and
+  its docs say it may not be faster when sentences are known.
+- **Calls run inside the API process** on the WebSocket the API already serves, not in
+  `workers/call-worker`; a separate worker would need its own public URL. Move them when calls need
+  to survive API restarts or scale apart.
+- **Media streams are authenticated with a signed `<Parameter>` token** checked on the `start`
+  message, because Twilio does not sign the WebSocket handshake and stream URLs cannot carry a query
+  string. Webhooks are checked with `X-Twilio-Signature` against `PUBLIC_URL` + path.
+- **Barge-in triggers on interim words, not on voice activity**, so coughs and line noise do not cut
+  the employee off.
+- **The greeting is a template** (`{name}`) on the phone number or the outbound call, because the
+  runtime only answers a caller's turn; the model speaks from the caller's first words on.
+- **Callers are identified as customers by their phone number**, so memory carries across calls and
+  across chat for the same identifier.
+- **API errors raised with `httpError` show their message even when 5xx** (502 from Twilio, 503 when
+  not configured). Before, every 5xx said "Internal server error", hiding the provider-config 503.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.
@@ -85,6 +138,15 @@ problem re-discovered.
   `CREATE EXTENSION IF NOT EXISTS vector` line; Prisma does not write it.
 - **Do not type `\uFEFF` in a regex through an editor that expands escapes**: it became a literal
   invisible character and failed lint. `parse.ts` compares the char code instead.
+- **Node's `BlockList` checks IPv4 addresses against IPv6 rules too** (as `::ffff:a.b.c.d`), so a
+  `::ffff:0:0/96` rule blocks every IPv4 address. It also maps the other way by itself; no rule needed.
+- **Bidirectional Twilio streams never echo our audio**: only the caller's track arrives, so there is
+  no echo to cancel, and `mark` echoes are the only signal that audio was heard.
+- **Test fakes that serve both the reply and memory extraction get their scripts consumed by the
+  background extraction call.** Fake providers answer requests whose system prompt starts with
+  `EXTRACTION_PROMPT` separately.
+- **The secret-file hook blocks any command that names `.env`**, including
+  `node --env-file=../../.env`. Run tests with `pnpm test` (`LIVE_AI=1 pnpm test` for live ones).
 - **A dev dependency named `cn`** is legitimate: shadcn publishes it and its registry requires it.
 
 ## Checking the signed-in UI without a login

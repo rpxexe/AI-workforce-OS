@@ -3,9 +3,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { prisma } from "@workforce/database";
+import { localTime, zonedTime } from "@workforce/tools";
 import {
   defaultEmployeeConfig,
   type ChatStreamEvent,
+  type CustomerDetail,
+  type CustomerSummary,
   type EmployeeDetail,
   type KnowledgeMatch,
   type KnowledgeSource,
@@ -105,5 +109,109 @@ test(
     t.diagnostic(`sources: ${JSON.stringify(reply.sources)}`);
     assert.match(reply.content, /499/);
     assert.equal(reply.sources[0]?.documentName, "pricing.pdf");
+  },
+);
+
+test(
+  "live: an employee remembers a customer in a later conversation",
+  { skip: process.env.LIVE_AI !== "1" },
+  async (t) => {
+    const org = newOrg();
+    const app = await buildApp({ authenticate: headerAuth, logger: false });
+    t.after(async () => {
+      await deleteOrgs(org);
+      await app.close();
+    });
+    const call = (method: "GET" | "POST", url: string, payload?: object) =>
+      app.inject({ method, url, headers: adminOf(org), payload });
+
+    const [workspace] = (await call("GET", "/workspaces")).json<Workspace[]>();
+    assert.ok(workspace);
+    const ws = `/workspaces/${workspace.id}`;
+    const employee = (
+      await call("POST", `${ws}/employees`, { ...defaultEmployeeConfig(), name: "Ava", role: "Sales assistant" })
+    ).json<EmployeeDetail>();
+    // Each message starts a new conversation with the same customer.
+    const say = async (message: string) => {
+      const res = await call("POST", `${ws}/employees/${employee.id}/messages`, { customer: "rahul@example.com", message });
+      const last = res.payload
+        .split("\n\n")
+        .filter(Boolean)
+        .map((frame) => JSON.parse(frame.replace(/^data: /, "")) as ChatStreamEvent)
+        .at(-1);
+      assert.ok(last?.type === "done", `the turn failed: ${JSON.stringify(last)}`);
+      return last.messages[1].content;
+    };
+
+    await say("My name is Rahul. I am interested in the enterprise plan and my budget is around 50,000.");
+    // Extraction runs after the reply; wait for it to land.
+    let customer: CustomerDetail | undefined;
+    for (let i = 0; i < 120 && !customer?.conversations[0]?.summary; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const [summary] = (await call("GET", `${ws}/customers`)).json<CustomerSummary[]>();
+      if (summary) customer = (await call("GET", `${ws}/customers/${summary.id}`)).json<CustomerDetail>();
+    }
+    const facts = Object.fromEntries((customer?.memories ?? []).map((m) => [m.key, m.value]));
+    t.diagnostic(`stored: ${JSON.stringify(facts)}`);
+    t.diagnostic(`summary: ${customer?.conversations[0]?.summary}`);
+    assert.match(facts.name ?? "", /rahul/i);
+    assert.ok(Object.values(facts).some((v) => /enterprise/i.test(v)), "interest not stored");
+    assert.ok(Object.values(facts).includes("50000"), "budget not stored as 50000");
+
+    const reply = await say("Hi, do you remember my name and budget?");
+    t.diagnostic(`reply in a new conversation: ${reply}`);
+    assert.match(reply, /Rahul/);
+    assert.match(reply, /50[,.]?000/);
+  },
+);
+
+test(
+  'live: "Book me a meeting tomorrow at 3 PM" books it through the calendar tool',
+  { skip: process.env.LIVE_AI !== "1" },
+  async (t) => {
+    const org = newOrg();
+    const app = await buildApp({ authenticate: headerAuth, logger: false });
+    t.after(async () => {
+      await deleteOrgs(org);
+      await app.close();
+    });
+    const call = (method: "GET" | "POST" | "PUT", url: string, payload?: object) =>
+      app.inject({ method, url, headers: adminOf(org), payload });
+
+    const timezone = "Asia/Kolkata";
+    const [workspace] = (await call("GET", "/workspaces")).json<Workspace[]>();
+    assert.ok(workspace);
+    const ws = `/workspaces/${workspace.id}`;
+    const employee = (
+      await call("POST", `${ws}/employees`, {
+        ...defaultEmployeeConfig(timezone),
+        name: "Ava",
+        role: "Sales assistant",
+        systemInstructions: "When a customer asks for a meeting at a specific time, book it right away with a sensible title.",
+      })
+    ).json<EmployeeDetail>();
+    const granted = await call("PUT", `${ws}/employees/${employee.id}/tools`, { tools: [{ name: "calendar_book_meeting" }] });
+    assert.equal(granted.statusCode, 200, granted.payload);
+
+    const res = await call("POST", `${ws}/employees/${employee.id}/messages`, { message: "Book me a meeting tomorrow at 3 PM." });
+    const last = res.payload
+      .split("\n\n")
+      .filter(Boolean)
+      .map((frame) => JSON.parse(frame.replace(/^data: /, "")) as ChatStreamEvent)
+      .at(-1);
+    assert.ok(last?.type === "done", `the turn failed: ${JSON.stringify(last)}`);
+    const reply = last.messages[1];
+    t.diagnostic(`model: ${reply.model}`);
+    t.diagnostic(`tools: ${JSON.stringify(reply.tools)}`);
+    t.diagnostic(`reply: ${reply.content}`);
+    const audit = await prisma.toolExecution.findMany({ where: { organizationId: org }, orderBy: { createdAt: "asc" } });
+    for (const row of audit) t.diagnostic(`audit: ${row.status} ${JSON.stringify(row.input)} -> ${JSON.stringify(row.output ?? row.error)}`);
+
+    const tomorrow = localTime(new Date(Date.now() + 24 * 3600_000), timezone).slice(0, 10);
+    const event = await prisma.calendarEvent.findFirst({ where: { organizationId: org } });
+    assert.ok(event, "no meeting was booked");
+    assert.equal(event.startsAt.toISOString(), zonedTime(tomorrow, "15:00", timezone)?.toISOString());
+    assert.ok(reply.tools.some((x) => x.tool === "calendar_book_meeting" && x.status === "SUCCEEDED"));
+    assert.match(reply.content, /3(:00)?\s*(PM|p\.m\.)|15:00/i);
   },
 );

@@ -13,7 +13,8 @@ export type Authenticate = (req: FastifyRequest) => {
 
 export const clerkAuthenticate: Authenticate = (req) => getAuth(req);
 
-export const httpError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+/** An error meant for the client: its message is shown whatever the status, 5xx included. */
+export const httpError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode, expose: true });
 
 export type Member = { userId: string; organizationId: string; organizationName: string; role: string | null };
 

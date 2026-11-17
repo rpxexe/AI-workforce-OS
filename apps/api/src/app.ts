@@ -8,17 +8,25 @@ import {
   type EmbeddingProvider,
 } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
+import { memoryService, type MemoryService } from "@workforce/memory";
+import { sttFromEnv } from "@workforce/stt";
+import { twilioFromEnv } from "@workforce/telephony";
+import { createToolExecutor, toolRegistry } from "@workforce/tools";
+import { ttsFromEnv } from "@workforce/tts";
 import type { ApiError, HealthResponse } from "@workforce/shared";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { clerkAuthenticate, type Authenticate } from "./auth.ts";
 import { conversationRoutes } from "./conversations.ts";
+import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
+import { toolRoutes } from "./tools.ts";
+import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
 /**
- * `authenticate`, `provider`, `embedder` and `aiTimeoutMs` exist so tests can supply identities and fake models;
+ * `authenticate`, `provider`, `embedder`, `memory`, `toolFetch` and `aiTimeoutMs` exist so tests can supply identities, fake models and a fake network;
  * the server always uses Clerk and the provider configured in .env.
  */
 export async function buildApp(
@@ -26,6 +34,11 @@ export async function buildApp(
     authenticate?: Authenticate;
     provider?: AIProvider;
     embedder?: EmbeddingProvider;
+    memory?: (provider: AIProvider, timeoutMs: number) => MemoryService;
+    /** The network tools reach; defaults to `safeFetch` (public https only). */
+    toolFetch?: typeof fetch;
+    /** Telephony, speech and limits; each defaults to what .env configures. */
+    voice?: Partial<VoiceConfig>;
     aiTimeoutMs?: number;
     logger?: boolean;
   } = {},
@@ -51,15 +64,16 @@ export async function buildApp(
   }
   const authenticate = options.authenticate ?? clerkAuthenticate;
 
-  app.setErrorHandler((err: Error & { statusCode?: number }, req, reply) => {
+  app.setErrorHandler((err: Error & { statusCode?: number; expose?: boolean }, req, reply) => {
     if (err instanceof ZodError) {
       const issues = err.issues.map((i) => ({ path: i.path.join("."), message: i.message }));
       return reply.code(400).send({ error: "Validation failed", issues } satisfies ApiError);
     }
     const status = err.statusCode ?? 500;
     if (status >= 500) req.log.error(err);
-    // Only errors raised deliberately (4xx) carry their message to the client.
-    return reply.code(status).send({ error: status >= 500 ? "Internal server error" : err.message } satisfies ApiError);
+    // Only errors raised deliberately (httpError, or a 4xx) carry their message to the client.
+    const shown = err.expose || status < 500 ? err.message : "Internal server error";
+    return reply.code(status).send({ error: shown } satisfies ApiError);
   });
 
   app.get("/health", async (_req, reply): Promise<HealthResponse> => {
@@ -81,17 +95,40 @@ export async function buildApp(
 
   workspaceRoutes(app, authenticate);
   employeeRoutes(app, authenticate);
+  customerRoutes(app, authenticate);
+  toolRoutes(app, authenticate);
 
   // Built on first use, so a missing AI key fails a chat request and not the whole server.
   let provider = options.provider;
   let embedder = options.embedder;
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
   knowledgeRoutes(app, authenticate, getEmbedder);
-  conversationRoutes(app, authenticate, {
+  const tools = createToolExecutor(toolRegistry, {
+    fetch: options.toolFetch,
+    onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
+  });
+  const ai = {
     provider: () => (provider ??= providerFromEnv()),
     embedder: getEmbedder,
+    memory: options.memory ?? memoryService,
+    tools,
     timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
-  });
+  };
+  conversationRoutes(app, authenticate, ai);
+  voiceRoutes(
+    app,
+    authenticate,
+    {
+      telephony: twilioFromEnv(),
+      stt: sttFromEnv(),
+      tts: ttsFromEnv(),
+      publicUrl: process.env.PUBLIC_URL || null,
+      secret: process.env.TWILIO_AUTH_TOKEN || null,
+      limits: { idleMs: 15_000, maxCallMs: 30 * 60_000 },
+      ...options.voice,
+    },
+    ai,
+  );
 
   app.addHook("onClose", () => prisma.$disconnect());
   return app;

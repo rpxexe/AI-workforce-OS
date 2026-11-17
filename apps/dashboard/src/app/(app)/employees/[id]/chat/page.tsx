@@ -15,6 +15,7 @@ import { EmployeeAvatar, formatDate } from "@/components/employees/meta";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useApi, useApiQuery, useApiStream } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -58,6 +59,12 @@ const sourcesOf = (m: ConversationMessage) => {
   return `Answered from ${names.join(", ")}`;
 };
 
+/** "Tools: calendar_book_meeting (succeeded)": what the employee did while writing the reply. */
+const toolsOf = (m: ConversationMessage) =>
+  m.tools.length === 0
+    ? undefined
+    : `Tools: ${m.tools.map((t) => `${t.tool} (${t.status.toLowerCase()})`).join(", ")}`;
+
 export default withWorkspace(function EmployeeChatPage({ workspace }) {
   const { id } = useParams<{ id: string }>();
   const isAdmin = useIsAdmin();
@@ -73,6 +80,8 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
   /** The turn in flight: what was sent, and the reply as it arrives. */
   const [pending, setPending] = useState<{ sent: string; reply: string }>();
   const [draft, setDraft] = useState("");
+  /** Who the tester is playing; the employee remembers them across conversations. */
+  const [customer, setCustomer] = useState("");
   const [error, setError] = useState<string>();
 
   const bottom = useRef<HTMLDivElement>(null);
@@ -100,6 +109,7 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
       const detail = await api<ConversationDetail>(`${path}/conversations/${conversation.id}`);
       setConversationId(detail.id);
       setMessages(detail.messages);
+      setCustomer(detail.customer ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open the conversation. Try again.");
     }
@@ -120,7 +130,12 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
     };
     try {
       let finished = false;
-      await stream<ChatStreamEvent>(`${path}/messages`, { conversationId, message: sent }, (e) => {
+      await stream<ChatStreamEvent>(`${path}/messages`, {
+        conversationId,
+        message: sent,
+        // A conversation keeps the customer it started with.
+        customer: conversationId ? undefined : customer.trim() || undefined,
+      }, (e) => {
         if (e.type === "text") setPending((p) => p && { ...p, reply: p.reply + e.text });
         else if (e.type === "error") fail(e.error);
         else {
@@ -214,7 +229,7 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
                 </p>
               )}
               {messages.map((m) => (
-                <Bubble key={m.id} role={m.role} meta={[sourcesOf(m), usageOf(m)]}>
+                <Bubble key={m.id} role={m.role} meta={[toolsOf(m), sourcesOf(m), usageOf(m)]}>
                   {m.content}
                 </Bubble>
               ))}
@@ -238,31 +253,53 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
             ) : !isAdmin ? (
               <p className="text-sm text-muted-foreground">Only organization admins can send test messages.</p>
             ) : (
-              <form onSubmit={send} className="flex items-end gap-2">
-                <label htmlFor="chat-message" className="sr-only">
-                  Message
-                </label>
-                <Textarea
-                  id="chat-message"
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Enter sends; Shift+Enter adds a line. Not while an IME is composing.
-                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      e.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  placeholder={`Message ${latest.name}`}
-                  maxLength={8000}
-                  rows={1}
-                  className="max-h-40 min-h-10"
-                />
-                <Button type="submit" disabled={busy || draft.trim() === ""}>
-                  <SendHorizontal aria-hidden />
-                  {busy ? "Sending" : "Send"}
-                </Button>
-              </form>
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="chat-customer" className="text-sm font-medium">
+                    Customer <span className="font-normal text-muted-foreground">(optional)</span>
+                  </label>
+                  <Input
+                    id="chat-customer"
+                    value={customer}
+                    onChange={(e) => setCustomer(e.target.value)}
+                    disabled={conversationId !== undefined || busy}
+                    placeholder="Email, phone or any id, e.g. rahul@example.com"
+                    maxLength={200}
+                    aria-describedby="chat-customer-help"
+                    className="sm:max-w-sm"
+                  />
+                  <p id="chat-customer-help" className="text-xs text-muted-foreground">
+                    {conversationId === undefined
+                      ? `Chat as this customer and ${latest.name} remembers them in later conversations. Leave empty for an anonymous chat.`
+                      : "Fixed for this conversation. Start a new conversation to change it."}
+                  </p>
+                </div>
+                <form onSubmit={send} className="flex items-end gap-2">
+                  <label htmlFor="chat-message" className="sr-only">
+                    Message
+                  </label>
+                  <Textarea
+                    id="chat-message"
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter sends; Shift+Enter adds a line. Not while an IME is composing.
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        e.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                    placeholder={`Message ${latest.name}`}
+                    maxLength={8000}
+                    rows={1}
+                    className="max-h-40 min-h-10"
+                  />
+                  <Button type="submit" disabled={busy || draft.trim() === ""}>
+                    <SendHorizontal aria-hidden />
+                    {busy ? "Sending" : "Send"}
+                  </Button>
+                </form>
+              </>
             )}
           </CardContent>
         </Card>

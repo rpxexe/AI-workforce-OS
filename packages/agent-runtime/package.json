@@ -8,6 +8,8 @@
     "@workforce/ai-provider": "workspace:*",
     "@workforce/database": "workspace:*",
     "@workforce/shared": "workspace:*",
-    "@workforce/knowledge": "workspace:*"
+    "@workforce/knowledge": "workspace:*",
+    "@workforce/memory": "workspace:*",
+    "@workforce/tools": "workspace:*"
   }
 }
