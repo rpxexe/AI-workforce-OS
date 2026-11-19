@@ -7,6 +7,7 @@ import {
   type AIProvider,
   type EmbeddingProvider,
 } from "@workforce/ai-provider";
+import { testEmailSender, whatsappProvidersFromEnv, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
@@ -18,6 +19,9 @@ import { createWorkflowEngine, StepError } from "@workforce/workflows";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { clerkAuthenticate, type Authenticate } from "./auth.ts";
+import { channelRoutes } from "./channels/routes.ts";
+import { channelService } from "./channels/service.ts";
+import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
@@ -41,6 +45,10 @@ export async function buildApp(
     toolFetch?: typeof fetch;
     /** Telephony, speech and limits; each defaults to what .env configures. */
     voice?: Partial<VoiceConfig>;
+    /** The address providers reach the API at, for webhook signatures; defaults to PUBLIC_URL. */
+    publicUrl?: string;
+    /** WhatsApp providers; defaults to every one .env has credentials for. */
+    whatsapp?: WhatsAppProvider[];
     aiTimeoutMs?: number;
     /** The workflow runner: how often it looks for due runs, and how often a Voice Call step checks its call. Tests that give this get a runner. */
     workflows?: { intervalMs?: number; callPollMs?: number };
@@ -49,9 +57,11 @@ export async function buildApp(
 ) {
   const app = Fastify({ logger: options.logger ?? true });
 
+  const dashboardOrigin = process.env.DASHBOARD_ORIGIN ?? "http://localhost:3000";
   await app.register(cors, {
-    origin: process.env.DASHBOARD_ORIGIN ?? "http://localhost:3000",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    // The web chat widget runs on customers' websites; its routes check the origin against the channel's own list.
+    delegator: (req, done) =>
+      done(null, { origin: req.url.startsWith("/chat/") ? true : dashboardOrigin, methods: ["GET", "POST", "PUT", "PATCH", "DELETE"] }),
   });
   await app.register(websocket);
 
@@ -119,20 +129,22 @@ export async function buildApp(
     timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
   };
   conversationRoutes(app, authenticate, ai);
-  const voice = voiceRoutes(
-    app,
-    authenticate,
-    {
-      telephony: [twilioFromEnv(), telnyxFromEnv()].filter((p): p is TelephonyProvider => p !== null),
-      stt: sttFromEnv(),
-      tts: ttsFromEnv(),
-      publicUrl: process.env.PUBLIC_URL || null,
-      secret: process.env.TWILIO_AUTH_TOKEN || process.env.TELNYX_API_KEY || null,
-      limits: { idleMs: 15_000, maxCallMs: 30 * 60_000 },
-      ...options.voice,
-    },
-    ai,
-  );
+  const voiceConfig: VoiceConfig = {
+    telephony: [twilioFromEnv(), telnyxFromEnv()].filter((p): p is TelephonyProvider => p !== null),
+    stt: sttFromEnv(),
+    tts: ttsFromEnv(),
+    publicUrl: process.env.PUBLIC_URL || null,
+    secret: process.env.TWILIO_AUTH_TOKEN || process.env.TELNYX_API_KEY || null,
+    limits: { idleMs: 15_000, maxCallMs: 30 * 60_000 },
+    ...options.voice,
+  };
+  const voice = voiceRoutes(app, authenticate, voiceConfig, ai);
+
+  // Messaging channels: WhatsApp, web chat and email, all answered through the same runtime.
+  const whatsapp = options.whatsapp ?? whatsappProvidersFromEnv();
+  const channels = channelService({ ai, stt: voiceConfig.stt, whatsapp, email: testEmailSender, log: app.log });
+  channelRoutes(app, authenticate, { service: channels, whatsapp, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
+  webChatRoutes(app, channels);
 
   const engine = createWorkflowEngine({
     ...ai,

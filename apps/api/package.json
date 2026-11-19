@@ -15,6 +15,7 @@
     "@fastify/websocket": "^11.3.7",
     "@workforce/agent-runtime": "workspace:*",
     "@workforce/ai-provider": "workspace:*",
+    "@workforce/channels": "workspace:*",
     "@workforce/database": "workspace:*",
     "@workforce/knowledge": "workspace:*",
     "@workforce/memory": "workspace:*",

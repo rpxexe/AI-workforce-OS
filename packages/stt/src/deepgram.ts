@@ -121,5 +121,18 @@ export function deepgramProvider({
         },
       };
     },
+
+    async transcribe(audio, { mimeType, language, signal }) {
+      const query = new URLSearchParams({ model, language, smart_format: "true", punctuate: "true" });
+      const res = await fetch(`${url.replace(/^ws/, "http")}?${query}`, {
+        method: "POST",
+        headers: { authorization: `Token ${apiKey}`, "content-type": mimeType },
+        body: new Uint8Array(audio),
+        signal: signal ?? AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) throw new Error(`Deepgram answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const data = (await res.json()) as { results?: { channels?: { alternatives?: { transcript?: string }[] }[] } };
+      return data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? "";
+    },
   };
 }

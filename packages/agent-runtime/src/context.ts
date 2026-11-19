@@ -2,6 +2,27 @@ import type { ChatMessage } from "@workforce/ai-provider";
 import type { Recalled } from "@workforce/memory";
 import { LANGUAGES, type EmployeeConfig, type KnowledgeMatch } from "@workforce/shared";
 
+const CHANNEL_NAMES: Record<string, string> = {
+  voice: "phone call",
+  whatsapp: "WhatsApp",
+  web_chat: "website chat",
+  email: "email",
+  test: "test chat",
+  workflow: "automated workflow",
+};
+
+/** How replies must look on each channel, beyond what the employee's own instructions say. */
+const CHANNEL_STYLE: Record<string, string> = {
+  voice:
+    "You are speaking with the customer on a phone call, and everything you write is read aloud. Answer in one to three short sentences. No lists, headings, markdown, emojis or links. Write numbers, times and prices the way a person says them. If you did not understand, ask the caller to repeat. Before an action that takes a moment, say a few words first, such as: One moment while I book that.",
+  whatsapp:
+    "You are chatting with the customer on WhatsApp. Keep replies short and conversational, like a text message: a few sentences, split into short paragraphs. WhatsApp does not render markdown: no headings, tables or [text](link) links; write links out in full, and use *bold* sparingly. You can read text, transcribed voice notes and documents the customer sends; you cannot see images or videos, so ask the customer to describe them.",
+  web_chat:
+    "You are chatting with a visitor in the chat widget on the company's website. Keep replies concise and easy to scan, in short paragraphs. Write plain text: markdown is shown as typed, so no asterisks, headings or [text](link) links; write links out in full.",
+  email:
+    "You are answering the customer by email. Write a complete, polite email body: a greeting, the answer, and a sign-off with your name. Plain text only, no markdown. Do not write a subject line.",
+};
+
 // shortcut: older turns are dropped, not summarized; summarize within a conversation when long ones matter
 const MAX_HISTORY_MESSAGES = 40;
 
@@ -13,7 +34,7 @@ function memorySection({ facts, previous }: Recalled) {
     "What you remember about this customer from earlier conversations. Use it naturally, do not recite it, and if they correct something, trust the correction.",
     facts.length > 0 && facts.map((f) => `- ${f.key}: ${f.value}`).join("\n"),
     previous.length > 0 &&
-      `Earlier conversations:\n${previous.map((p) => `- ${p.at.toISOString().slice(0, 10)}: ${p.summary}`).join("\n")}`,
+      `Earlier conversations, on any channel:\n${previous.map((p) => `- ${p.at.toISOString().slice(0, 10)}, ${CHANNEL_NAMES[p.channel] ?? p.channel}: ${p.summary}`).join("\n")}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -52,8 +73,7 @@ export function systemPrompt(
       ? "You can act for the customer with the tools you have. Use a tool only when the customer asks for that action or clearly agrees to it. Say an action is done only if the tool result says it succeeded; if it failed, tell the customer plainly. Do not mention tool names or internal ids."
       : "You have no tools: you cannot book, send or change anything. Say so if asked.",
     `It is now ${weekday}, ${clock} (${timezone}).`,
-    channel === "voice" &&
-      "You are speaking with the customer on a phone call, and everything you write is read aloud. Answer in one to three short sentences. No lists, headings, markdown, emojis or links. Write numbers, times and prices the way a person says them. If you did not understand, ask the caller to repeat. Before an action that takes a moment, say a few words first, such as: One moment while I book that.",
+    CHANNEL_STYLE[channel],
   ];
   return sections.filter(Boolean).join("\n\n");
 }

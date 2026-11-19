@@ -14,6 +14,7 @@ import { toolRegistry, type ToolExecutor } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
 import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
+import { recordMessage } from "../channels/service.ts";
 import { configOf } from "../employees.ts";
 import { Speaker } from "./speaker.ts";
 
@@ -157,6 +158,24 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       .catch((err: unknown) => log.error({ err, callId }, "Saving a transcript line failed"));
   };
 
+  // Each exchange also goes to the channel message log, like messages on every other channel.
+  const callerNumber = call.direction === "INBOUND" ? call.from : call.to;
+  const ourNumber = call.direction === "INBOUND" ? call.to : call.from;
+  const logTurn = (heard: string, reply: string | null, error: string | null, latencyMs: number) => {
+    const base = { ...scope, employeeId: call.employeeId, channel: "voice", customerId: call.customerId, conversationId };
+    void recordMessage(log, {
+      ...base,
+      direction: "INBOUND",
+      status: error ? "FAILED" : "ANSWERED",
+      error,
+      from: callerNumber,
+      to: ourNumber,
+      text: heard,
+    });
+    if (reply !== null)
+      void recordMessage(log, { ...base, direction: "OUTBOUND", status: "SENT", from: ourNumber, to: callerNumber, text: reply, attempts: 1, latencyMs });
+  };
+
   let conversationId = call.conversationId ?? undefined;
   /** The reply being written, if any. `saved` once runTurn stored the exchange. */
   let turn: { abort: AbortController; userText: string; saved: boolean } | undefined;
@@ -219,6 +238,8 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     turn = current;
     const speaker = newSpeaker();
     const at = offset();
+    const turnStarted = Date.now();
+    let replyText = "";
     for await (const result of runTurn({
       provider,
       ...scope,
@@ -237,15 +258,19 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       timeoutMs: deps.timeoutMs,
       signal: current.abort.signal,
     })) {
-      if (result.type === "text") speaker.push(result.text);
-      else if (result.type === "done") {
+      if (result.type === "text") {
+        speaker.push(result.text);
+        replyText += result.text;
+      } else if (result.type === "done") {
         current.saved = true;
         if (!conversationId) {
           conversationId = result.conversation.id;
           await prisma.call.update({ where: { id: call.id }, data: { conversationId } });
         }
+        logTurn(userText, replyText, null, Date.now() - turnStarted);
       } else {
         log.error({ err: result.cause, kind: result.kind, callId }, "Voice turn failed");
+        logTurn(userText, null, result.message, Date.now() - turnStarted);
         speaker.push(` ${LINES.apology}`);
       }
     }

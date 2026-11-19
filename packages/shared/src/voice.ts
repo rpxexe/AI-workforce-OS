@@ -1,7 +1,7 @@
 // Phone numbers and calls.
 import { z } from "zod";
 
-const e164 = z.string().trim().regex(/^\+[1-9]\d{6,14}$/, "Use international format, e.g. +14155550100");
+export const e164 = z.string().trim().regex(/^\+[1-9]\d{6,14}$/, "Use international format, e.g. +14155550100");
 /** "{name}" is replaced with the employee's name when the call starts. */
 const greeting = z.string().trim().min(1).max(300);
 

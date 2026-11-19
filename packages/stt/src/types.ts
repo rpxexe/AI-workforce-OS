@@ -16,4 +16,6 @@ export interface STTProvider {
   readonly name: string;
   /** `language` is an ISO 639-1 code such as "en". */
   open(options: { language: string; onEvent: (event: STTEvent) => void }): STTStream;
+  /** Transcribes a recorded file (a WhatsApp voice note, for example) in any format the provider reads. */
+  transcribe?(audio: Buffer, options: { mimeType: string; language: string; signal?: AbortSignal }): Promise<string>;
 }

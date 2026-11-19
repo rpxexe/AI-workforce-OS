@@ -25,6 +25,8 @@ model Organization {
   calls          Call[]
   workflows      Workflow[]
   workflowExecutions WorkflowExecution[]
+  employeeChannels   EmployeeChannel[]
+  channelMessages    ChannelMessage[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -70,6 +72,7 @@ model AiEmployee {
   tools            ToolPermission[]
   phoneNumbers     PhoneNumber[]
   calls            Call[]
+  channels         EmployeeChannel[]
   createdBy String // Clerk user id
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
@@ -104,8 +107,8 @@ model AiEmployeeVersion {
   @@map("AIEmployeeVersion")
 }
 
-// One thread between a person and an AI employee. Every channel (test chat today; web chat,
-// WhatsApp and voice later) stores its turns here through the agent runtime.
+// One thread between a person and an AI employee. Every channel (test, voice, web_chat, whatsapp,
+// email, workflow) stores its turns here through the agent runtime.
 model Conversation {
   id             String       @id @default(cuid())
   organizationId String
@@ -587,4 +590,79 @@ model WorkflowStepExecution {
   finishedAt  DateTime?
 
   @@index([executionId, startedAt])
+}
+
+// A messaging channel an AI employee answers on (web_chat, whatsapp, email). Voice uses PhoneNumber.
+// Not versioned, like tools and knowledge: changes apply to the next message.
+model EmployeeChannel {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  employeeId     String
+  employee       AiEmployee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  kind           String // web_chat | whatsapp | email
+  // What routes a message here: the widget key, Meta's phone number id, or the email address.
+  address        String
+  enabled        Boolean      @default(true)
+  // channelConfigSchemas[kind] (packages/shared/src/channel.ts)
+  config         Json
+  // Tools usable on this channel; null = every tool the employee is granted.
+  allowedTools   Json?
+  // Web chat: signs visitor identities and session tokens. Email: part of the inbound webhook URL.
+  secret         String
+  createdBy      String // Clerk user id
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([kind, address])
+  @@unique([employeeId, kind])
+  @@index([organizationId, workspaceId])
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ChannelMessageStatus {
+  RECEIVED // inbound, being answered
+  ANSWERED
+  REJECTED // inbound, deliberately not answered: error says why
+  PENDING // outbound, being sent
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// Audit log of every message in or out of a channel, with its delivery state. The conversation
+// (ConversationMessage) holds what the employee saw; this holds what crossed the wire.
+model ChannelMessage {
+  id                String               @id @default(cuid())
+  organizationId    String
+  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId       String
+  employeeId        String
+  channelId         String? // the EmployeeChannel; null for voice
+  channel           String // web_chat | whatsapp | email | voice
+  direction         MessageDirection
+  status            ChannelMessageStatus
+  customerId        String?
+  conversationId    String?
+  // The provider's id (WhatsApp wamid, email Message-ID): deduplicates retried webhooks, matches delivery receipts.
+  providerMessageId String?
+  from              String?
+  to                String?
+  text              String
+  media             Json? // ChannelMedia[]
+  error             String?
+  attempts          Int                  @default(0)
+  latencyMs         Int?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  @@unique([channel, direction, providerMessageId])
+  @@index([organizationId, workspaceId, createdAt])
+  @@index([conversationId])
 }

@@ -146,6 +146,39 @@ problem re-discovered.
   calendar tool) or an extraction step.
 - **React Flow 12.12.1, pinned exactly**: 13.0 was a day old when Phase 8 was built.
 
+- **WhatsApp behind a provider interface: Meta, Twilio and Telnyx** (owner's choice, 2026-11-19), like telephony:
+  any of them configured at once, each number on one, so a future provider settings page can switch them. Each
+  provider turns its own webhook into the common model; the pipeline never sees provider formats. Called with `fetch`,
+  no SDKs. One account per provider from `.env` for now. Meta channels route by Phone number ID, Twilio and Telnyx by
+  the number itself; settings saved before providers existed count as Meta.
+- **One customer key across channels, not an identity table.** Phones are stored as `+digits` everywhere (callers,
+  WhatsApp's `wa_id` with "+" added, website identities normalized), emails in lower case. Phone and email of the same
+  person stay two customers; merging needs an identity table and a merge rule (later).
+- **Web chat visitors are matched to known customers only when the website signs the identity** (HMAC with the
+  channel secret). An unsigned phone number from a browser could be anyone's, and would expose what the employee
+  remembers about that person. Anonymous visitors get their own customer and memory.
+- **Chat conversations continue for 24 hours of silence** (WhatsApp's own service window), then a new conversation
+  starts, with the old one's summary recalled. Email continues by thread (In-Reply-To our message id) however long.
+- **Webhooks answer 200 first and work after**, deduplicated by the provider's message id in the audit table (unique
+  index), because Meta retries slow or failed webhooks. A customer's messages are answered one at a time, in order.
+- **The inbound row settles after the reply is handed to the channel**, so RECEIVED means "still working" and a
+  crash leaves visible RECEIVED rows rather than a false ANSWERED.
+- **Sends are retried only on explicit rate-limit answers**, never on timeouts or network errors, since Meta and
+  Twilio have no idempotency key and a retry after an unknown outcome could send a message twice. Telnyx takes an
+  `Idempotency-Key`, so its sends also retry after network errors and 5xx.
+- **Files the model cannot see are described to it** ("the customer sent an image with the caption ..."), voice notes are
+  transcribed with the same Deepgram account, documents use the knowledge parser. Only metadata is stored.
+- **Channel tool limits are enforced twice**: not offered to the model, and refused by the executor (`allowedTools` on
+  the scope), so a model naming an unoffered tool cannot run it. The same check now makes "only tools offered this
+  turn are run" true everywhere.
+- **The widget is plain JavaScript served by the API** (`/widget.js`), in a shadow root, no build step, no
+  framework, so any website can embed it and the host page's CSS cannot break it. Replies are plain text
+  (`textContent`): no markdown rendering, so no HTML injection.
+- **Email is a channel in test mode**: the employee writes the reply and it is logged, not sent, as with the email tool,
+  until an email provider is chosen. Inbound uses our own small JSON shape behind a secret URL.
+- **Voice turns go to the channel message log too**, so one log answers "what did customers say and what did they get
+  back" on every channel; the timed call transcript stays as it was.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.
@@ -190,6 +223,15 @@ problem re-discovered.
 - **Next.js keeps the list page mounted while a detail page shows**, so a headless-browser check waiting for
   `tbody tr` can match the hidden list. Wait for something only the visible page has.
 - **A dev dependency named `cn`** is legitimate: shadcn publishes it and its registry requires it.
+
+- **A webhook test that checks the inbound row raced the reply**: the row said ANSWERED before the outbound row
+  existed. Fixed by settling the inbound row last (see Decisions).
+- **`satisfies` an interface rejects an object's extra methods.** WhatsApp providers are typed as returning the
+  `WhatsAppProvider` interface, which has every method they expose.
+- **Long heredocs through the Bash tool can fail to parse** ("unexpected EOF while looking for matching `'`"). Write
+  edit scripts with the file tool and run them.
+- **The secret-file hook also blocks running one test file** with `node --env-file=../../.env --test <file>`; run
+  the whole suite with `pnpm test`.
 
 ## Checking the signed-in UI without a login
 
