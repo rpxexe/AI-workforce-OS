@@ -192,6 +192,33 @@ problem re-discovered.
 - **Voice turns go to the channel message log too**, so one log answers "what did customers say and what did they get
   back" on every channel; the timed call transcript stays as it was.
 
+- **Handoff state lives on the conversation and is enforced in `runTurn`** (Phase 10), not in each channel, so no
+  channel can forget it. While people have a conversation the customer's message is still saved (`held`), so the
+  agent and, later, the AI see it.
+- **Human agents are organization members, not only admins.** Answering customers is the agent's job; admins still own
+  configuration. Change in `inbox.ts` if agents should be admins only.
+- **Deterministic triggers run in code, judgement calls go to the model.** An explicit request for a person, a
+  high-value customer and configured conditions are checked before the model is called (no cost, testable); low
+  confidence and policy risk are reported by the model through a `transfer_to_human` tool that is not in the tool
+  registry (it acts on the conversation, not the world). High-value and condition triggers fire once per conversation,
+  so an agent handing it back to the AI is respected.
+- **The handoff message is saved as the employee's reply**, so every channel delivers it the way it delivers any reply.
+- **An agent's message is delivered before it is stored**, so the conversation never shows a message the customer did
+  not get; a failed send is a 502 and the agent can retry.
+- **Copilot suggestions are their own table**, never conversation messages; the agent's message records which suggestion
+  it came from and whether it was edited.
+- **Polling, not push**, for the inbox (5 s), an open conversation and test chat (4 s) and the widget while people have
+  the chat (4 s): the `/ws` socket is still an echo, and polling needs no new infrastructure.
+- **Live call transfer replaces the call's markup with `<Dial>`** through the providers' update-call API, to one
+  transfer number per employee (`escalation.transferNumber`: a person or a team line), not per agent: agents have no
+  phone numbers in our data, and a team line lets the phone system ring whoever is free. If no one answers, the call
+  ends and the conversation stays in the inbox queue for a callback. The result comes from `<Dial action>` (answered
+  and talk time, no answer, busy, cancelled), and every attempt has a `CallTransfer` row created before the provider
+  is asked. A failed transfer does not return the caller to the AI: the conversation is with people, and the AI must
+  stay silent until someone hands it back.
+- **Escalation settings added later are filled with defaults when read** (`configOf`), so old versions stay immutable
+  and still load in the form.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.
@@ -245,6 +272,9 @@ problem re-discovered.
   edit scripts with the file tool and run them.
 - **The secret-file hook also blocks running one test file** with `node --env-file=../../.env --test <file>`; run
   the whole suite with `pnpm test`.
+
+- **Heredocs through the Bash tool still fail** when the text has quotes or backticks (hit again in Phase 10). Write
+  the script with the file tool, then run it.
 
 ## Checking the signed-in UI without a login
 

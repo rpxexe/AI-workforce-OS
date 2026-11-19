@@ -10,9 +10,10 @@ import {
   type PlaceCall,
   type CallSummary,
   type PhoneNumberInfo,
+  toTransferRecord,
 } from "@workforce/shared";
 import type { STTProvider } from "@workforce/stt";
-import { ENDED_STATUSES, TelephonyError, type TelephonyProvider } from "@workforce/telephony";
+import { dialResultOf, ENDED_STATUSES, HANG_UP, TelephonyError, type TelephonyProvider } from "@workforce/telephony";
 import type { ToolExecutor } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -76,6 +77,9 @@ const toSummary = (c: Prisma.CallGetPayload<object>): CallSummary => ({
   endedAt: c.endedAt?.toISOString() ?? null,
   durationSec: c.durationSec,
 });
+
+/** What the caller hears when no one picked up the transferred call. */
+const TRANSFER_UNANSWERED = "Sorry, no one from our team could take your call right now. Someone will call you back shortly. Goodbye.";
 
 export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, voice: VoiceConfig, ai: Ai) {
   const { member, admin, inWorkspace } = guards(authenticate);
@@ -202,6 +206,34 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       }
       return reply.code(204).send();
     });
+
+    // How a live transfer to a person ended (<Dial action>). Answered: the conversation is with people and the
+    // call ends when they hang up. Not answered: the caller hears that someone will call back, and the
+    // conversation stays in the inbox queue.
+    hooks.post("/voice/:provider/transfer", async (req, reply) => {
+      const { telephony, params } = verified(req);
+      reply.type("text/xml");
+      const { transferId } = z.object({ transferId: z.string().min(1) }).parse(req.query);
+      const { status, talkSec } = dialResultOf(params);
+      const now = new Date();
+      const attempt = await prisma.callTransfer.findUnique({ where: { id: transferId } });
+      // A retried webhook changes nothing.
+      if (attempt?.status === "INITIATED") {
+        await prisma.callTransfer.update({ where: { id: attempt.id }, data: { status, talkSec, endedAt: now } });
+        req.log.info({ transferId, status, talkSec }, "Call transfer ended");
+        if (status === "COMPLETED" && attempt.conversationId) {
+          const answeredAt = new Date(now.getTime() - (talkSec ?? 0) * 1000);
+          const open = { conversationId: attempt.conversationId, endedAt: null };
+          await prisma.$transaction([
+            prisma.conversation.updateMany({ where: { id: attempt.conversationId, status: "WAITING_FOR_HUMAN" }, data: { status: "HUMAN_ACTIVE" } }),
+            prisma.handoff.updateMany({ where: { ...open, acceptedAt: null }, data: { acceptedAt: answeredAt } }),
+            prisma.handoff.updateMany({ where: { ...open, firstResponseAt: null }, data: { firstResponseAt: answeredAt } }),
+          ]);
+        }
+      }
+      if ((attempt?.status === "INITIATED" ? status : attempt?.status) === "COMPLETED") return HANG_UP;
+      return telephony.sayAndHangUp(TRANSFER_UNANSWERED);
+    });
   });
 
   app.get("/voice/:provider/stream", { websocket: true }, (socket, req) => {
@@ -214,7 +246,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       socket.close();
       return;
     }
-    runCallSession(socket, { ...ai, telephony, stt: v.stt, tts: v.tts, secret: v.secret, limits: voice.limits, log: req.log });
+    runCallSession(socket, { ...ai, telephony, stt: v.stt, tts: v.tts, publicUrl: v.publicUrl, secret: v.secret, limits: voice.limits, log: req.log });
   });
 
   // ---- Dashboard ----
@@ -394,7 +426,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     const scope = await inWorkspace(member(req), workspaceId);
     const call = await prisma.call.findFirst({
       where: { id: callId, ...within(scope) },
-      include: { participants: true, transcript: { orderBy: { offsetMs: "asc" } } },
+      include: { participants: true, transcript: { orderBy: { offsetMs: "asc" } }, transfers: { orderBy: { createdAt: "asc" } } },
     });
     if (!call) throw httpError(404, "Call not found");
     return {
@@ -402,6 +434,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       employeeVersion: call.employeeVersion,
       participants: call.participants.map((p) => ({ role: p.role, phoneNumber: p.phoneNumber, customerId: p.customerId, employeeId: p.employeeId })),
       transcript: call.transcript.map((t) => ({ speaker: t.speaker, text: t.text, offsetMs: t.offsetMs, interrupted: t.interrupted })),
+      transfers: call.transfers.map(toTransferRecord),
     };
   });
 

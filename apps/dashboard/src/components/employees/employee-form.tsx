@@ -1,6 +1,6 @@
 "use client";
 
-import { AVATARS, LANGUAGES, employeeConfigSchema, type EmployeeConfig } from "@workforce/shared";
+import { AVATARS, HANDOFF_RULE_OPERATORS, LANGUAGES, employeeConfigSchema, type EmployeeConfig, type HandoffRule } from "@workforce/shared";
 import { Plus, X } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
@@ -403,14 +403,131 @@ export function EmployeeForm({
               />
             </Field>
 
-            <div className="flex items-center gap-3">
-              <Switch
-                id="onCustomerRequest"
-                checked={form.escalation.onCustomerRequest}
-                onCheckedChange={(onCustomerRequest) => setEscalation({ onCustomerRequest })}
-              />
-              <Label htmlFor="onCustomerRequest">Hand off when the customer asks for a person</Label>
+            <fieldset className="flex flex-col gap-3">
+              <legend className="mb-1 text-sm font-medium">Hand off when</legend>
+              {(
+                [
+                  ["onCustomerRequest", "The customer asks for a person"],
+                  ["onLowConfidence", "The employee is not confident it can answer correctly"],
+                  ["onPolicyRisk", "An answer could break policy (legal or medical advice, refunds, threats, abuse)"],
+                  ["onToolFailure", "A tool the employee uses fails"],
+                ] as const
+              ).map(([key, label]) => (
+                <div key={key} className="flex items-center gap-3">
+                  <Switch id={key} checked={form.escalation[key]} onCheckedChange={(on) => setEscalation({ [key]: on })} />
+                  <Label htmlFor={key}>{label}</Label>
+                </div>
+              ))}
+            </fieldset>
+
+            <div className="flex flex-wrap gap-4">
+              <Field
+                id="highValueKey"
+                label="High-value customers"
+                hint="A remembered number, e.g. budget. Customers at or above the minimum go to a person. Empty turns this off."
+                error={issues["escalation.highValueKey"]}
+                className="sm:max-w-xs"
+              >
+                <Input
+                  id="highValueKey"
+                  value={form.escalation.highValueKey}
+                  onChange={(e) => setEscalation({ highValueKey: e.target.value.trim().toLowerCase() })}
+                  placeholder="budget"
+                  maxLength={50}
+                  {...invalid("highValueKey", issues["escalation.highValueKey"])}
+                />
+              </Field>
+              <Field id="highValueMinimum" label="Minimum" error={issues["escalation.highValueMinimum"]} className="w-36">
+                <Input
+                  id="highValueMinimum"
+                  type="number"
+                  min={0}
+                  value={form.escalation.highValueMinimum}
+                  onChange={(e) => setEscalation({ highValueMinimum: Number(e.target.value) || 0 })}
+                  disabled={form.escalation.highValueKey === ""}
+                  {...invalid("highValueMinimum", issues["escalation.highValueMinimum"])}
+                />
+              </Field>
             </div>
+
+            <fieldset className="flex flex-col gap-2">
+              <legend className="text-sm font-medium">Conditions</legend>
+              <p className="text-xs text-muted-foreground">
+                Hand off when the customer&apos;s message, or something remembered about them, matches. Each condition hands a conversation off once.
+              </p>
+              {form.escalation.rules.map((rule, i) => {
+                const setRule = (patch: Partial<HandoffRule>) =>
+                  setEscalation({ rules: form.escalation.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) });
+                const error = issues[`escalation.rules.${i}.key`] ?? issues[`escalation.rules.${i}.value`];
+                return (
+                  <div key={i} className="flex flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select value={rule.field} onValueChange={(field) => setRule({ field: field as HandoffRule["field"] })}>
+                        <SelectTrigger aria-label={`Condition ${i + 1} checks`} className="w-36">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="message">Message</SelectItem>
+                          <SelectItem value="memory">Memory</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {rule.field === "memory" && (
+                        <Input
+                          aria-label={`Condition ${i + 1} memory key`}
+                          value={rule.key}
+                          onChange={(e) => setRule({ key: e.target.value.trim().toLowerCase() })}
+                          placeholder="plan"
+                          maxLength={50}
+                          className="w-32"
+                        />
+                      )}
+                      <Select value={rule.operator} onValueChange={(operator) => setRule({ operator: operator as HandoffRule["operator"] })}>
+                        <SelectTrigger aria-label={`Condition ${i + 1} operator`} className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {HANDOFF_RULE_OPERATORS.map((op) => (
+                            <SelectItem key={op} value={op}>
+                              {op.replace("_", " ")}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        aria-label={`Condition ${i + 1} value`}
+                        value={rule.value}
+                        onChange={(e) => setRule({ value: e.target.value })}
+                        placeholder={rule.field === "message" ? "refund" : "enterprise"}
+                        maxLength={200}
+                        className="min-w-32 flex-1"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Remove condition ${i + 1}`}
+                        onClick={() => setEscalation({ rules: form.escalation.rules.filter((_, j) => j !== i) })}
+                      >
+                        <X aria-hidden />
+                      </Button>
+                    </div>
+                    {error && <p className="text-sm text-destructive">{error}</p>}
+                  </div>
+                );
+              })}
+              {form.escalation.rules.length < 10 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-fit"
+                  onClick={() => setEscalation({ rules: [...form.escalation.rules, { field: "message", key: "", operator: "contains", value: "" }] })}
+                >
+                  <Plus aria-hidden />
+                  Add condition
+                </Button>
+              )}
+            </fieldset>
 
             <Field
               id="afterFailedAttempts"
@@ -428,6 +545,24 @@ export function EmployeeForm({
                 onChange={(e) => setEscalation({ afterFailedAttempts: Number(e.target.value) || 0 })}
                 className="w-24"
                 {...invalid("afterFailedAttempts", issues["escalation.afterFailedAttempts"])}
+              />
+            </Field>
+
+            <Field
+              id="transferNumber"
+              label="Transfer phone calls to"
+              hint="A person's or team's number, in international format. Handed-off calls are put through to it; leave empty to end the call and call back."
+              error={issues["escalation.transferNumber"]}
+              className="sm:max-w-sm"
+            >
+              <Input
+                id="transferNumber"
+                type="tel"
+                value={form.escalation.transferNumber}
+                onChange={(e) => setEscalation({ transferNumber: e.target.value.trim() })}
+                placeholder="+14155550100"
+                autoComplete="off"
+                {...invalid("transferNumber", issues["escalation.transferNumber"])}
               />
             </Field>
 

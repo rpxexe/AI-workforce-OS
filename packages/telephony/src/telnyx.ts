@@ -100,6 +100,13 @@ export function telnyxProvider({ apiKey, accountSid, applicationId }: Credential
       await request("POST", `${await calls()}/${encodeURIComponent(providerCallId)}`, new URLSearchParams({ Status: "completed" }));
     },
 
+    async transferCall(providerCallId, to, actionUrl) {
+      // TeXML's update-call endpoint, like Twilio's, takes replacement markup (as Texml). The action URL
+      // carries the webhook token, like every URL we give Telnyx.
+      const texml = `<Response><Dial action="${xml(withToken(actionUrl))}" method="POST" timeout="25">${xml(to)}</Dial></Response>`;
+      await request("POST", `${await calls()}/${encodeURIComponent(providerCallId)}`, new URLSearchParams({ Texml: texml }));
+    },
+
     async configureNumber(number, { voiceUrl, statusCallbackUrl }) {
       // The filter takes digits only.
       const list = await request<{ data?: { id: string }[] }>("GET", `/v2/phone_numbers?filter[phone_number]=${number.replace(/\D/g, "")}`);

@@ -16,6 +16,20 @@ export type MediaEvent =
 
 export class TelephonyError extends Error {}
 
+export type DialResult = "COMPLETED" | "NO_ANSWER" | "BUSY" | "CANCELED" | "FAILED";
+
+/** Reads a <Dial action> webhook (Twilio's fields; TeXML uses the same): how the dial ended and how long they talked. */
+export function dialResultOf(params: Record<string, string>): { status: DialResult; talkSec: number | null } {
+  const raw = (params.DialCallStatus ?? "").toLowerCase();
+  const status: DialResult =
+    raw === "completed" || raw === "answered" ? "COMPLETED" : raw === "busy" ? "BUSY" : raw === "no-answer" ? "NO_ANSWER" : raw === "canceled" ? "CANCELED" : "FAILED";
+  const talk = Number(params.DialCallDuration);
+  return { status, talkSec: Number.isFinite(talk) && params.DialCallDuration !== undefined ? talk : null };
+}
+
+/** Markup that ends the call (after a transfer the person and the caller talked). */
+export const HANG_UP = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+
 export type Webhook = {
   /** The exact public URL the provider called. */
   url: string;
@@ -44,6 +58,12 @@ export interface TelephonyProvider {
     timeLimitSec: number;
   }): Promise<{ providerCallId: string | null }>; // null: learned from the first status callback
   endCall(providerCallId: string): Promise<void>;
+  /**
+   * Hands a live call to a person: the call's markup is replaced by a <Dial> to `to`, which ends our media
+   * stream. When the dial ends (talked, no answer, busy...) the provider posts its result to `actionUrl`
+   * (read it with `dialResultOf`) and plays the markup that webhook answers.
+   */
+  transferCall(providerCallId: string, to: string, actionUrl: string): Promise<void>;
   /** Points a number the account owns at our webhooks. Fails if the account does not own it. */
   configureNumber(number: string, urls: { voiceUrl: string; statusCallbackUrl: string }): Promise<{ providerNumberId: string }>;
   parseMedia(message: string): MediaEvent;

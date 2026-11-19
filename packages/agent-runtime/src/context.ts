@@ -91,5 +91,14 @@ export function buildContext(
   const recent = history.slice(-MAX_HISTORY_MESSAGES);
   // Providers expect the conversation to open with the user.
   while (recent[0]?.role === "assistant") recent.shift();
-  return { system: systemPrompt(employee, knowledge, memory, hasTools, channel), messages: [...recent, { role: "user" as const, content: userMessage }] };
+  // Messages the customer sent while a person had the conversation, or an agent's message after the
+  // AI's, follow one another: join them so the roles alternate.
+  const messages: ChatMessage[] = [];
+  for (const m of [...recent, { role: "user" as const, content: userMessage }]) {
+    const last = messages.at(-1);
+    if (last && last.role === m.role && (m.role === "user" || m.role === "assistant") && !("toolCalls" in last && last.toolCalls))
+      messages[messages.length - 1] = { ...last, content: `${(last as { content: string }).content}\n\n${m.content}` } as ChatMessage;
+    else messages.push(m);
+  }
+  return { system: systemPrompt(employee, knowledge, memory, hasTools, channel), messages };
 }

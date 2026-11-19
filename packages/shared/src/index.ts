@@ -19,3 +19,4 @@ export * from "./tool.ts";
 export * from "./voice.ts";
 export * from "./workflow.ts";
 export * from "./channel.ts";
+export * from "./inbox.ts";

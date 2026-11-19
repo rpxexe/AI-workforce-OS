@@ -129,6 +129,7 @@ export type EmployeeChannels = {
 
 export type ChannelMessageStatus =
   | "RECEIVED" // inbound, being answered
+  | "HELD" // inbound, kept for the human handling the conversation: the AI did not answer
   | "ANSWERED"
   | "REJECTED" // inbound, deliberately not answered (see error)
   | "PENDING" // outbound, being sent

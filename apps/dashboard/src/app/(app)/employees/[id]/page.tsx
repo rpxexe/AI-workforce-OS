@@ -269,12 +269,19 @@ export default withWorkspace(function EmployeePage({ workspace }) {
             <Fact label="Escalation">
               {latest.escalation.enabled ? (
                 <span className="flex flex-col">
-                  <span>Hands off to {latest.escalation.contactEmail}</span>
+                  <span>Hands off to the inbox, notifying {latest.escalation.contactEmail}</span>
                   <span className="text-muted-foreground">
                     {[
                       latest.escalation.onCustomerRequest && "when the customer asks",
+                      latest.escalation.onLowConfidence && "on low confidence",
+                      latest.escalation.onPolicyRisk && "on policy risk",
+                      latest.escalation.onToolFailure && "when a tool fails",
                       latest.escalation.afterFailedAttempts > 0 &&
                         `after ${latest.escalation.afterFailedAttempts} failed attempts`,
+                      latest.escalation.highValueKey && `for ${latest.escalation.highValueKey} of ${latest.escalation.highValueMinimum} or more`,
+                      latest.escalation.transferNumber && `calls transferred to ${latest.escalation.transferNumber}`,
+                      latest.escalation.rules.length > 0 &&
+                        `on ${latest.escalation.rules.length} condition${latest.escalation.rules.length > 1 ? "s" : ""}`,
                     ]
                       .filter(Boolean)
                       .join(", ") || "No triggers set"}

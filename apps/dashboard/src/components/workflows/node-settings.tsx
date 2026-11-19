@@ -28,7 +28,7 @@ export const NEW_NODE_CONFIG: Record<NodeType, Record<string, unknown>> = {
   voice_call: { employeeId: "", to: "", greeting: "" },
   message: { channel: "email", to: "", subject: "", body: "" },
   crm_update: { customer: "", fields: [] },
-  human_handoff: { note: "" },
+  human_handoff: { note: "", conversationId: "" },
   end: {},
 };
 
@@ -277,7 +277,15 @@ export function NodeSettings({
         </Field>
       </>
     ),
-    human_handoff: text("note", "What should the person do?", { rows: 3, hint: "The run waits until someone presses Continue on it." }),
+    human_handoff: (
+      <>
+        {text("note", "What should the person do?", { rows: 3, hint: "The run waits until someone presses Continue on it." })}
+        {text("conversationId", "Conversation to hand over (optional)", {
+          placeholder: "{{steps.ai_employee.conversationId}}",
+          hint: "Puts that conversation in the inbox queue; the AI stops answering it until an agent hands it back.",
+        })}
+      </>
+    ),
   };
 
   return (

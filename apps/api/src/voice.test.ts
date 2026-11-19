@@ -87,6 +87,8 @@ const tts: TTSProvider = {
 const real = twilioProvider({ accountSid: "ACtest", authToken: TOKEN });
 let placed: Parameters<TelephonyProvider["placeCall"]>[0][] = [];
 let ended: string[] = [];
+let transfers: { sid: string; to: string; actionUrl: string }[] = [];
+let transferFails = false;
 let placeFails = false;
 const telephony: TelephonyProvider = {
   ...real,
@@ -97,6 +99,10 @@ const telephony: TelephonyProvider = {
   },
   async endCall(sid) {
     ended.push(sid);
+  },
+  async transferCall(sid, to, actionUrl) {
+    if (transferFails) throw new TelephonyError("Twilio answered 400: cannot dial that number");
+    transfers.push({ sid, to, actionUrl });
   },
   async configureNumber(number) {
     if (number === TELNYX_NUMBER || number === UNOWNED) throw new TelephonyError(`${number} is not a number in this Twilio account`);
@@ -231,6 +237,8 @@ beforeEach(() => {
   placed = [];
   telnyxPlaced = [];
   ended = [];
+  transfers = [];
+  transferFails = false;
   placeFails = false;
 });
 after(async () => {
@@ -531,4 +539,88 @@ test("Telnyx: a number is matched to the account that owns it, webhooks need the
   await telnyxHook(`/voice/telnyx/status?callId=${out.id}`, { CallSid: "v3:out-1", CallStatus: "no-answer", CallDuration: "0" });
   row = await prisma.call.findUniqueOrThrow({ where: { id: out.id } });
   assert.deepEqual([row.status, row.durationSec], ["NO_ANSWER", 0]);
+});
+
+test("live transfer: a handoff on a call puts the caller through to a person, with status, fallback and an audit row", async () => {
+  const LINE = "+15550006001";
+  const TEAM = "+15550006002";
+  const config = defaultEmployeeConfig(TZ);
+  const created = await call("POST", `/workspaces/${ws}/employees`, {
+    ...config,
+    name: "Tia",
+    role: "Support",
+    escalation: { ...config.escalation, enabled: true, contactEmail: "team@example.test", transferNumber: TEAM },
+  });
+  assert.equal(created.statusCode, 201, created.payload);
+  const tia = created.json<EmployeeDetail>().id;
+  assert.equal((await call("POST", `/workspaces/${ws}/employees/${tia}/publish`, { version: 1 })).statusCode, 200);
+  assert.equal((await call("POST", `/workspaces/${ws}/phone-numbers`, { number: LINE, employeeId: tia })).statusCode, 201);
+  const dialed = (status: string, duration?: string) => {
+    const action = new URL(transfers.at(-1)?.actionUrl ?? "");
+    assert.equal(action.origin, PUBLIC);
+    return webhook(action.pathname + action.search, { CallSid: transfers.at(-1)?.sid ?? "", DialCallStatus: status, ...(duration && { DialCallDuration: duration }) });
+  };
+
+  // 1. Initiation: the handoff line, "please hold", then the provider is asked to dial. The call is not ended.
+  const phone = await phoneCall("CA-T1", await inbound("CA-T1", CALLER, LINE));
+  await greeted(phone);
+  caller?.({ type: "turn", text: "Can I speak to a person please?" });
+  await until(() => (phone.playAll(), transfers.length === 1), "the transfer");
+  assert.deepEqual([transfers[0]?.sid, transfers[0]?.to], ["CA-T1", TEAM]);
+  assert.match(phone.heard(), /member of our team.*I'm connecting you now\. Please hold\./s);
+  assert.equal(requests.length, 0);
+  assert.ok(!ended.includes("CA-T1"));
+  const attempt = await prisma.callTransfer.findFirstOrThrow({ where: { callId: phone.callId } });
+  assert.deepEqual([attempt.status, attempt.to], ["INITIATED", TEAM]);
+  assert.ok(attempt.conversationId && attempt.handoffId);
+
+  // The provider ends our stream; the call goes on with the person, so it is not marked ended.
+  phone.hangUp();
+  await sleep(100);
+  const during = await prisma.call.findUniqueOrThrow({ where: { id: phone.callId } });
+  assert.notEqual(during.status, "COMPLETED");
+  assert.equal(during.endedAt, null);
+
+  // 2. Success: the person talked with the caller for 4 minutes. The conversation is with people; the call then ends.
+  assert.equal((await dialed("completed", "240")).statusCode, 200);
+  const answered = await dialed("completed", "240"); // a retried webhook changes nothing
+  assert.match(answered.payload, /<Response><Hangup\/><\/Response>/);
+  const success = await prisma.callTransfer.findUniqueOrThrow({ where: { id: attempt.id } });
+  assert.deepEqual([success.status, success.talkSec], ["COMPLETED", 240]);
+  const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: attempt.conversationId ?? "" }, include: { handoffs: true } });
+  assert.equal(conversation.status, "HUMAN_ACTIVE");
+  assert.ok(conversation.handoffs[0]?.acceptedAt && conversation.handoffs[0].firstResponseAt);
+  assert.equal((await webhook("/voice/twilio/status", { CallSid: "CA-T1", CallStatus: "completed", CallDuration: "300" })).statusCode, 204);
+  assert.deepEqual(
+    (await call("GET", `/workspaces/${ws}/calls/${phone.callId}`, undefined, memberOf(orgA))).json<CallDetail>().transfers.map((t) => [t.status, t.to, t.talkSec]),
+    [["COMPLETED", TEAM, 240]],
+  );
+  const inboxView = (await call("GET", `/workspaces/${ws}/conversations/${conversation.id}`, undefined, memberOf(orgA))).json<{ transfers: { status: string }[] }>();
+  assert.deepEqual(inboxView.transfers.map((t) => t.status), ["COMPLETED"]);
+
+  // 3. No one answers: the caller hears that someone will call back; the conversation waits in the queue.
+  const second = await phoneCall("CA-T2", await inbound("CA-T2", CALLER, LINE));
+  await greeted(second);
+  caller?.({ type: "turn", text: "Put me through to a human" });
+  await until(() => (second.playAll(), transfers.length === 2), "the second transfer");
+  second.hangUp();
+  const fallback = await dialed("no-answer");
+  assert.match(fallback.payload, /<Say>Sorry, no one from our team could take your call right now\. Someone will call you back shortly\. Goodbye\.<\/Say><Hangup\/>/);
+  const missed = await prisma.callTransfer.findFirstOrThrow({ where: { call: { providerCallId: "CA-T2" } } });
+  assert.equal(missed.status, "NO_ANSWER");
+  assert.equal((await prisma.conversation.findUniqueOrThrow({ where: { id: missed.conversationId ?? "" } })).status, "WAITING_FOR_HUMAN");
+  // Forged results are refused.
+  const forged = new URL(transfers[1]?.actionUrl ?? "");
+  assert.equal((await webhook(forged.pathname + forged.search, { DialCallStatus: "completed" }, "forged")).statusCode, 403);
+
+  // 4. The provider refuses to dial: the attempt is recorded as failed, the caller hears a callback line, and the call ends.
+  transferFails = true;
+  const third = await phoneCall("CA-T3", await inbound("CA-T3", CALLER, LINE));
+  await greeted(third);
+  caller?.({ type: "turn", text: "I want to talk to an agent" });
+  await until(() => (third.playAll(), ended.includes("CA-T3")), "the hang-up");
+  assert.match(third.heard(), /couldn't connect you\. A member of our team will call you back shortly/);
+  const refused = await prisma.callTransfer.findFirstOrThrow({ where: { callId: third.callId } });
+  assert.deepEqual([refused.status, refused.error], ["FAILED", "Twilio answered 400: cannot dial that number"]);
+  third.hangUp();
 });
