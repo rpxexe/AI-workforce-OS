@@ -2,6 +2,7 @@
 
 import {
   HANDOFF_TRIGGER_LABELS,
+  type CallTransferRecord,
   type ConversationAction,
   type CopilotSuggestion,
   type InboxConversation,
@@ -10,7 +11,7 @@ import { ArrowLeft, Bot, CornerDownLeft, Hand, RotateCcw, SendHorizontal, Sparkl
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { CHANNEL_LABELS, ConversationStatusBadge, timeAgo } from "@/components/inbox/meta";
+import { CHANNEL_LABELS, ConversationStatusBadge, formatDuration, timeAgo } from "@/components/inbox/meta";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,6 +26,15 @@ import { withWorkspace } from "@/lib/workspace";
 const REFRESH_MS = 4000;
 const UNASSIGNED = "__queue";
 
+const TRANSFER_RESULTS: Record<CallTransferRecord["status"], (t: CallTransferRecord) => string> = {
+  INITIATED: () => "",
+  COMPLETED: (t) => `Call transfer answered; talked ${formatDuration(t.talkSec === null ? null : t.talkSec * 1000)}`,
+  NO_ANSWER: (t) => `No one answered ${t.to}: call the customer back`,
+  BUSY: (t) => `${t.to} was busy: call the customer back`,
+  CANCELED: () => "The caller hung up before the transfer was answered: call them back",
+  FAILED: (t) => `The call could not be transferred (${t.error ?? "unknown error"}): call the customer back`,
+};
+
 type Entry =
   | { kind: "message"; at: string; id: string; role: "USER" | "ASSISTANT" | "AGENT"; content: string; authorId: string | null }
   | { kind: "event"; at: string; id: string; text: string };
@@ -37,6 +47,10 @@ function timeline(c: InboxConversation, nameOf: (id: string | null) => string): 
     if (h.acceptedAt) entries.push({ kind: "event", at: h.acceptedAt, id: `${h.id}:accept`, text: `${nameOf(h.assignedTo)} took over` });
     if (h.endedAt)
       entries.push({ kind: "event", at: h.endedAt, id: `${h.id}:end`, text: h.outcome === "resolved" ? "Resolved" : "Handed back to the AI" });
+  }
+  for (const t of c.transfers) {
+    entries.push({ kind: "event", at: t.createdAt, id: `${t.id}:start`, text: `Transferring the call to ${t.to}` });
+    if (t.endedAt) entries.push({ kind: "event", at: t.endedAt, id: `${t.id}:end`, text: TRANSFER_RESULTS[t.status](t) });
   }
   return entries.sort((a, b) => a.at.localeCompare(b.at));
 }

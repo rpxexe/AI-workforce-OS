@@ -549,6 +549,24 @@ export function EmployeeForm({
             </Field>
 
             <Field
+              id="transferNumber"
+              label="Transfer phone calls to"
+              hint="A person's or team's number, in international format. Handed-off calls are put through to it; leave empty to end the call and call back."
+              error={issues["escalation.transferNumber"]}
+              className="sm:max-w-sm"
+            >
+              <Input
+                id="transferNumber"
+                type="tel"
+                value={form.escalation.transferNumber}
+                onChange={(e) => setEscalation({ transferNumber: e.target.value.trim() })}
+                placeholder="+14155550100"
+                autoComplete="off"
+                {...invalid("transferNumber", issues["escalation.transferNumber"])}
+              />
+            </Field>
+
+            <Field
               id="handoffMessage"
               label="Handoff message"
               hint="What the customer is told while they wait for a person."

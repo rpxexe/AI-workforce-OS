@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { ConversationMessage } from "./conversation.ts";
 import type { MessageSource } from "./knowledge.ts";
+import type { CallTransferRecord } from "./voice.ts";
 
 export const CONVERSATION_STATUSES = ["AI_ACTIVE", "WAITING_FOR_HUMAN", "HUMAN_ACTIVE", "RESOLVED", "REOPENED"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
@@ -119,6 +120,8 @@ export type InboxConversation = Omit<InboxItem, "lastMessage" | "handoff"> & {
   handoffs: HandoffRecord[];
   /** Newest first. */
   suggestions: CopilotSuggestion[];
+  /** Phone calls only: live transfers to a person. */
+  transfers: CallTransferRecord[];
   /** Whether an agent's message can reach the customer on this channel (not on voice or workflow conversations). */
   canReply: boolean;
 };

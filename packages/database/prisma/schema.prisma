@@ -465,6 +465,7 @@ model Call {
 
   participants CallParticipant[]
   transcript   CallTranscript[]
+  transfers    CallTransfer[]
 
   @@index([organizationId, workspaceId, createdAt])
 }
@@ -744,3 +745,31 @@ model CopilotSuggestion {
   @@index([conversationId, createdAt])
 }
 
+enum CallTransferStatus {
+  INITIATED // the provider was asked to dial the person
+  COMPLETED // the person answered and talked with the caller
+  NO_ANSWER
+  BUSY
+  CANCELED // the caller hung up while it rang
+  FAILED // the provider refused or could not dial
+}
+
+// Audit log of live call transfers to a person after a handoff, one row per attempt.
+model CallTransfer {
+  id             String             @id @default(cuid())
+  organizationId String
+  workspaceId    String
+  callId         String
+  call           Call               @relation(fields: [callId], references: [id], onDelete: Cascade)
+  conversationId String?
+  handoffId      String?
+  to             String // E.164: the employee's escalation.transferNumber
+  status         CallTransferStatus @default(INITIATED)
+  error          String?
+  talkSec        Int? // how long the person and the caller talked
+  createdAt      DateTime           @default(now())
+  endedAt        DateTime?
+
+  @@index([callId])
+  @@index([conversationId])
+}

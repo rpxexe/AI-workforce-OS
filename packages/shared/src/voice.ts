@@ -41,7 +41,31 @@ export type CallSummary = {
   durationSec: number | null;
 };
 
+/** One live transfer of a call to a person after a handoff (the audit log). */
+export type CallTransferRecord = {
+  id: string;
+  callId: string;
+  to: string;
+  status: "INITIATED" | "COMPLETED" | "NO_ANSWER" | "BUSY" | "CANCELED" | "FAILED";
+  error: string | null;
+  talkSec: number | null;
+  createdAt: string;
+  endedAt: string | null;
+};
+
+export const toTransferRecord = (t: { id: string; callId: string; to: string; status: CallTransferRecord["status"]; error: string | null; talkSec: number | null; createdAt: Date; endedAt: Date | null }): CallTransferRecord => ({
+  id: t.id,
+  callId: t.callId,
+  to: t.to,
+  status: t.status,
+  error: t.error,
+  talkSec: t.talkSec,
+  createdAt: t.createdAt.toISOString(),
+  endedAt: t.endedAt?.toISOString() ?? null,
+});
+
 export type CallDetail = CallSummary & {
+  transfers: CallTransferRecord[];
   employeeVersion: number;
   participants: { role: "CUSTOMER" | "EMPLOYEE"; phoneNumber: string | null; customerId: string | null; employeeId: string | null }[];
   transcript: { speaker: "CUSTOMER" | "EMPLOYEE"; text: string; offsetMs: number; interrupted: boolean }[];

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { e164 } from "./voice.ts";
 
 export const EMPLOYEE_STATUSES = ["DRAFT", "ACTIVE", "PAUSED", "ARCHIVED"] as const;
 export type EmployeeStatus = (typeof EMPLOYEE_STATUSES)[number];
@@ -84,6 +85,8 @@ export const escalationSchema = z
     highValueMinimum: z.number().min(0),
     rules: z.array(handoffRuleSchema).max(10),
     handoffMessage: z.string().trim().max(500),
+    /** Phone calls handed off are transferred to this number (a person or a team line); empty: the employee hangs up and someone calls back. */
+    transferNumber: z.union([z.literal(""), e164]),
   })
   .refine((e) => !e.enabled || e.contactEmail !== "", {
     path: ["contactEmail"],
@@ -134,6 +137,7 @@ export const defaultEscalation = (): EmployeeConfig["escalation"] => ({
   highValueMinimum: 0,
   rules: [],
   handoffMessage: "",
+  transferNumber: "",
 });
 
 export const publishSchema = z.object({ version: z.number().int().positive() });

@@ -98,6 +98,12 @@ export function twilioProvider({ accountSid, authToken }: Credentials, api = "ht
       await request(`/Calls/${encodeURIComponent(providerCallId)}.json`, new URLSearchParams({ Status: "completed" }));
     },
 
+    async transferCall(providerCallId, to, actionUrl) {
+      // Modifying a live call with new TwiML; for an inbound call the person sees the caller's number.
+      const twiml = `<Response><Dial action="${xml(actionUrl)}" method="POST" timeout="25">${xml(to)}</Dial></Response>`;
+      await request(`/Calls/${encodeURIComponent(providerCallId)}.json`, new URLSearchParams({ Twiml: twiml }));
+    },
+
     async configureNumber(number, { voiceUrl, statusCallbackUrl }) {
       const list = await request<{ incoming_phone_numbers?: { sid: string }[] }>(
         `/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(number)}`,

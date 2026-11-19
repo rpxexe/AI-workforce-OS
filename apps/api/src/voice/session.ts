@@ -35,6 +35,8 @@ export type SessionDeps = {
   tools: ToolExecutor;
   timeoutMs: number;
   onHandoff?: (notice: HandoffNotice) => void;
+  /** Where the provider reaches us (no trailing slash): the transfer result webhook is built from it. */
+  publicUrl: string;
   secret: string;
   limits: VoiceLimits;
   log: FastifyBaseLogger;
@@ -48,6 +50,8 @@ const LINES = {
   timeLimit: "We've reached the time limit for this call. Goodbye.",
   cannotHear: "Sorry, I'm having trouble hearing you right now. Please call again later.",
   withPerson: "A member of our team is handling this now and will get back to you shortly. Goodbye.",
+  connecting: "I'm connecting you now. Please hold.",
+  transferFailed: "Sorry, I couldn't connect you. A member of our team will call you back shortly. Goodbye.",
 };
 
 /** The stream token proves a media stream belongs to a call we set up (Twilio does not sign the socket). */
@@ -205,6 +209,35 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     telephony.endCall(providerCallId).catch((err: unknown) => log.error({ err, callId }, "Hanging up failed"));
   };
 
+  // Live transfer: after a handoff the provider dials the employee's transfer number, which ends this stream.
+  // How the dial ends comes to POST /voice/<provider>/transfer (routes.ts), which also plays the fallback.
+  const transferTo = employee.escalation.transferNumber;
+  let transferred = false;
+  /** Hands the caller to a person; without a transfer number, or if the provider refuses, hangs up for a callback. */
+  const handOver = async () => {
+    if (!transferTo || !providerCallId) return hangUp();
+    const handoff = conversationId ? await prisma.handoff.findFirst({ where: { conversationId, endedAt: null }, select: { id: true } }) : null;
+    // The audit row exists before the provider is asked, so every attempt is on record.
+    const attempt = await prisma.callTransfer.create({
+      data: { ...scope, callId: call.id, conversationId, handoffId: handoff?.id, to: transferTo },
+      select: { id: true },
+    });
+    log.info({ callId, transferId: attempt.id }, "Transferring the call");
+    // Set first: the provider may close our stream before its API call returns, and finish() must not end the call.
+    transferred = true;
+    try {
+      await telephony.transferCall(providerCallId, transferTo, `${deps.publicUrl}/voice/${telephony.name}/transfer?transferId=${attempt.id}`);
+    } catch (err) {
+      transferred = false;
+      log.error({ err, callId, transferId: attempt.id }, "Transferring the call failed");
+      await prisma.callTransfer
+        .update({ where: { id: attempt.id }, data: { status: "FAILED", error: err instanceof Error ? err.message : String(err), endedAt: new Date() } })
+        .catch((e: unknown) => log.error({ err: e, callId }, "Recording a failed transfer failed"));
+      await speakLine(LINES.transferFailed);
+      hangUp();
+    }
+  };
+
   const waitForCaller = () => {
     clearTimeout(idleTimer);
     if (finished) return;
@@ -243,7 +276,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     const at = offset();
     const turnStarted = Date.now();
     let replyText = "";
-    // Calls are not transferred: after a handoff the employee says so and hangs up, and a person follows up.
+    // After a handoff the call is transferred to a person, or the employee hangs up and a person calls back.
     let handedOff = false;
     for await (const result of runTurn({
       provider,
@@ -271,10 +304,13 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
         current.saved = true;
         handedOff = true;
         logTurn(userText, null, null, Date.now() - turnStarted);
-        speaker.push(LINES.withPerson);
+        speaker.push(transferTo ? LINES.connecting : LINES.withPerson);
       } else if (result.type === "done") {
         current.saved = true;
-        if (result.handoff) handedOff = true;
+        if (result.handoff) {
+          handedOff = true;
+          if (transferTo) speaker.push(` ${LINES.connecting}`);
+        }
         if (!conversationId) {
           conversationId = result.conversation.id;
           await prisma.call.update({ where: { id: call.id }, data: { conversationId } });
@@ -290,7 +326,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     speaker.end();
     await speaker.played;
     line("EMPLOYEE", speaker.spoken, at, speaker.interrupted);
-    if (handedOff && !speaker.interrupted) return hangUp();
+    if (handedOff && !speaker.interrupted) return handOver();
     if (!turn && !speaking()) waitForCaller();
   };
 
@@ -334,6 +370,8 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       clearTimeout(maxTimer);
       stt?.close();
       interrupt();
+      // A transferred call goes on with the person; the provider's status callback records its end.
+      if (transferred) return;
       try {
         const now = await prisma.call.findUnique({ where: { id: call.id }, select: { status: true, endedAt: true, durationSec: true } });
         if (!now) return;

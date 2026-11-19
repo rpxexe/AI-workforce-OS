@@ -22,6 +22,7 @@ import {
   type InboxItem,
   type InboxResponse,
   type InboxView,
+  toTransferRecord,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -105,6 +106,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
   };
 
   const detail = async (id: string): Promise<InboxConversation> => {
+    const transfers = prisma.callTransfer.findMany({ where: { conversationId: id }, orderBy: { createdAt: "asc" } });
     const c = await prisma.conversation.findUniqueOrThrow({
       where: { id },
       include: {
@@ -120,6 +122,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
       messages: c.messages.reverse().map(toMessage),
       handoffs: c.handoffs.map(toHandoff),
       suggestions: c.suggestions.map(toSuggestion),
+      transfers: (await transfers).map(toTransferRecord),
       canReply: REPLY_CHANNELS.includes(c.channel) && (c.channel === "test" || c.customer !== null),
     };
   };

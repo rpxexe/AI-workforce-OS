@@ -279,6 +279,7 @@ export default withWorkspace(function EmployeePage({ workspace }) {
                       latest.escalation.afterFailedAttempts > 0 &&
                         `after ${latest.escalation.afterFailedAttempts} failed attempts`,
                       latest.escalation.highValueKey && `for ${latest.escalation.highValueKey} of ${latest.escalation.highValueMinimum} or more`,
+                      latest.escalation.transferNumber && `calls transferred to ${latest.escalation.transferNumber}`,
                       latest.escalation.rules.length > 0 &&
                         `on ${latest.escalation.rules.length} condition${latest.escalation.rules.length > 1 ? "s" : ""}`,
                     ]
