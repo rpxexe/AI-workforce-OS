@@ -1,6 +1,6 @@
 import type { EmbeddingProvider } from "@workforce/ai-provider";
 import { Prisma, prisma } from "@workforce/database";
-import { processDocument, retrieve } from "@workforce/knowledge";
+import { retrieve } from "@workforce/knowledge";
 import {
   MAX_UPLOAD_BYTES,
   employeeKnowledgeSchema,
@@ -55,7 +55,13 @@ const toSource = (s: Prisma.KnowledgeSourceGetPayload<{ include: typeof sourceIn
  * Knowledge sources, their documents, search, and which sources an employee answers from.
  * Every query is scoped to the caller's organization and workspace; anything else is a 404.
  */
-export function knowledgeRoutes(app: FastifyInstance, authenticate: Authenticate, getEmbedder: () => EmbeddingProvider) {
+export function knowledgeRoutes(
+  app: FastifyInstance,
+  authenticate: Authenticate,
+  getEmbedder: () => EmbeddingProvider,
+  /** Queues processing of a document (the knowledge/document.uploaded job). */
+  queueProcessing: (documentId: string) => Promise<void>,
+) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const base = "/workspaces/:workspaceId/knowledge";
 
@@ -69,10 +75,11 @@ export function knowledgeRoutes(app: FastifyInstance, authenticate: Authenticate
     }
   };
 
-  // shortcut: documents are processed inside the API process, so a restart strands one in
-  // PENDING or PROCESSING until someone reprocesses it; move to a worker with a queue when one exists
-  const startProcessing = (req: FastifyRequest, documentId: string) =>
-    void processDocument(documentId, embedder(req.log), (err) => req.log.error({ err, documentId }, "Document processing failed"));
+  // Checked here so a misconfigured embedder is a 503 now, not a FAILED document later. Processing is a background job.
+  const startProcessing = (req: FastifyRequest, documentId: string) => {
+    embedder(req.log);
+    queueProcessing(documentId).catch((err: unknown) => req.log.error({ err, documentId }, "Queueing document processing failed"));
+  };
 
   app.get(`${base}/sources`, async (req): Promise<KnowledgeSource[]> => {
     const scope = await inWorkspace(member(req), workspaceParams.parse(req.params).workspaceId);

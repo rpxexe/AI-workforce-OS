@@ -233,7 +233,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
     if (!assistant || !user) throw new Error("Saved turn is missing its messages");
     // Not awaited: the reply is done, and a failed extraction loses only what this turn taught.
     customer?.memory
-      .remember({ organizationId, workspaceId, customerId: customer.id, conversationId: saved.id, customerMessage: userMessage, reply })
+      .remember({ organizationId, workspaceId, customerId: customer.id, conversationId: saved.id, customerMessage: userMessage, reply, replyId: assistant.id })
       .catch(customer.onError);
     yield {
       type: "done",

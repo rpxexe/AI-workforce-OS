@@ -44,8 +44,8 @@ problem re-discovered.
   reprocessed; object storage (R2) is not wired. Uploads are capped at 10 MB.
 - **Uploads are a raw request body**, not multipart: one file per request, name in the query
   string. It avoids a multipart dependency.
-- **Documents are processed inside the API process**, started after the upload responds. There is
-  no queue yet; a restart mid-processing leaves a document PENDING until someone reprocesses it.
+- **Documents are processed by a background job** (`knowledge/document.uploaded`). With Inngest, a restart no longer
+  strands a document; without it (in process) a restart mid-processing still leaves it PENDING until reprocessed.
 - **No vector index.** Search is exact, filtered by tenant first. A hand-written HNSW index would
   be dropped by the next `prisma migrate dev`, because Prisma does not know about it.
 - **Retrieved passages go in the system prompt**, and the question is sent as the user wrote it,
@@ -137,10 +137,17 @@ problem re-discovered.
 - **Deleting a workflow is a soft delete**: run history and audit rows stay, and restore is possible. It refuses
   while runs are in progress unless the caller says to stop them (the dashboard asks, naming the runs and the
   webhook). Restored workflows come back paused.
-- **Moving off the Postgres queue** (Inngest or a separate worker) changes only the scheduler: `claim` + `startRunner`.
-  Run state, step rows, idempotency keys and `advance` stay. An Inngest function per run would claim and `advance`
-  that run (export `advance` then; today only the runner calls it), `step.sleepUntil(runAt)` for waits, and `step.waitForEvent` for Human Handoff; a worker
-  just calls `engine.startRunner()` outside the API.
+- **Inngest schedules workflow runs; Postgres still owns them** (2026-11-19). Run state, step rows, idempotency keys,
+  `claim` and `advance` stay; Inngest replaces only the polling loop: an event per due run, `step.sleepUntil` for
+  waits, a one-minute sweep for anything no event announced. Claiming in Postgres means a duplicate, late or retried
+  event cannot run a step twice. Human Handoff does not use `waitForEvent`: Continue sends a new run event, which keeps
+  one code path for both backends. A job runs at most 300 advance/sleep rounds; longer runs go back to the sweep.
+- **Background jobs: Inngest, with an in-process fallback** (owner asked for Inngest). One set of handlers
+  (`jobs.ts`); Inngest when its keys or `INNGEST_DEV` are set, else in process as before, so tests and keyless
+  development need nothing running. Inngest brings retries, per-customer ordering across API processes (concurrency
+  key, replacing the in-process queue), and sleeps that survive restarts.
+- **Job events carry ids, never customer text**: Inngest stores event payloads, and conversations stay in our
+  database. Memory jobs load the exchange by the reply id; channel jobs read the message's stored payload.
 - **The example books the lead's requested time** (`preferredDate`, `preferredTime` in the trigger data). The call
   decides interest; picking a time during the call would need the employee to book it then (it can, with the
   calendar tool) or an extraction step.

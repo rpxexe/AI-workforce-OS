@@ -12,6 +12,7 @@
     "infra:down": "docker compose down",
     "db:generate": "pnpm --filter @workforce/database generate",
     "db:migrate": "pnpm --filter @workforce/database migrate",
+    "inngest:dev": "npx --yes inngest-cli@1.49.0 dev -u http://localhost:4000/api/inngest --no-discovery",
     "postinstall": "pnpm db:generate"
   },
   "devDependencies": {

@@ -656,6 +656,8 @@ model ChannelMessage {
   to                String?
   text              String
   media             Json? // ChannelMedia[]
+  // Inbound only: the normalized message (InboundMessage), read by the background job that answers it.
+  payload           Json?
   error             String?
   attempts          Int                  @default(0)
   latencyMs         Int?

@@ -103,18 +103,18 @@ export async function overLimit(channelId: string, customerFrom: string) {
 
 const RANK: Partial<Record<ChannelMessageStatus, number>> = { PENDING: 0, SENT: 1, DELIVERED: 2, READ: 3 };
 
-export function channelService(deps: { ai: Ai; stt: STTProvider | null; whatsapp: WhatsAppProvider[]; email: ChannelSender; log: FastifyBaseLogger }) {
+export function channelService(deps: {
+  ai: Ai;
+  stt: STTProvider | null;
+  whatsapp: WhatsAppProvider[];
+  email: ChannelSender;
+  log: FastifyBaseLogger;
+  /** Queues the answering of a recorded message (a background job). Jobs with the same `queueKey` run one at a time, in order. */
+  enqueue: (job: { messageId: string; queueKey: string }) => Promise<void>;
+}) {
   const { ai, log } = deps;
-  // shortcut: in-process ordering; with several API processes, route a customer's messages to one (or lock per conversation in Postgres)
   /** The provider carrying a WhatsApp channel's number, if the server has its credentials. */
   const whatsappOf = (channel: ChannelRow) => deps.whatsapp.find((p) => p.name === whatsappProviderOf(channel));
-  const queues = new Map<string, Promise<void>>();
-  const serial = (key: string, work: () => Promise<void>) => {
-    const next = (queues.get(key) ?? Promise.resolve()).then(work).catch((err: unknown) => log.error({ err }, "Answering a channel message crashed"));
-    queues.set(key, next);
-    void next.finally(() => queues.get(key) === next && queues.delete(key));
-    return next;
-  };
 
   /** The conversation a new message on `channel` belongs to: the customer's recent one, or none (start a new one). */
   const findConversation = async (channel: ChannelRow, customerId: string, inReplyTo?: string) => {
@@ -322,7 +322,7 @@ export function channelService(deps: { ai: Ai; stt: STTProvider | null; whatsapp
 
     /**
      * Takes an inbound message for `channel`: records it (a message seen before is ignored, since
-     * providers retry webhooks) and answers it in the background. Resolves once answered.
+     * providers retry webhooks) and queues the job that answers it.
      */
     async receive(channel: ChannelRow, inbound: InboundMessage) {
       const { count } = await prisma.channelMessage.createMany({
@@ -340,6 +340,7 @@ export function channelService(deps: { ai: Ai; stt: STTProvider | null; whatsapp
             to: channel.address,
             text: inbound.text,
             ...(inbound.media.length > 0 && { media: inbound.media.map(({ kind, mimeType, filename, caption }) => ({ kind, mimeType, filename, caption })) }),
+            payload: inbound as unknown as Prisma.InputJsonValue,
           },
         ],
         skipDuplicates: true,
@@ -350,7 +351,20 @@ export function channelService(deps: { ai: Ai; stt: STTProvider | null; whatsapp
         select: { id: true },
       });
       log.info({ channel: channel.kind, direction: "INBOUND", status: "RECEIVED", employeeId: channel.employeeId }, "channel message");
-      await serial(`${channel.id}:${inbound.from}`, () => answer(channel, inbound, row.id));
+      await deps.enqueue({ messageId: row.id, queueKey: `${channel.id}:${inbound.from}` });
+    },
+
+    /**
+     * The background job: answers a recorded inbound message. Only a message still RECEIVED is
+     * answered, so a job delivered twice does not answer twice.
+     */
+    async answerRecorded(messageId: string) {
+      const row = await prisma.channelMessage.findUnique({ where: { id: messageId } });
+      if (!row || row.status !== "RECEIVED" || !row.channelId || !row.payload) return;
+      const channel = await prisma.employeeChannel.findUnique({ where: { id: row.channelId } });
+      if (!channel) return updateMessage(log, row.id, { status: "REJECTED", error: "The channel was removed" });
+      const inbound = row.payload as unknown as InboundMessage;
+      await answer(channel, { ...inbound, receivedAt: new Date(inbound.receivedAt) }, row.id);
     },
 
     /** A delivery receipt. States only move forward (receipts can arrive out of order); FAILED always wins. */

@@ -18,7 +18,17 @@ Last updated: 2026-11-19, end of Phase 9.
 | 9 | Multichannel: channel abstraction (`@workforce/channels`, normalized inbound/outbound/delivery events), WhatsApp behind one provider interface (Meta Cloud API, Twilio, Telnyx; any of them at once, chosen per number: webhook verification, signatures, text/media/location/buttons, delivery receipts, rate-limit retries, 24-hour window errors, voice notes transcribed, documents read), web chat widget (anonymous or website-verified visitors, streaming), email (inbound webhook, replies in test mode), customers and memory shared across voice/WhatsApp/web chat/email, per-employee channel settings with per-channel tool limits, a message audit log for every channel including voice | Built; 11 tests with fake Meta, Twilio and Telnyx APIs and a fake model (phone call to WhatsApp to web chat with memory and summaries carried over); the widget checked in headless Edge (desktop and phone width). **No real WhatsApp message yet** on any provider, Channels card not tried in a browser |
 | 10+ | Not started | Owner pastes the next phase prompt |
 
+Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
+email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
+without Inngest. Verified with a fake queue running each function's handler, and Inngest's own handler serving the 5
+functions in dev mode; **not yet run against the Inngest dev server or cloud**.
+
 ## Open items
+
+- **Inngest end to end.** Set `INNGEST_DEV=1` in `.env`, run `pnpm inngest:dev` next to `pnpm dev`, upload a document,
+  start a workflow with a Wait step, send a test-chat message with a customer, and watch the runs at
+  http://localhost:8288. Starting the dev server from this session was not permitted, so it has not been done.
+  Production needs `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` and the app synced at `PUBLIC_URL/api/inngest`.
 
 - **WhatsApp against a real provider.** Pick one: Twilio (the voice account's keys; a WhatsApp sender, or the
   sandbox), Telnyx (`TELNYX_PUBLIC_KEY` added; a WhatsApp number on the account) or Meta (`META_WHATSAPP_ACCESS_TOKEN`,
@@ -172,5 +182,5 @@ tools keep their own retry policy), delivered messages (Message is email in test
 an external CRM (CRM Update writes our customer memory), notifying anyone about a Human Handoff (it waits on the
 Runs tab), webhook signing, run history paging (newest 50), dark mode on the canvas.
 
-Not installed: Inngest, Cloudflare R2, a Redis client, Prettier, Turborepo.
+Not installed: Cloudflare R2, a Redis client, Prettier, Turborepo.
 
