@@ -35,8 +35,10 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   employee. Fields: name, description, role, personality, systemInstructions, goals (text[]),
   language, avatar, workingHours (JSON), escalation (JSON).
 
-- `Conversation`: `organizationId`, `workspaceId`, `employeeId`, `channel` ("test" so far), `title`.
-- `ConversationMessage`: `role` (USER, ASSISTANT), `content`; assistant rows also carry
+- `Conversation`: `organizationId`, `workspaceId`, `employeeId`, `channel`, `title`, `status` (AI_ACTIVE,
+  WAITING_FOR_HUMAN, HUMAN_ACTIVE, RESOLVED, REOPENED), `assignedTo` (Clerk user id; null = unassigned queue),
+  `failedTurns` (consecutive failed turns), `resolvedAt`.
+- `ConversationMessage`: `role` (USER, ASSISTANT, AGENT = a human agent, with `authorId`), `content`; assistant rows also carry
   `employeeVersion`, `provider`, `model`, `inputTokens`, `outputTokens`, `latencyMs`.
   `sources` (the knowledge documents and pages the reply was given).
 - `KnowledgeSource`: a named collection of documents in a workspace; name unique per workspace.
@@ -63,7 +65,8 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
 - `Call`: one phone call: direction, status (QUEUED, RINGING, IN_PROGRESS, COMPLETED, BUSY, NO_ANSWER,
   FAILED, CANCELED), from, to, `providerCallId` (Twilio CallSid), the published `employeeVersion`
   that took it, `conversationId` (set after the first saved exchange), `customerId`, timestamps,
-  `durationSec`, `error`. `CallParticipant`: the customer and the employee. `CallTranscript`: what
+  `durationSec`, `error`. `CallTransfer`: the audit row of each live transfer to a person (`to`, `status` INITIATED,
+  COMPLETED, NO_ANSWER, BUSY, CANCELED, FAILED, `error`, `talkSec`, `conversationId`, `handoffId`). `CallParticipant`: the customer and the employee. `CallTranscript`: what
   each side said, with `offsetMs` and `interrupted`.
 - `Workflow`: name, description, `status` (DRAFT, ACTIVE, PAUSED), `publishedVersionId`, `hookToken` (secret in
   the webhook trigger URL), `deletedAt` (soft delete; restore clears it).
@@ -81,6 +84,11 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   `status` (inbound RECEIVED, ANSWERED, REJECTED, FAILED; outbound PENDING, SENT, DELIVERED, READ, FAILED), `from`, `to`,
   `text`, `media` (what was sent and what was done with it), `providerMessageId` (unique per channel and direction:
   deduplicates retried webhooks, matches receipts), `customerId`, `conversationId`, `error`, `attempts`, `latencyMs`.
+- `Handoff`: one hand-over to people: `trigger` (`HANDOFF_TRIGGERS`), `reason`, `assignedTo`, `requestedAt`,
+  `acceptedAt` (a person took over), `firstResponseAt`, `endedAt`, `outcome` (resolved | returned_to_ai). At most one
+  open (no `endedAt`) per conversation. Its timestamps are the handoff analytics.
+- `CopilotSuggestion`: what the Copilot suggested to an agent (`reply`, `summary`, `nextAction`, `memory`, `citations`,
+  usage), apart from the conversation's messages; `usedInMessageId` and `edited` when an agent sent it.
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -169,6 +177,13 @@ GET   /widget.js                                public; the web chat widget
 GET   /chat/:key/demo                           public; a page showing the widget
 POST  /chat/:key/session                        public, origin-checked; { visitorId? } or { customer, customerHash }; token, greeting, history
 POST  /chat/:key/messages                       public, origin-checked, Bearer session token; { message }; SSE reply (ChatStreamEvent)
+GET   /chat/:key/messages?after=                public, Bearer session token; { status, messages }: agents' messages since `after`
+GET   /workspaces/:workspaceId/inbox            member; ?view=queue|mine|waiting|human_active|ai_active|reopened|resolved|all ?employeeId=; { items, counts }
+GET   /workspaces/:workspaceId/conversations/:conversationId            member; messages, handoffs, Copilot suggestions, canReply
+PATCH .../conversations/:conversationId         member; { action: take_over | assign (userId|null) | return_to_ai | resolve | reopen }; 409 if it moved
+POST  .../conversations/:conversationId/messages  member; { text, suggestionId? }; takes over, sends on the channel (502 if that fails), then stores
+POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
+GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30)
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -378,6 +393,51 @@ without Inngest: runner (engine.startRunner, every 1 s, in the API process)
   `/workflows/[id]` (Save draft, Restore as vN for an old version, Publish, Pause/Resume, Duplicate, Delete with
   a confirmation listing what it affects; editor tab: canvas, step palette, settings panel, checks; runs tab: start with JSON input, history, per-run canvas coloured by step status,
   steps with input and output, Retry, Continue). Components in `src/components/workflows/`.
+
+## Human handoff (Phase 10)
+
+```
+runTurn, conversation WAITING_FOR_HUMAN or HUMAN_ACTIVE -> save the customer's message only -> `held` (no reply;
+        channels mark the inbound row HELD, web chat polls, voice says a colleague will follow up and hangs up)
+runTurn, AI_ACTIVE / REOPENED / RESOLVED (-> REOPENED):
+  before the model (handoff.ts handoffBeforeReply, needs escalation.enabled):
+     explicit request (English phrases), high-value customer (a memory number >= minimum, once per conversation),
+     configured conditions (message / memory: contains, equals, at least, at most; each once per conversation)
+  during: transfer_to_human tool offered with the employee's tools (reasons customer_request, low_confidence,
+     policy_risk, as enabled); a call ends the turn. A FAILED tool execution (onToolFailure) hands off after the reply.
+  after an error: failedTurns + 1; at afterFailedAttempts -> repeated_failure
+  handoff: the reply ends with escalation.handoffMessage (default line); saved with a Handoff row, status
+     WAITING_FOR_HUMAN, assignedTo null; `done.handoff`; onHandoff -> email to escalation.contactEmail (Resend, or
+     logged in test mode)
+inbox (apps/api/src/inbox.ts): take_over/assign/return_to_ai/resolve/reopen move only from the states they name
+  (updateMany on status) and stamp the open Handoff; an agent message takes over, is delivered by
+  channelService.deliverAgentMessage (WhatsApp/email sent; web chat and test chat read it), then stored as AGENT
+voice: after a handoff (or a turn held because people took over), with escalation.transferNumber:
+  "connecting you" line -> CallTransfer INITIATED -> TelephonyProvider.transferCall (live-call update with
+  <Dial action=/voice/<provider>/transfer?transferId=>number</Dial>; Twilio Twiml, Telnyx Texml) -> our stream ends,
+  the call is not marked ended (the status callback ends it)
+  POST /voice/<provider>/transfer (signed): dialResultOf -> COMPLETED (talkSec; conversation HUMAN_ACTIVE, handoff
+  accepted and answered) -> <Hangup/>; NO_ANSWER / BUSY / CANCELED / FAILED -> "someone will call you back", hang up,
+  conversation stays WAITING_FOR_HUMAN. Provider refuses to dial: FAILED + error, callback line, hang up.
+  No transfer number: callback line, hang up. Transfers show in the call detail and the inbox timeline.
+workflow Human Handoff step: optional conversationId -> startHandoff(trigger workflow_condition), then waits as before
+```
+
+- Only `runTurn` decides whether the AI answers, so every channel respects the state. The final save is conditional on
+  the status (`where status in AI_ACTIVE, REOPENED, RESOLVED`): if an agent took over mid-turn, only the customer's
+  message is kept and the turn ends `held`.
+- Context: AGENT messages reach the model as the employee's own, with a system note that a human colleague handled part
+  of the conversation; consecutive same-role messages are joined (`buildContext`).
+- Copilot (`packages/agent-runtime/src/copilot.ts`, `suggest`): the last 40 messages as a labelled transcript, the
+  customer's recalled memory and the knowledge retrieved for their last message, under the employee's own system
+  prompt; the model answers JSON (summary, reply, nextAction, citation numbers). Memory and citations come from the
+  data, not from the model; citations fall back to everything retrieved when the model names none.
+- Analytics: Handoff timestamps (accept, first reply, resolve: median, average, p90), outcomes, triggers, per agent;
+  reply time from SQL (`LAG` over messages: a customer message to the next ASSISTANT or AGENT message).
+- Dashboard: `/conversations` (inbox views with counts, refreshed every 5 s), `/conversations/[id]` (timeline with
+  handoff events, take over / assign / return to AI / resolve / reopen, reply box, Copilot card), `/analytics`; agent
+  names from Clerk members (`lib/members.ts`). Test chat shows agent messages and the handoff state; the employee form
+  has the new escalation settings.
 
 ## Agent runtime
 
