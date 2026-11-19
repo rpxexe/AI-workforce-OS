@@ -1,3 +1,4 @@
+import { configOf } from "@workforce/agent-runtime";
 import { Prisma, prisma } from "@workforce/database";
 import {
   employeeConfigSchema,
@@ -14,20 +15,7 @@ import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
 
-// workingHours and escalation are JSON columns; employeeConfigSchema validated them on the way in.
-export const configOf = (v: VersionRow) =>
-  ({
-    name: v.name,
-    description: v.description,
-    role: v.role,
-    personality: v.personality,
-    systemInstructions: v.systemInstructions,
-    goals: v.goals,
-    language: v.language,
-    avatar: v.avatar,
-    workingHours: v.workingHours,
-    escalation: v.escalation,
-  }) as EmployeeConfig;
+export { configOf };
 
 const toVersion = (v: VersionRow): EmployeeVersion => ({
   ...configOf(v),
@@ -55,7 +43,7 @@ export const employeeParams = workspaceParams.extend({ id: z.string().min(1) });
 
 export type Scope = Member & { workspaceId: string };
 /** The tenant filter every employee query carries. */
-export const within = (s: Scope) => ({ organizationId: s.organizationId, workspaceId: s.workspaceId });
+export const within = (s: { organizationId: string; workspaceId: string }) => ({ organizationId: s.organizationId, workspaceId: s.workspaceId });
 
 /**
  * AI Employee CRUD. Every query is scoped to the organization in the session and to a workspace

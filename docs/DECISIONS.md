@@ -105,8 +105,46 @@ problem re-discovered.
   runtime only answers a caller's turn; the model speaks from the caller's first words on.
 - **Callers are identified as customers by their phone number**, so memory carries across calls and
   across chat for the same identifier.
+- **Telnyx is used through TeXML**, its Twilio-compatible markup, so webhooks, form fields and call
+  statuses are Twilio's and only the media message format differs. Call Control (JSON events) would
+  have needed a second call flow. Providers come from `.env` for now; a provider settings page is planned.
+- **Telnyx webhooks carry a secret token in their URL** (`?token=`, an HMAC of the API key), because
+  Telnyx does not document signing TeXML's voice URL request. Its Ed25519 headers are not checked yet.
+- **Telnyx's outbound call API returns no call id** (per its API reference), so outbound status callback
+  URLs carry `?callId=`, and the first callback stores the provider's id on the call.
 - **API errors raised with `httpError` show their message even when 5xx** (502 from Twilio, 503 when
   not configured). Before, every 5xx said "Internal server error", hiding the provider-config 503.
+
+- **Workflow runs are Postgres rows claimed with `FOR UPDATE SKIP LOCKED`**, not Redis/BullMQ or Inngest: no new
+  infrastructure, runs survive restarts, waits are a `runAt` column, and several API processes can share the work.
+  The runner lives in the API process (`buildApp`), like calls and document processing; move `startRunner` into
+  `workers/agent-worker` when runs should scale apart. Tests get a runner only when they pass `workflows`, so test
+  files running side by side never run each other's workflows.
+- **The workflow definition is our own JSON**, not React Flow's node format. React Flow only draws it
+  (`workflow-canvas.tsx`) and `onChange` hands back a new definition; positions are stored, the engine ignores them.
+- **Workflows follow the employee versioning model**: saving appends a `WorkflowVersion`, publishing moves the live
+  pointer, a run keeps the version it started with. Name and description are not versioned.
+- **No loops, one way out per node** (yes and no for conditions). Runs stay finite and the engine is a simple walk.
+- **Voice Call steps poll the Call row** instead of hooking into the call session: no change to voice code, and a
+  lost status callback cannot strand a run (the step fails after 45 minutes).
+- **Tool steps go through `ToolExecutor` with an employee's grant**, so workflows get the same permissions,
+  validation and audit log as conversations; there are no workflow-level tool settings.
+- **Retry is manual**: a failed step may have half-acted, so a person decides. Tools keep their own retry policy.
+- **Idempotency keys are per step attempt** (`execution:node:attempt`): a crash re-run continues the same attempt and
+  finds or deduplicates its effect; a manual retry is a person asking for the effect again, so it gets a new key.
+  Where an effect cannot be found again (an AI Employee turn that may have used tools, a call row with no provider
+  id), the step fails rather than risk doing it twice.
+- **Deleting a workflow is a soft delete**: run history and audit rows stay, and restore is possible. It refuses
+  while runs are in progress unless the caller says to stop them (the dashboard asks, naming the runs and the
+  webhook). Restored workflows come back paused.
+- **Moving off the Postgres queue** (Inngest or a separate worker) changes only the scheduler: `claim` + `startRunner`.
+  Run state, step rows, idempotency keys and `advance` stay. An Inngest function per run would claim and `advance`
+  that run (export `advance` then; today only the runner calls it), `step.sleepUntil(runAt)` for waits, and `step.waitForEvent` for Human Handoff; a worker
+  just calls `engine.startRunner()` outside the API.
+- **The example books the lead's requested time** (`preferredDate`, `preferredTime` in the trigger data). The call
+  decides interest; picking a time during the call would need the employee to book it then (it can, with the
+  calendar tool) or an extraction step.
+- **React Flow 12.12.1, pinned exactly**: 13.0 was a day old when Phase 8 was built.
 
 ## Traps already hit
 
@@ -147,6 +185,10 @@ problem re-discovered.
   `EXTRACTION_PROMPT` separately.
 - **The secret-file hook blocks any command that names `.env`**, including
   `node --env-file=../../.env`. Run tests with `pnpm test` (`LIVE_AI=1 pnpm test` for live ones).
+- **React Flow controlled nodes stay hidden until measured.** The canvas keeps the `dimensions` changes from
+  `onNodesChange` and passes them back as `measured`; dropping them leaves nodes invisible.
+- **Next.js keeps the list page mounted while a detail page shows**, so a headless-browser check waiting for
+  `tbody tr` can match the hidden list. Wait for something only the visible page has.
 - **A dev dependency named `cn`** is legitimate: shadcn publishes it and its registry requires it.
 
 ## Checking the signed-in UI without a login

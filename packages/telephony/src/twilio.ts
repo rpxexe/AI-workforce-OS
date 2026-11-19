@@ -14,8 +14,18 @@ const STATUS: Record<string, CallStatus> = {
   canceled: "CANCELED",
 };
 
-const xml = (s: string) =>
+export const xml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/** A status callback in Twilio's form fields (Telnyx TeXML sends the same ones). */
+export function twimlStatusOf(params: Record<string, string>) {
+  const duration = Number(params.CallDuration);
+  return {
+    providerCallId: params.CallSid ?? "",
+    status: STATUS[params.CallStatus ?? ""] ?? null,
+    durationSec: params.CallDuration !== undefined && Number.isFinite(duration) ? duration : null,
+  };
+}
 
 /** X-Twilio-Signature: base64 HMAC-SHA1 of the URL followed by every parameter, sorted, as name+value. */
 export function twilioSignature(authToken: string, url: string, params: Record<string, string>) {
@@ -57,8 +67,9 @@ export function twilioProvider({ accountSid, authToken }: Credentials, api = "ht
   return {
     name: "twilio",
 
-    verifyWebhook(url, params, signature) {
-      if (!signature) return false;
+    verifyWebhook({ url, params, headers }) {
+      const signature = headers["x-twilio-signature"];
+      if (typeof signature !== "string") return false;
       const expected = Buffer.from(twilioSignature(authToken, url, params));
       const given = Buffer.from(signature);
       return expected.length === given.length && timingSafeEqual(expected, given);
@@ -68,14 +79,7 @@ export function twilioProvider({ accountSid, authToken }: Credentials, api = "ht
 
     sayAndHangUp: (message) => `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xml(message)}</Say><Hangup/></Response>`,
 
-    statusOf(params) {
-      const duration = Number(params.CallDuration);
-      return {
-        providerCallId: params.CallSid ?? "",
-        status: STATUS[params.CallStatus ?? ""] ?? null,
-        durationSec: params.CallDuration !== undefined && Number.isFinite(duration) ? duration : null,
-      };
-    },
+    statusOf: twimlStatusOf,
 
     async placeCall({ to, from, streamUrl, parameters, statusCallbackUrl, timeLimitSec }) {
       const form = new URLSearchParams({

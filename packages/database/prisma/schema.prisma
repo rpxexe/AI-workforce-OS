@@ -23,6 +23,8 @@ model Organization {
   calendarEvents CalendarEvent[]
   phoneNumbers   PhoneNumber[]
   calls          Call[]
+  workflows      Workflow[]
+  workflowExecutions WorkflowExecution[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -36,6 +38,7 @@ model Workspace {
   conversations  Conversation[]
   knowledgeSources KnowledgeSource[]
   customers      Customer[]
+  workflows      Workflow[]
 
   @@unique([organizationId, name])
 }
@@ -428,6 +431,8 @@ model Call {
   greeting        String
   error           String?
   createdBy       String? // Clerk user id of whoever placed an outbound call
+  // Set by workflow Voice Call steps (execution:node:attempt), so a step that runs again finds its call instead of dialing twice.
+  idempotencyKey  String?          @unique
   createdAt       DateTime         @default(now())
   answeredAt      DateTime?
   endedAt         DateTime?
@@ -468,4 +473,118 @@ model CallTranscript {
   createdAt   DateTime            @default(now())
 
   @@index([callId, offsetMs])
+}
+
+enum WorkflowStatus {
+  DRAFT // never published
+  ACTIVE
+  PAUSED // runs nothing: new runs are refused and running ones hold where they are
+}
+
+// A visual automation (the journey builder). Its steps live in versions; only publishing changes what runs.
+model Workflow {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name           String
+  description    String         @default("")
+  status         WorkflowStatus @default(DRAFT)
+  // Secret part of the webhook trigger URL.
+  hookToken      String
+  // Set when deleted: hidden, never run, and its runs stopped. Cleared by restore.
+  deletedAt      DateTime?
+
+  publishedVersionId String?          @unique
+  publishedVersion   WorkflowVersion? @relation("PublishedWorkflow", fields: [publishedVersionId], references: [id])
+
+  versions   WorkflowVersion[]   @relation("WorkflowVersions")
+  executions WorkflowExecution[]
+  createdBy  String // Clerk user id
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@index([organizationId, workspaceId, updatedAt])
+}
+
+// Immutable snapshot of a workflow's graph. Rows are only ever inserted.
+model WorkflowVersion {
+  id           String    @id @default(cuid())
+  workflowId   String
+  workflow     Workflow  @relation("WorkflowVersions", fields: [workflowId], references: [id], onDelete: Cascade)
+  publishedFor Workflow? @relation("PublishedWorkflow")
+  number       Int // 1, 2, 3… per workflow
+  // WorkflowDefinition (packages/shared/src/workflow.ts): nodes, their settings and the edges between them.
+  definition   Json
+
+  executions WorkflowExecution[]
+  createdBy  String // Clerk user id
+  createdAt  DateTime            @default(now())
+
+  @@unique([workflowId, number])
+}
+
+enum WorkflowExecutionStatus {
+  QUEUED // due at runAt
+  RUNNING // claimed by a runner until lockedUntil
+  WAITING // on a timer, a call or a person; due at runAt (null = until someone continues it)
+  COMPLETED
+  FAILED
+}
+
+// One run of a workflow version. The row is also the background job: runners claim due rows.
+model WorkflowExecution {
+  id             String                  @id @default(cuid())
+  organizationId String
+  organization   Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workflowId     String
+  workflow       Workflow                @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  versionId      String
+  version        WorkflowVersion         @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  status         WorkflowExecutionStatus @default(QUEUED)
+  input          Json // what the trigger received
+  // Outputs of finished steps by node id: what {{steps.<id>.<field>}} reads.
+  context        Json                    @default("{}")
+  currentNodeId  String? // the node to run (or being waited on); null once finished
+  runAt          DateTime?               @default(now())
+  lockedUntil    DateTime?
+  error          String?
+  startedBy      String // Clerk user id, or "webhook"
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  finishedAt     DateTime?
+
+  steps WorkflowStepExecution[]
+
+  @@index([status, runAt])
+  @@index([organizationId, workspaceId, workflowId, createdAt])
+}
+
+enum WorkflowStepStatus {
+  RUNNING
+  WAITING
+  SUCCEEDED
+  FAILED
+}
+
+// One attempt at one node. A retry adds a row with the next attempt number.
+model WorkflowStepExecution {
+  id          String             @id @default(cuid())
+  executionId String
+  execution   WorkflowExecution  @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  nodeId      String
+  nodeType    String
+  attempt     Int
+  status      WorkflowStepStatus
+  input       Json? // the node's settings with templates filled in
+  output      Json?
+  // What a waiting step remembers between checks (the call it placed, when its timer ends).
+  state       Json?
+  error       String?
+  startedAt   DateTime           @default(now())
+  finishedAt  DateTime?
+
+  @@index([executionId, startedAt])
 }

@@ -2,6 +2,7 @@
 // A simulated Twilio connects over a real WebSocket and speaks Twilio's message format; the
 // Twilio REST calls, speech recognition, speech synthesis and the model are faked.
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { after, before, beforeEach, test } from "node:test";
 import { AIProviderError, type AIProvider, type CompletionRequest, type ToolCall } from "@workforce/ai-provider";
@@ -9,7 +10,7 @@ import { prisma } from "@workforce/database";
 import { EXTRACTION_PROMPT } from "@workforce/memory";
 import { defaultEmployeeConfig, type CallDetail, type CallSummary, type EmployeeDetail, type Workspace } from "@workforce/shared";
 import type { STTEvent, STTProvider } from "@workforce/stt";
-import { twilioProvider, twilioSignature, type TelephonyProvider } from "@workforce/telephony";
+import { TelephonyError, telnyxProvider, twilioProvider, twilioSignature, type TelephonyProvider } from "@workforce/telephony";
 import { localTime } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
 import type WebSocket from "ws";
@@ -22,6 +23,8 @@ const PUBLIC = "https://voice.example.test";
 const TOKEN = "test-auth-token";
 const NUMBER = "+15550001111";
 const CALLER = "+15557654321";
+const TELNYX_NUMBER = "+15550009999"; // owned by the Telnyx account only
+const UNOWNED = "+15550008888"; // owned by neither account
 const TZ = "Asia/Kolkata";
 const orgA = newOrg();
 const orgB = newOrg();
@@ -95,11 +98,30 @@ const telephony: TelephonyProvider = {
   async endCall(sid) {
     ended.push(sid);
   },
-  async configureNumber() {
+  async configureNumber(number) {
+    if (number === TELNYX_NUMBER || number === UNOWNED) throw new TelephonyError(`${number} is not a number in this Twilio account`);
     return { providerNumberId: "PN0123456789abcdef0123456789abcdef" };
   },
 };
-const voice: VoiceConfig = { telephony, stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
+// Telnyx's real message formats and webhook check; its REST calls are faked.
+const TELNYX_KEY = "telnyx-test-key";
+const telnyxToken = createHmac("sha256", TELNYX_KEY).update("telnyx-webhook").digest("hex");
+let telnyxPlaced: Parameters<TelephonyProvider["placeCall"]>[0][] = [];
+const telnyx: TelephonyProvider = {
+  ...telnyxProvider({ apiKey: TELNYX_KEY, accountSid: "acct", applicationId: "app1" }),
+  async placeCall(options) {
+    telnyxPlaced.push(options);
+    return { providerCallId: null }; // as Telnyx's API reference describes: no id until the first callback
+  },
+  async endCall(sid) {
+    ended.push(sid);
+  },
+  async configureNumber(number) {
+    if (number !== TELNYX_NUMBER) throw new TelephonyError(`${number} is not a number in this Telnyx account`);
+    return { providerNumberId: "tn-1" };
+  },
+};
+const voice: VoiceConfig = { telephony: [telephony, telnyx], stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
 
 // ---- Helpers ----
 
@@ -207,6 +229,7 @@ beforeEach(() => {
   sttAudio = [];
   synthesized = [];
   placed = [];
+  telnyxPlaced = [];
   ended = [];
   placeFails = false;
 });
@@ -394,7 +417,7 @@ test("outbound calls: placed through the employee's number, status callbacks mov
   assert.deepEqual([placedCall.direction, placedCall.status, placedCall.from, placedCall.to], ["OUTBOUND", "QUEUED", NUMBER, "+15551234567"]);
   const [request] = placed;
   assert.equal(request?.streamUrl, "wss://voice.example.test/voice/twilio/stream");
-  assert.equal(request?.statusCallbackUrl, `${PUBLIC}/voice/twilio/status`);
+  assert.equal(request?.statusCallbackUrl, `${PUBLIC}/voice/twilio/status?callId=${placedCall.id}`);
   assert.equal(request?.parameters.callId, placedCall.id);
 
   await webhook("/voice/twilio/status", { CallSid: "CA-out-1", CallStatus: "ringing" });
@@ -429,7 +452,7 @@ test("phone numbers and calls: admins configure, members read, other organizatio
   assert.deepEqual((await call("GET", `/workspaces/${wsB}/calls`, undefined, memberOf(orgB))).json(), []);
 
   // Without telephony configured, voice routes say what is missing.
-  const bare = await buildApp({ authenticate: headerAuth, provider: model, logger: false, voice: { ...voice, telephony: null, publicUrl: null } });
+  const bare = await buildApp({ authenticate: headerAuth, provider: model, logger: false, voice: { ...voice, telephony: [], publicUrl: null } });
   const res = await bare.inject({ method: "POST", url: `/workspaces/${ws}/employees/${ava}/calls`, headers: adminOf(orgA), payload: { to: "+15551234567" } });
   assert.equal(res.statusCode, 503);
   assert.match(res.payload, /TWILIO_ACCOUNT_SID.*PUBLIC_URL/);
@@ -450,4 +473,62 @@ test("speech: text is cut into sentences as it streams, and formatting is not re
   await until(() => said.length === 3, "three sentences");
   assert.deepEqual(said, ["It costs 4.99 dollars.", "Want it?", "Great"]);
   assert.equal(forSpeech("**Book** it at [our site](https://x.y) #now"), "Book it at our site now");
+});
+
+test("Telnyx: a number is matched to the account that owns it, webhooks need the token, calls stream in Telnyx's format", async () => {
+  const added = await call("POST", `/workspaces/${ws}/phone-numbers`, { number: TELNYX_NUMBER, employeeId: ava });
+  assert.equal(added.statusCode, 201, added.payload);
+  assert.equal((await prisma.phoneNumber.findUniqueOrThrow({ where: { number: TELNYX_NUMBER } })).provider, "telnyx");
+  // A number neither account owns names both refusals.
+  const unowned = await call("POST", `/workspaces/${ws}/phone-numbers`, { number: UNOWNED, employeeId: ava });
+  assert.equal(unowned.statusCode, 502);
+  assert.match(unowned.payload, /Twilio account.*Telnyx account/);
+
+  const telnyxHook = (path: string, params: Record<string, string>, token = telnyxToken) =>
+    app.inject({
+      method: "POST",
+      url: `${path}${path.includes("?") ? "&" : "?"}token=${token}`,
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: new URLSearchParams(params).toString(),
+    });
+  const params = { CallSid: "v3:in-1", AccountSid: "acct", From: CALLER, To: TELNYX_NUMBER, CallStatus: "ringing" };
+  assert.equal((await telnyxHook("/voice/telnyx/inbound", params, "wrong")).statusCode, 403);
+  // The number belongs to Telnyx, so a Twilio webhook for it is turned away.
+  assert.match((await webhook("/voice/twilio/inbound", params)).payload, /not in service/);
+  const answer = await telnyxHook("/voice/telnyx/inbound", params);
+  assert.equal(answer.statusCode, 200, answer.payload);
+  assert.match(answer.payload, /<Stream url="wss:\/\/voice\.example\.test\/voice\/telnyx\/stream" bidirectionalMode="rtp" bidirectionalCodec="PCMU">/);
+  const callId = /name="callId" value="([^"]+)"/.exec(answer.payload)?.[1] ?? "";
+  const token = /name="token" value="([^"]+)"/.exec(answer.payload)?.[1] ?? "";
+  assert.equal((await prisma.call.findUniqueOrThrow({ where: { id: callId } })).provider, "telnyx");
+
+  // Telnyx's side of the media stream.
+  const socket: WebSocket = await app.injectWS("/voice/telnyx/stream");
+  const got: { event: string; stream_id?: string; media?: { payload: string } }[] = [];
+  socket.on("message", (data) => got.push(JSON.parse(data.toString())));
+  const send = (m: object) => socket.send(JSON.stringify(m));
+  send({ event: "connected", version: "1.0.0" });
+  send({ event: "start", sequence_number: "1", stream_id: "st-1", start: { call_control_id: "v3:in-1", custom_parameters: { callId, token } } });
+  const heard = () => got.map((m) => Buffer.from(m.media?.payload ?? "", "base64").toString()).join(" ");
+  await until(() => /How can I help you today\?/.test(heard()), "the greeting");
+  assert.ok(got.every((m) => m.stream_id === undefined));
+  send({ event: "stop", sequence_number: "2", stream_id: "st-1", stop: { call_control_id: "v3:in-1" } });
+  await until(async () => (await prisma.call.findUniqueOrThrow({ where: { id: callId } })).endedAt !== null, "the end");
+  socket.terminate();
+
+  // Outbound from the Telnyx number: Telnyx gives no call id, the first status callback supplies it.
+  const number = await prisma.phoneNumber.findUniqueOrThrow({ where: { number: TELNYX_NUMBER } });
+  const res = await call("POST", `/workspaces/${ws}/employees/${ava}/calls`, { to: "+15551234567", phoneNumberId: number.id });
+  assert.equal(res.statusCode, 201, res.payload);
+  const out = res.json<CallSummary>();
+  assert.equal(telnyxPlaced.length, 1);
+  assert.equal(placed.length, 0);
+  assert.equal(telnyxPlaced[0]?.statusCallbackUrl, `${PUBLIC}/voice/telnyx/status?callId=${out.id}`);
+  assert.equal((await telnyxHook(`/voice/telnyx/status?callId=${out.id}`, { CallSid: "v3:out-1", CallStatus: "ringing" }, "wrong")).statusCode, 403);
+  assert.equal((await telnyxHook(`/voice/telnyx/status?callId=${out.id}`, { CallSid: "v3:out-1", CallStatus: "ringing" })).statusCode, 204);
+  let row = await prisma.call.findUniqueOrThrow({ where: { id: out.id } });
+  assert.deepEqual([row.provider, row.providerCallId, row.status], ["telnyx", "v3:out-1", "RINGING"]);
+  await telnyxHook(`/voice/telnyx/status?callId=${out.id}`, { CallSid: "v3:out-1", CallStatus: "no-answer", CallDuration: "0" });
+  row = await prisma.call.findUniqueOrThrow({ where: { id: out.id } });
+  assert.deepEqual([row.status, row.durationSec], ["NO_ANSWER", 0]);
 });
