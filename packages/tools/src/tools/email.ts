@@ -4,7 +4,7 @@ import { defineTool } from "../types.ts";
 
 export const emailTool = defineTool({
   name: "send_email",
-  title: "Email: send messages (test mode)",
+  title: "Email: send messages",
   description:
     "Send an email, for example a meeting confirmation or the details a customer asked for. Only send what the customer asked for or agreed to.",
   input: z.object({
@@ -18,8 +18,13 @@ export const emailTool = defineTool({
   timeoutMs: 10_000,
   retry: { attempts: 1, backoffMs: 0 },
 
-  // shortcut: test mode, nothing is delivered; the message is kept only in the audit log (ToolExecution.input). Add a sender (and rules on who may be emailed) when an email provider is chosen
-  async execute(_input, ctx) {
-    return { status: "sent" as const, messageId: ctx.executionId, testMode: true };
+  // Sent from the server's sender (RESEND_FROM) through Resend. Without Resend, test mode: nothing is delivered and
+  // the message is kept only in the audit log (ToolExecution.input).
+  // shortcut: any address may be emailed; add rules on who may be emailed when admins need them
+  async execute(input, ctx) {
+    if (!ctx.mailer) return { status: "sent" as const, messageId: ctx.executionId, testMode: true };
+    // The execution id is the idempotency key, so a retried call cannot send twice.
+    const { messageId } = await ctx.mailer.send({ to: input.to, subject: input.subject, text: input.body, idempotencyKey: ctx.executionId });
+    return { status: "sent" as const, messageId, testMode: false };
   },
 });

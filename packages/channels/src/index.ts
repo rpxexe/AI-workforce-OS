@@ -9,6 +9,7 @@ import { twilioWhatsAppFromEnv } from "./whatsapp-twilio.ts";
 export * from "./types.ts";
 export { splitText } from "./text.ts";
 export { testEmailSender, toInboundEmail } from "./email.ts";
+export { htmlToText, resendEmail, resendFromEnv, svixSignature, svixVerify, taggedAddress, untag, type EmailProvider } from "./email-resend.ts";
 export { metaSignature, metaWhatsApp, metaWhatsAppFromEnv } from "./whatsapp-meta.ts";
 export { telnyxPublicKey, telnyxWhatsApp, telnyxWhatsAppFromEnv } from "./whatsapp-telnyx.ts";
 export { twilioWhatsApp, twilioWhatsAppFromEnv } from "./whatsapp-twilio.ts";

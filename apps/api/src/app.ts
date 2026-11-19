@@ -7,13 +7,13 @@ import {
   type AIProvider,
   type EmbeddingProvider,
 } from "@workforce/ai-provider";
-import { testEmailSender, whatsappProvidersFromEnv, type WhatsAppProvider } from "@workforce/channels";
+import { resendFromEnv, testEmailSender, whatsappProvidersFromEnv, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
 import { processDocument } from "@workforce/knowledge";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
 import { telnyxFromEnv, twilioFromEnv, type TelephonyProvider } from "@workforce/telephony";
-import { createToolExecutor, safeFetch, toolRegistry } from "@workforce/tools";
+import { createToolExecutor, safeFetch, ToolError, toolRegistry, type Mailer } from "@workforce/tools";
 import { ttsFromEnv } from "@workforce/tts";
 import { placeCallSchema, type ApiError, type HealthResponse } from "@workforce/shared";
 import { createWorkflowEngine, StepError } from "@workforce/workflows";
@@ -52,6 +52,8 @@ export async function buildApp(
     voice?: Partial<VoiceConfig>;
     /** The address providers reach the API at, for webhook signatures; defaults to PUBLIC_URL. */
     publicUrl?: string;
+    /** Email through Resend, and the sender the send_email tool and Message steps use; default from .env (RESEND_*). */
+    email?: { resend: EmailProvider | null; from?: string };
     /** WhatsApp providers; defaults to every one .env has credentials for. */
     whatsapp?: WhatsAppProvider[];
     aiTimeoutMs?: number;
@@ -138,8 +140,27 @@ export async function buildApp(
   let embedder = options.embedder;
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
   knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }));
+  // Email: Resend when RESEND_API_KEY is set; otherwise test mode everywhere (logged, not delivered).
+  // Test apps never send real email unless they pass a provider.
+  const resend = options.email ? options.email.resend : options.authenticate ? null : resendFromEnv();
+  const emailFrom = options.email ? options.email.from : process.env.RESEND_FROM;
+  /** The send_email tool's and Message steps' sender: RESEND_FROM through Resend. */
+  const mailer: Mailer | undefined =
+    resend && emailFrom
+      ? {
+          async send({ to, subject, text, idempotencyKey }) {
+            try {
+              const { providerMessageId } = await resend.send({ address: emailFrom, to, subject, text, idempotencyKey });
+              return { messageId: providerMessageId };
+            } catch (err) {
+              throw new ToolError(err instanceof Error ? err.message : "The email could not be sent");
+            }
+          },
+        }
+      : undefined;
   const tools = createToolExecutor(toolRegistry, {
     fetch: options.toolFetch,
+    mailer,
     onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
   });
   const learn = options.memory ?? memoryService;
@@ -180,11 +201,11 @@ export async function buildApp(
     ai,
     stt: voiceConfig.stt,
     whatsapp,
-    email: testEmailSender,
+    email: resend ?? testEmailSender,
     log: app.log,
     enqueue: (job) => send("channel/message.received", job),
   });
-  channelRoutes(app, authenticate, { service: channels, whatsapp, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
+  channelRoutes(app, authenticate, { service: channels, whatsapp, resend, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
   webChatRoutes(app, channels);
 
   const engine = createWorkflowEngine(
@@ -203,6 +224,7 @@ export async function buildApp(
         throw new StepError(shown ? err.message : "The call could not be placed");
       }
     },
+    mailer: mailer ?? null,
     callPollMs: options.workflows?.callPollMs ?? 15_000,
     onError: (err, context) => app.log.error({ err }, `${context} failed`),
     },

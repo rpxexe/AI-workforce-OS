@@ -16,7 +16,7 @@ packages/telephony     `TelephonyProvider` and Twilio (REST, TwiML, webhook sign
 packages/stt           `STTProvider` and Deepgram live transcription (turn detection, reconnects).
 packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
-packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), email (test mode), `splitText`.
+packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), `EmailProvider` (Resend; test mode without it), `splitText`.
 workers/*         agent-worker, call-worker, evaluation-worker: empty stubs.
 ```
 
@@ -358,7 +358,7 @@ without Inngest: runner (engine.startRunner, every 1 s, in the API process)
   (through `ToolExecutor` with the chosen employee's grant; the run id is the audit row's conversation id; a
   calendar conflict fails the step); HTTP Request and Webhook (`safeFetch`; Webhook POSTs the run data with an
   idempotency key); Wait; Voice Call (places the call through the voice routes' `placeCall`, then checks the Call
-  row every `callPollMs` until it ends; output includes the transcript); Message (email, test mode); CRM Update
+  row every `callPollMs` until it ends; output includes the transcript); Message (email through the server's mailer, Resend; test mode without it); CRM Update
   (customer memory via `identifyCustomer` + `factWrites`); Human Handoff (waits until Continue); End.
 - Validation also checks references: `{{steps.<id>}}` must name a step that runs before this one on every path
   (a dominator), not the step itself; other roots than `trigger`/`steps` are refused. Only conditions may have
@@ -369,8 +369,8 @@ without Inngest: runner (engine.startRunner, every 1 s, in the API process)
 - Idempotency key per step attempt: `executionId:nodeId:attempt`. Tool: the audit row id is `wf:<key>`; a re-run
   reuses its recorded outcome, and the webhook tool sends it as its key. HTTP Request and Webhook send it as the
   `Idempotency-Key` header. Voice Call: `placeCall` with the same key returns the earlier call, or fails if that
-  try stopped mid-dial. AI Employee: an interrupted turn fails (it may have used tools). Message (test mode)
-  carries it as `messageId`. CRM Update writes are upserts. A manual retry is a new attempt and acts again.
+  try stopped mid-dial. AI Employee: an interrupted turn fails (it may have used tools). Message sends
+  it to Resend as the `Idempotency-Key`. CRM Update writes are upserts. A manual retry is a new attempt and acts again.
 - Engine transitions only apply while the run is still RUNNING (`settle`), so a run stopped mid-step stays stopped.
 - Delete: hides the workflow, 404s its hook URL, fails runs in progress ("Stopped: the workflow was deleted"; they can
   be retried after a restore). Duplicate copies one version into a new draft with its own hook token.
@@ -424,6 +424,26 @@ Request bodies are validated with the Zod schemas in `packages/shared/src/employ
 - `src/components/states.tsx`: `PageHeader`, `LoadingState`, `ErrorState`, `EmptyState`, `ComingSoon`.
 - `src/components/employees/`: `employee-form.tsx` (create and edit), `meta.tsx` (avatar, status badge).
 - Pages are client components that fetch from the API; there are no server-side data fetches.
+
+## Email (Resend)
+
+```
+customer -> Resend (receiving on the domain) -> POST /channels/email/resend/webhook (Svix-signed) email.received
+         -> GET /emails/receiving/{id} (body; HTML turned to text) -> InboundMessage per recipient address
+            (support+<conversation id>@... -> address + threadTag) -> channelService.receive -> job -> answer
+reply    -> POST /emails: from "<employee name> <channel address>", subject "Re: ...", In-Reply-To the customer's
+            Message-ID, Reply-To support+<conversation id>@..., Idempotency-Key = the outbound log row id
+receipts -> email.sent / delivered / opened / bounced / failed -> SENT / DELIVERED / READ / FAILED by Resend's email id
+```
+
+- `resendEmail` (`packages/channels/src/email-resend.ts`): send (429 `rate_limit_exceeded` retried; with the key also
+  network errors and 5xx), `readWebhook` (Svix check, 5 minutes; a received email that cannot be fetched throws, so the
+  webhook answers 502 and Resend retries). Recipient addresses no employee uses are dropped.
+- The `send_email` tool and workflow Message steps use a `Mailer` (`packages/tools/src/types.ts`) the API builds from
+  Resend and `RESEND_FROM`, with the tool execution id or the step's idempotency key as the `Idempotency-Key`. Without
+  Resend or `RESEND_FROM`, both stay in test mode (`testMode: true`).
+- Config: `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_WEBHOOK_SECRET`. Test apps never use the `.env` key;
+  `buildApp({ email: { resend, from } })` passes a provider with a fake `fetch`.
 
 ## Background jobs (`apps/api/src/jobs.ts`)
 

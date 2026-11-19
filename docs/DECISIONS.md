@@ -80,7 +80,7 @@ problem re-discovered.
   meeting and its audit row stay, the conversation is not saved. The conversation id is generated
   before the first tool call so audit rows and events can point at it.
 - **Calls in one model response run one at a time, in order**, since they may depend on each other.
-- **The calendar is built in and email is test mode**: no calendar or email provider has been chosen.
+- **The calendar is built in; email goes through Resend** (owner's choice, 2026-11-19), test mode without a key.
   The booking tool converts local time with the employee's working-hours time zone.
 - **The current date and time are in the system prompt** (employee's time zone), so "tomorrow at
   3 PM" can be resolved. This changes the prompt every minute; it already varied with knowledge.
@@ -181,8 +181,14 @@ problem re-discovered.
 - **The widget is plain JavaScript served by the API** (`/widget.js`), in a shadow root, no build step, no
   framework, so any website can embed it and the host page's CSS cannot break it. Replies are plain text
   (`textContent`): no markdown rendering, so no HTML injection.
-- **Email is a channel in test mode**: the employee writes the reply and it is logged, not sent, as with the email tool,
-  until an email provider is chosen. Inbound uses our own small JSON shape behind a secret URL.
+- **Email through Resend** (owner's choice): one provider sends for the email channel, the `send_email` tool and
+  workflow Message steps, and receives mail on a verified domain. Called with `fetch`, no SDK. Without
+  `RESEND_API_KEY` everything stays in test mode, as before. The JSON inbound hook stays for other inbound services.
+- **Email threads by a tagged Reply-To** (`support+<conversation id>@domain`), because Resend assigns the Message-ID
+  of what we send and does not tell us, so a customer's In-Reply-To cannot be matched to our reply. Resend receives
+  every address on the domain, and the tag only continues a conversation that belongs to the same customer.
+- **Test apps never use the `.env` email key**: a test that does not pass a provider gets test mode, so a developer's
+  real Resend key cannot send mail from the test suite.
 - **Voice turns go to the channel message log too**, so one log answers "what did customers say and what did they get
   back" on every channel; the timed call transcript stays as it was.
 

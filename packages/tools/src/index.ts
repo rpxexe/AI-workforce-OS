@@ -11,7 +11,7 @@ export { createToolExecutor, type ToolExecutor, type ToolOutcome, type ToolScope
 export { isPrivateAddress, safeFetch } from "./net.ts";
 export { createToolRegistry, type ToolRegistry } from "./registry.ts";
 export { localTime, zonedTime } from "./tools/calendar.ts";
-export { defineTool, ToolError, type AnyTool, type RetryPolicy, type ToolContext, type ToolDefinition } from "./types.ts";
+export { defineTool, ToolError, type AnyTool, type Mailer, type RetryPolicy, type ToolContext, type ToolDefinition } from "./types.ts";
 
 /** Every tool the platform offers. */
 export const toolRegistry = createToolRegistry([calendarTool, emailTool, httpRequestTool, webhookTool]);

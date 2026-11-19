@@ -138,6 +138,7 @@ export function EmployeeChannels({
                 granted={grantedTools}
                 titles={titles}
                 whatsappProviders={data.whatsappProviders}
+                email={{ provider: data.emailProvider, webhookUrl: data.emailWebhookUrl }}
                 onSaved={saved}
               />
             </TabsContent>
@@ -194,6 +195,7 @@ function ChannelForm({
   granted,
   titles,
   whatsappProviders,
+  email,
   onSaved,
 }: {
   kind: MessagingChannel;
@@ -203,6 +205,7 @@ function ChannelForm({
   granted: ToolName[];
   titles: Record<ToolName, string>;
   whatsappProviders: WhatsAppProviderName[];
+  email: EmailSetup;
   onSaved: () => void;
 }) {
   const api = useApi();
@@ -273,9 +276,10 @@ function ChannelForm({
           now.
         </p>
       )}
-      {kind === "email" && (
+      {kind === "email" && email.provider === null && (
         <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-          Test mode: replies are written and logged below, but not delivered, until an email provider is chosen.
+          Test mode: replies are written and logged below, but not delivered. Add RESEND_API_KEY and RESEND_WEBHOOK_SECRET to the server&apos;s .env to
+          send and receive through Resend.
         </p>
       )}
 
@@ -440,7 +444,7 @@ function ChannelForm({
         </div>
       )}
 
-      {channel && <Connect channel={channel} />}
+      {channel && <Connect channel={channel} email={email} />}
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
@@ -473,7 +477,10 @@ function SwitchRow({
 }
 
 /** How to connect the saved channel: the embed code, the webhook to give Meta, the inbound email hook. */
-function Connect({ channel }: { channel: EmployeeChannelInfo }) {
+/** How the server sends and receives email: Resend, or test mode. */
+type EmailSetup = { provider: "resend" | null; webhookUrl: string | null };
+
+function Connect({ channel, email }: { channel: EmployeeChannelInfo; email: EmailSetup }) {
   if (channel.kind === "web_chat")
     return (
       <div className="flex flex-col gap-4 border-t pt-4">
@@ -527,9 +534,22 @@ function Connect({ channel }: { channel: EmployeeChannelInfo }) {
   }
   return (
     <div className="flex flex-col gap-3 border-t pt-4">
-      <h3 className="text-sm font-medium">Forward incoming email</h3>
+      {email.provider === "resend" && email.webhookUrl && (
+        <>
+          <h3 className="text-sm font-medium">Connect it in Resend</h3>
+          <p className="text-xs text-muted-foreground">
+            Verify the address&apos;s domain in Resend and turn on receiving for it (its MX record). Then add a webhook with the URL below and the events{" "}
+            <code className="font-mono">email.received</code>, <code className="font-mono">email.sent</code>,{" "}
+            <code className="font-mono">email.delivered</code>, <code className="font-mono">email.bounced</code>,{" "}
+            <code className="font-mono">email.failed</code> and <code className="font-mono">email.opened</code>, and put its signing secret in the
+            server&apos;s RESEND_WEBHOOK_SECRET.
+          </p>
+          <CopyBlock label="Resend webhook URL" value={email.webhookUrl} />
+        </>
+      )}
+      <h3 className="text-sm font-medium">{email.provider === "resend" ? "Or forward incoming email" : "Forward incoming email"}</h3>
       <p className="text-xs text-muted-foreground">
-        Point your inbound email service (or a forwarding script) at this URL. It POSTs JSON:{" "}
+        Point another inbound email service (or a forwarding script) at this URL. It POSTs JSON:{" "}
         <code className="font-mono">{"{ from, subject, text, messageId, inReplyTo? }"}</code>. Keep the URL secret.
       </p>
       {channel.url && <CopyBlock label="Inbound webhook" value={channel.url} />}
