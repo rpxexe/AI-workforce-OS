@@ -3,5 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts"
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@workforce/agent-runtime": "workspace:*",
+    "@workforce/ai-provider": "workspace:*",
+    "@workforce/database": "workspace:*",
+    "@workforce/memory": "workspace:*",
+    "@workforce/shared": "workspace:*",
+    "@workforce/telephony": "workspace:*",
+    "@workforce/tools": "workspace:*",
+    "zod": "^4.6.7"
+  }
 }

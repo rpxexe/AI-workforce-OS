@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-17, during Phase 7.
+Last updated: 2026-11-17, end of Phase 8.
 
 ## Phases
 
@@ -14,13 +14,24 @@ Last updated: 2026-11-17, during Phase 7.
 | 5 | Persistent customer memory: customers, profiles, extracted and validated memories, conversation summaries, recall in the runtime | Built; confirmed through the API with real OpenRouter models, test chat customer field not yet tried in a browser |
 | 6 | Tool system: registry, permissions (grants), validation, executor with timeouts and retries, audit log; calendar, email (test mode), HTTP request, webhook | Built; the meeting-booking flow confirmed with a real OpenRouter model, Tools card not yet tried in a browser |
 | 7 | Real-time voice: Twilio inbound and outbound calls, Deepgram STT, ElevenLabs TTS, the same agent runtime, barge-in, transcripts, call state | Built and passing with a simulated Twilio stream; **a real phone call has not happened yet** (needs the Twilio, Deepgram and ElevenLabs keys in `.env`). Do not start Phase 8 before it does |
-| 8+ | Not started | Owner pastes the next phase prompt |
+| 8 | Visual AI journey builder: React Flow editor, workflow versions, validation (incl. step references), publish/pause, delete (dependency check, confirmation) / restore / duplicate, background engine (Postgres job queue), runs with step records, retry, idempotency keys for steps with outside effects, 12 node types, the lead follow-up example | Built; the example runs end to end in the tests with a faked phone line and model; editor and runs pages checked in headless Edge (desktop and phone width). Started before the real phone call, because the owner pasted the phase |
+| 9+ | Not started | Owner pastes the next phase prompt |
 
 ## Open items
 
-- **Real phone call pending.** Fill `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `DEEPGRAM_API_KEY`,
-  `ELEVENLABS_API_KEY` and `VOICE_NUMBER` in `.env`, start `ngrok http 4000`, then run
-  `PUBLIC_URL=<ngrok url> pnpm --filter @workforce/api try-call` and call the number.
+- **The example workflow on a real line** needs the voice keys below, an employee with a phone number, the
+  calendar tool and a published version. Start it by POSTing a lead to the webhook URL shown on the trigger
+  (`{ name, phone, email, preferredDate, preferredTime }`).
+
+- **Real phone call pending.** The Twilio trial gives no number any more, so Telnyx was added (2026-11-19):
+  its pretrial account has one free US number (calls only to and from the verified number, 10 minutes,
+  reclaimed after 30 days without upgrading). Fill `TELNYX_API_KEY`, `TELNYX_APP_ID` (a TeXML
+  Application), `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` and `VOICE_NUMBER` in `.env`, start
+  `ngrok http 4000`, check `try-call --numbers`, then run
+  `PUBLIC_URL=<ngrok url> CALL_TO=<verified number> pnpm --filter @workforce/api try-call`.
+- **Telnyx is untested against the real API.** Unconfirmed from the docs: the account id lookup
+  (`/v2/user_profile`), whether outbound calls return a call id, and the media stream fields. The
+  test fakes Telnyx's REST calls.
 
 - **Clerk Organizations is disabled** in the owner's Clerk application ("AI Workforce", development
   instance). The app cannot get past "Choose an organization" until it is enabled in the Clerk dashboard.
@@ -35,7 +46,18 @@ Last updated: 2026-11-17, during Phase 7.
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
 - Docker Postgres and Redis run via `pnpm infra:up`; all three migrations are applied there.
-- 52 API tests against the Docker Postgres (`pnpm test`). Voice (9, simulated Twilio over a real
+- 64 API tests against the Docker Postgres (`pnpm test`). Workflows (12, fake model, fake Twilio, fake network,
+  the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
+  greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
+  through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
+  (branches, loops, reachability, settings, triggers); publish refusing invalid versions, unknown employees and
+  ungranted tools; versions (save appends, runs keep their version) and Wait; a failure then retry from the failed
+  step (attempt 2); CRM Update into customer memory and profile; pause holding a due run, resume releasing it; an
+  AI Employee step on the workflow channel; Human Handoff waiting for Continue; roles, isolation, webhook token;
+  references to missing, self or not-always-earlier steps; delete refused with a run in progress, then stopping it,
+  hook URL 404, restore paused, retry of the stopped run, duplicate; crash re-runs (tool reuses its audited
+  outcome without booking again, HTTP resends the same Idempotency-Key, Voice Call follows the placed call without
+  dialing, an interrupted AI Employee turn fails). Earlier: Voice (9, simulated Twilio over a real
   WebSocket in Twilio's message format, fake STT/TTS/model): a call from greeting to hang-up (audio
   reaches STT, the caller's turn goes through runTurn with the employee's tools and the phone-call
   style, the calendar tool books, the reply is spoken sentence by sentence, transcript, conversation
@@ -83,11 +105,11 @@ Last updated: 2026-11-17, during Phase 7.
 
 ## Deliberately not built yet
 
-WhatsApp, web chat, email channel, workflows, human handoff
+WhatsApp, web chat, email channel, human handoff in conversations
 (escalation settings are stored but the runtime does not act on them, nor on working hours),
-analytics, billing, model routing. In the dashboard, Customers (the API has read routes), Conversations,
-Workflows and Analytics are placeholder pages. Packages other than `database`, `shared`,
-`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts` and `telephony`, and
+analytics, billing, model routing. In the dashboard, Customers (the API has read routes), Conversations
+and Analytics are placeholder pages. Packages other than `database`, `shared`,
+`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony` and `workflows`, and
 all three workers, are empty stubs.
 
 Also skipped, small: scanned PDFs (no OCR), a queue for document processing (it runs inside the
@@ -103,5 +125,12 @@ channels, a queue for memory extraction (it runs in the API process after the re
 sends the last 40 messages), deleting or renaming conversations, workspace rename/delete, hard delete of employees, list pagination (capped
 at 200 per workspace), avatar image upload (icons only), mirroring Clerk users into our database.
 
-Not installed: Inngest, Cloudflare R2, React Flow, a Redis client, Prettier, Turborepo.
+Workflows, skipped: permanently deleting workflows (delete is soft), cancelling a single run (deleting stops all),
+a dependency check when archiving an employee a workflow uses (publishing and the step itself catch it), loops and parallel branches, triggers other
+than manual and webhook (no "customer created" or schedule events), automatic per-step retries (retry is manual;
+tools keep their own retry policy), delivered messages (Message is email in test mode, recorded on the step), SMS,
+an external CRM (CRM Update writes our customer memory), notifying anyone about a Human Handoff (it waits on the
+Runs tab), webhook signing, run history paging (newest 50), dark mode on the canvas.
+
+Not installed: Inngest, Cloudflare R2, a Redis client, Prettier, Turborepo.
 

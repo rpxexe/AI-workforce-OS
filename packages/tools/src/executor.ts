@@ -21,6 +21,8 @@ export type ToolScope = {
   conversationId: string;
   customerId?: string;
   timezone: string;
+  /** The audit row id, also the webhook idempotency key. Workflows pass a stable one so a step run twice is recognised. */
+  executionId?: string;
 };
 
 export type ToolOutcome = { executionId: string; status: ToolExecutionStatus; result: ToolResult };
@@ -49,7 +51,7 @@ export function createToolExecutor(
 
   return {
     async execute(call, scope, signal) {
-      const executionId = randomUUID();
+      const executionId = scope.executionId ?? randomUUID();
       const startedAt = Date.now();
       let attempts = 0;
 

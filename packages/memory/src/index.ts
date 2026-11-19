@@ -42,19 +42,40 @@ const customerIn = (scope: CustomerScope & { customerId: string }) => ({
   workspaceId: scope.workspaceId,
 });
 
+/** The customer known by `externalId` in the workspace, created on first contact. Returns its id. */
+export async function identifyCustomer({ organizationId, workspaceId }: CustomerScope, externalId: string) {
+  // Create-if-missing without upsert, which is not atomic (see DECISIONS.md).
+  await prisma.customer.createMany({ data: [{ organizationId, workspaceId, externalId }], skipDuplicates: true });
+  const customer = await prisma.customer.update({
+    where: { workspaceId_externalId: { workspaceId, externalId }, organizationId },
+    data: { lastSeenAt: new Date() },
+    select: { id: true },
+  });
+  return customer.id;
+}
+
+/**
+ * The writes that store `facts` for a customer, for one transaction: new keys are inserted, then
+ * every key is overwritten (last writer wins, no upsert race), and identity keys update the profile.
+ */
+export function factWrites(customerId: string, facts: Fact[], conversationId: string | null) {
+  const profile = Object.fromEntries(
+    facts.filter((f) => f.category === "identity" && (PROFILE_KEYS as readonly string[]).includes(f.key)).map((f) => [f.key, f.value]),
+  );
+  return [
+    prisma.customerMemory.createMany({ data: facts.map((f) => ({ customerId, conversationId, ...f })), skipDuplicates: true }),
+    ...facts.map((f) =>
+      prisma.customerMemory.updateMany({ where: { customerId, key: f.key }, data: { category: f.category, value: f.value, conversationId } }),
+    ),
+    prisma.customerProfile.createMany({ data: [{ customerId, ...profile }], skipDuplicates: true }),
+    prisma.customerProfile.update({ where: { customerId }, data: profile }),
+  ];
+}
+
 /** Memory stored in Postgres, with `provider` doing the extraction. */
 export function memoryService(provider: AIProvider, timeoutMs: number): MemoryService {
   return {
-    async identify({ organizationId, workspaceId }, externalId) {
-      // Create-if-missing without upsert, which is not atomic (see DECISIONS.md).
-      await prisma.customer.createMany({ data: [{ organizationId, workspaceId, externalId }], skipDuplicates: true });
-      const customer = await prisma.customer.update({
-        where: { workspaceId_externalId: { workspaceId, externalId }, organizationId },
-        data: { lastSeenAt: new Date() },
-        select: { id: true },
-      });
-      return customer.id;
-    },
+    identify: identifyCustomer,
 
     async recall(scope) {
       const customer = await prisma.customer.findFirst({
@@ -89,23 +110,8 @@ export function memoryService(provider: AIProvider, timeoutMs: number): MemorySe
         if (event.type === "text") text += event.text;
       const { facts, summary } = parseExtraction(text);
 
-      const profile = Object.fromEntries(
-        facts.filter((f) => f.category === "identity" && (PROFILE_KEYS as readonly string[]).includes(f.key)).map((f) => [f.key, f.value]),
-      );
       await prisma.$transaction([
-        // Insert new keys, then overwrite every learned key: last writer wins, no upsert race.
-        prisma.customerMemory.createMany({
-          data: facts.map((f) => ({ customerId, conversationId, ...f })),
-          skipDuplicates: true,
-        }),
-        ...facts.map((f) =>
-          prisma.customerMemory.updateMany({
-            where: { customerId, key: f.key },
-            data: { category: f.category, value: f.value, conversationId },
-          }),
-        ),
-        prisma.customerProfile.createMany({ data: [{ customerId, ...profile }], skipDuplicates: true }),
-        prisma.customerProfile.update({ where: { customerId }, data: profile }),
+        ...factWrites(customerId, facts, conversationId),
         ...(summary ? [prisma.customerConversation.updateMany({ where: { conversationId, customerId }, data: { summary } })] : []),
       ]);
       return facts;

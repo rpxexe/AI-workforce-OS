@@ -67,6 +67,22 @@ const MESSAGES: Record<Extract<TurnEvent, { type: "error" }>["kind"], string> = 
   internal: "Something went wrong while answering. Try again.",
 };
 
+// workingHours and escalation are JSON columns; employeeConfigSchema validated them on the way in.
+/** The configuration stored in an employee version row. */
+export const configOf = (v: Prisma.AiEmployeeVersionGetPayload<object>) =>
+  ({
+    name: v.name,
+    description: v.description,
+    role: v.role,
+    personality: v.personality,
+    systemInstructions: v.systemInstructions,
+    goals: v.goals,
+    language: v.language,
+    avatar: v.avatar,
+    workingHours: v.workingHours,
+    escalation: v.escalation,
+  }) as EmployeeConfig;
+
 export const toMessage = (m: Prisma.ConversationMessageGetPayload<object>): ConversationMessage => ({
   id: m.id,
   role: m.role,

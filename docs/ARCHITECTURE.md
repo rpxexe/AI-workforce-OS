@@ -15,7 +15,7 @@ packages/tools         Tool system: registry, executor (permission, validation, 
 packages/telephony     `TelephonyProvider` and Twilio (REST, TwiML, webhook signatures, Media Streams messages).
 packages/stt           `STTProvider` and Deepgram live transcription (turn detection, reconnects).
 packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
-packages/*        workflows: empty stub.
+packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
 workers/*         agent-worker, call-worker, evaluation-worker: empty stubs.
 ```
 
@@ -64,6 +64,14 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   that took it, `conversationId` (set after the first saved exchange), `customerId`, timestamps,
   `durationSec`, `error`. `CallParticipant`: the customer and the employee. `CallTranscript`: what
   each side said, with `offsetMs` and `interrupted`.
+- `Workflow`: name, description, `status` (DRAFT, ACTIVE, PAUSED), `publishedVersionId`, `hookToken` (secret in
+  the webhook trigger URL), `deletedAt` (soft delete; restore clears it).
+  `Call.idempotencyKey` (unique) lets a Voice Call step find the call it already placed. `WorkflowVersion`: immutable `definition` JSON, `number` unique per workflow.
+- `WorkflowExecution`: one run of a version, and the background job itself: `status` (QUEUED, RUNNING, WAITING,
+  COMPLETED, FAILED), `input` (trigger data), `context` (step outputs by node id), `currentNodeId`, `runAt` (when it
+  is due; null while waiting for a person), `lockedUntil`, `error`, `startedBy` (user id or "webhook").
+- `WorkflowStepExecution`: one attempt at one node: `attempt`, `status` (RUNNING, WAITING, SUCCEEDED, FAILED),
+  `input` (settings with templates filled), `output`, `state` (what a waiting step remembers), `error`.
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -114,15 +122,32 @@ GET   .../employees/:id/tools                   member; tools granted to the emp
 PUT   .../employees/:id/tools                   admin; body { tools: [{ name, config }] }; replaces the set
 GET   /workspaces/:workspaceId/tool-executions  member; audit log, newest 100; ?employeeId= ?conversationId=
 GET   /workspaces/:workspaceId/phone-numbers    member
-POST  /workspaces/:workspaceId/phone-numbers    admin; body { number, employeeId, greeting? }; points the Twilio number here
+POST  /workspaces/:workspaceId/phone-numbers    admin; body { number, employeeId, greeting? }; the first configured provider owning it takes it and points it here
 POST  .../phone-numbers/:numberId/reconnect     admin; re-points it (new PUBLIC_URL)
 DELETE .../phone-numbers/:numberId              admin
 POST  .../employees/:id/calls                   admin; body { to, phoneNumberId?, greeting? }; outbound call
 GET   /workspaces/:workspaceId/calls            member; newest 50; ?employeeId=
 GET   .../calls/:callId                         member; participants and transcript
-POST  /voice/twilio/inbound                     Twilio webhook (signature-checked): answers with <Connect><Stream>
-POST  /voice/twilio/status                      Twilio call status callback (signature-checked)
-GET   /voice/twilio/stream                      WebSocket: Twilio Media Stream (token-checked on start)
+POST  /voice/:provider/inbound                  provider webhook (twilio|telnyx; checked): answers with <Connect><Stream>
+POST  /voice/:provider/status                   call status callback (checked); ?callId= on outbound calls
+GET   /voice/:provider/stream                   WebSocket: the provider's media stream (token-checked on start)
+GET   /workspaces/:workspaceId/workflows        member; ?deleted=true lists deleted ones instead
+POST  /workspaces/:workspaceId/workflows        admin; body { name, description?, definition? } (blank: trigger -> end)
+POST  .../workflows/validate                    member; body { definition }; returns { issues }
+GET   .../workflows/:id                         member; ?version=n; definition, versions, issues, hookUrl (admins only)
+PUT   .../workflows/:id                         admin; body { name, description?, definition }; appends a version
+POST  .../workflows/:id/publish                 admin; body { version }; 400 with issues if invalid; first publish activates
+PATCH .../workflows/:id/status                  admin; ACTIVE | PAUSED
+GET   .../workflows/:id/dependencies            admin; { activeRuns, webhookTrigger }: what deleting affects
+DELETE .../workflows/:id                        admin; 409 while runs are in progress unless ?stopRuns=true; 204
+POST  .../workflows/:id/restore                 admin; undeletes, PAUSED (DRAFT if never published)
+POST  .../workflows/:id/duplicate               admin; body { version? }; new DRAFT workflow "Copy of ...", 201
+POST  .../workflows/:id/executions              admin; body { input }; 202, runs the published version
+GET   .../workflows/:id/executions              member; newest 50
+GET   /workspaces/:workspaceId/workflow-executions/:executionId   member; with steps and definition
+POST  .../workflow-executions/:executionId/retry                admin; FAILED only, from the failed step
+POST  .../workflow-executions/:executionId/resume               admin; continues a Human Handoff
+POST  /hooks/workflows/:id/:token               public; JSON body becomes the trigger data; 202 { executionId }
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -200,9 +225,9 @@ model asks for a tool (provider-independent ToolCall)
 ## Voice
 
 ```
-inbound: Twilio -> POST /voice/twilio/inbound -> Call row, caller identified as a customer by number
-         -> TwiML <Connect><Stream url=wss://PUBLIC_URL/voice/twilio/stream> with callId + token
-outbound: POST .../employees/:id/calls -> Twilio Calls API with the same TwiML inline
+inbound: provider -> POST /voice/<provider>/inbound -> Call row, caller identified as a customer by number
+         -> TwiML/TeXML <Connect><Stream url=wss://PUBLIC_URL/voice/<provider>/stream> with callId + token
+outbound: POST .../employees/:id/calls -> the calling number's provider, the same markup inline
 stream (apps/api/src/voice/session.ts), one per call:
   start      check token, load the call's published employee version, knowledge, tools, customer
              greeting spoken
@@ -224,11 +249,60 @@ stream (apps/api/src/voice/session.ts), one per call:
   retried once; a failed reply is apologised for; lost STT ends the call politely; if the stream
   fails, the TwiML after `<Connect>` says sorry and hangs up. Silence: a check-in after 15 s, hang-up
   after 15 s more. Calls end after 30 minutes.
-- Config: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `PUBLIC_URL`, `DEEPGRAM_API_KEY`,
+- Providers (`packages/telephony`): Twilio and Telnyx (TeXML, Twilio-compatible markup) behind
+  `TelephonyProvider`. Both can be configured at once; `PhoneNumber.provider` and `Call.provider`
+  say which one a number and a call use. A number is matched to a provider when it is assigned.
+- Config: `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` and/or `TELNYX_API_KEY` + `TELNYX_APP_ID`
+  (optional `TELNYX_ACCOUNT_SID`), `PUBLIC_URL`, `DEEPGRAM_API_KEY`,
   `ELEVENLABS_API_KEY` (optional `DEEPGRAM_MODEL`, `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL`). Without
   them, voice routes answer 503 naming what is missing; the rest of the API works.
 - `apps/api/src/try-call.ts` (`pnpm --filter @workforce/api try-call`): a real call without the
   dashboard, in a throwaway organization.
+
+## Workflows
+
+```
+editor (React Flow, dashboard)  draws and edits a WorkflowDefinition: { nodes: [{ id, type, name, position,
+                                config }], edges: [{ source, target, branch? }] }. Nothing in React runs a step.
+PUT -> WorkflowVersion (append-only)    publish -> validateWorkflow + employee/tool checks -> live pointer
+start (dashboard, API, webhook) -> WorkflowExecution QUEUED at the trigger node
+runner (engine.startRunner, every 1 s, in the API process)
+  claim:   UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED): active workflows, due runAt,
+           or RUNNING with an expired lock (its runner died)
+  advance: per node: step row -> settings (defaults + {{templates}}) -> handlers[type]
+           -> SUCCEEDED (output into context, follow the edge / yes|no branch) | WAITING (runAt) | FAILED
+```
+
+- Definition schema, per-node settings (`nodeConfigSchemas`), `validateWorkflow`, `blankWorkflow` and the example
+  `leadFollowUpWorkflow` live in `packages/shared/src/workflow.ts`, so the editor shows the issues publishing
+  enforces. Saving accepts incomplete settings; publishing does not.
+- Templates: `{{trigger.field}}`, `{{steps.<node id>.field}}` (`packages/workflows/src/template.ts`). In tool
+  arguments a value that is exactly one template keeps its type.
+- Nodes (`packages/workflows/src/nodes.ts`): Trigger (manual | webhook); AI Employee (`runTurn`, channel
+  "workflow", published version); Condition (compare, or the model answers yes/no about the run's data); Tool
+  (through `ToolExecutor` with the chosen employee's grant; the run id is the audit row's conversation id; a
+  calendar conflict fails the step); HTTP Request and Webhook (`safeFetch`; Webhook POSTs the run data with an
+  idempotency key); Wait; Voice Call (places the call through the voice routes' `placeCall`, then checks the Call
+  row every `callPollMs` until it ends; output includes the transcript); Message (email, test mode); CRM Update
+  (customer memory via `identifyCustomer` + `factWrites`); Human Handoff (waits until Continue); End.
+- Validation also checks references: `{{steps.<id>}}` must name a step that runs before this one on every path
+  (a dominator), not the step itself; other roots than `trigger`/`steps` are refused. Only conditions may have
+  yes/no edges.
+- Pause holds runs between steps and keeps them from being claimed; resume releases them. Retry re-queues a FAILED
+  run at its failed node, which gets a new attempt row. A step that was RUNNING when its runner died runs again,
+  as the same attempt (`interrupted`).
+- Idempotency key per step attempt: `executionId:nodeId:attempt`. Tool: the audit row id is `wf:<key>`; a re-run
+  reuses its recorded outcome, and the webhook tool sends it as its key. HTTP Request and Webhook send it as the
+  `Idempotency-Key` header. Voice Call: `placeCall` with the same key returns the earlier call, or fails if that
+  try stopped mid-dial. AI Employee: an interrupted turn fails (it may have used tools). Message (test mode)
+  carries it as `messageId`. CRM Update writes are upserts. A manual retry is a new attempt and acts again.
+- Engine transitions only apply while the run is still RUNNING (`settle`), so a run stopped mid-step stays stopped.
+- Delete: hides the workflow, 404s its hook URL, fails runs in progress ("Stopped: the workflow was deleted"; they can
+  be retried after a restore). Duplicate copies one version into a new draft with its own hook token.
+- Dashboard: `/workflows` (list; new from blank or the example; deleted workflows with Restore) and
+  `/workflows/[id]` (Save draft, Restore as vN for an old version, Publish, Pause/Resume, Duplicate, Delete with
+  a confirmation listing what it affects; editor tab: canvas, step palette, settings panel, checks; runs tab: start with JSON input, history, per-run canvas coloured by step status,
+  steps with input and output, Retry, Continue). Components in `src/components/workflows/`.
 
 ## Agent runtime
 

@@ -10,10 +10,11 @@ import {
 import { prisma } from "@workforce/database";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
-import { twilioFromEnv } from "@workforce/telephony";
-import { createToolExecutor, toolRegistry } from "@workforce/tools";
+import { telnyxFromEnv, twilioFromEnv, type TelephonyProvider } from "@workforce/telephony";
+import { createToolExecutor, safeFetch, toolRegistry } from "@workforce/tools";
 import { ttsFromEnv } from "@workforce/tts";
-import type { ApiError, HealthResponse } from "@workforce/shared";
+import { placeCallSchema, type ApiError, type HealthResponse } from "@workforce/shared";
+import { createWorkflowEngine, StepError } from "@workforce/workflows";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { clerkAuthenticate, type Authenticate } from "./auth.ts";
@@ -23,6 +24,7 @@ import { employeeRoutes } from "./employees.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
 import { toolRoutes } from "./tools.ts";
 import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
+import { workflowRoutes } from "./workflows.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
 /**
@@ -40,6 +42,8 @@ export async function buildApp(
     /** Telephony, speech and limits; each defaults to what .env configures. */
     voice?: Partial<VoiceConfig>;
     aiTimeoutMs?: number;
+    /** The workflow runner: how often it looks for due runs, and how often a Voice Call step checks its call. Tests that give this get a runner. */
+    workflows?: { intervalMs?: number; callPollMs?: number };
     logger?: boolean;
   } = {},
 ) {
@@ -115,21 +119,48 @@ export async function buildApp(
     timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
   };
   conversationRoutes(app, authenticate, ai);
-  voiceRoutes(
+  const voice = voiceRoutes(
     app,
     authenticate,
     {
-      telephony: twilioFromEnv(),
+      telephony: [twilioFromEnv(), telnyxFromEnv()].filter((p): p is TelephonyProvider => p !== null),
       stt: sttFromEnv(),
       tts: ttsFromEnv(),
       publicUrl: process.env.PUBLIC_URL || null,
-      secret: process.env.TWILIO_AUTH_TOKEN || null,
+      secret: process.env.TWILIO_AUTH_TOKEN || process.env.TELNYX_API_KEY || null,
       limits: { idleMs: 15_000, maxCallMs: 30 * 60_000 },
       ...options.voice,
     },
     ai,
   );
 
-  app.addHook("onClose", () => prisma.$disconnect());
+  const engine = createWorkflowEngine({
+    ...ai,
+    fetch: options.toolFetch ?? safeFetch,
+    async placeCall({ employeeId, to, greeting, idempotencyKey, ...tenant }) {
+      const body = placeCallSchema.safeParse({ to, greeting });
+      if (!body.success) throw new StepError(`Cannot call "${to}": ${body.error.issues[0]?.message}`);
+      try {
+        const call = await voice.placeCall({ ...tenant, createdBy: null, idempotencyKey }, employeeId, body.data);
+        return { callId: call.id };
+      } catch (err) {
+        // httpError messages (not configured, not published, provider refused) are meant to be shown.
+        const shown = (err as { expose?: boolean }).expose && err instanceof Error;
+        throw new StepError(shown ? err.message : "The call could not be placed");
+      }
+    },
+    callPollMs: options.workflows?.callPollMs ?? 15_000,
+    onError: (err, context) => app.log.error({ err }, `${context} failed`),
+  });
+  workflowRoutes(app, authenticate, engine, process.env.PUBLIC_URL || null);
+  // Runs workflows in the background, in this process (see DECISIONS.md). Tests run it only when
+  // they ask for it, so test files running side by side never run each other's workflows.
+  const runner = !options.authenticate || options.workflows !== undefined;
+  const stopRunner = runner ? engine.startRunner(options.workflows?.intervalMs ?? 1000) : async () => {};
+
+  app.addHook("onClose", async () => {
+    await stopRunner();
+    await prisma.$disconnect();
+  });
   return app;
 }

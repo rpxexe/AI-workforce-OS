@@ -17,3 +17,4 @@ export * from "./knowledge.ts";
 export * from "./customer.ts";
 export * from "./tool.ts";
 export * from "./voice.ts";
+export * from "./workflow.ts";

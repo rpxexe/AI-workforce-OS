@@ -16,10 +16,19 @@ export type MediaEvent =
 
 export class TelephonyError extends Error {}
 
+export type Webhook = {
+  /** The exact public URL the provider called. */
+  url: string;
+  /** The form-encoded body, parsed. */
+  params: Record<string, string>;
+  rawBody: string;
+  headers: Record<string, string | string[] | undefined>;
+};
+
 export interface TelephonyProvider {
   readonly name: string;
-  /** Whether a webhook really came from the provider. `url` is the exact public URL it called. */
-  verifyWebhook(url: string, params: Record<string, string>, signature: string | undefined): boolean;
+  /** Whether a webhook really came from the provider. */
+  verifyWebhook(webhook: Webhook): boolean;
   /** Webhook answer that connects the call to our media stream; `parameters` come back on its start event. */
   connectToStream(streamUrl: string, parameters: Record<string, string>): string;
   /** Webhook answer that tells the caller something and hangs up. */
@@ -33,7 +42,7 @@ export interface TelephonyProvider {
     parameters: Record<string, string>;
     statusCallbackUrl: string;
     timeLimitSec: number;
-  }): Promise<{ providerCallId: string }>;
+  }): Promise<{ providerCallId: string | null }>; // null: learned from the first status callback
   endCall(providerCallId: string): Promise<void>;
   /** Points a number the account owns at our webhooks. Fails if the account does not own it. */
   configureNumber(number: string, urls: { voiceUrl: string; statusCallbackUrl: string }): Promise<{ providerNumberId: string }>;
