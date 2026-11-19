@@ -340,7 +340,8 @@ editor (React Flow, dashboard)  draws and edits a WorkflowDefinition: { nodes: [
                                 config }], edges: [{ source, target, branch? }] }. Nothing in React runs a step.
 PUT -> WorkflowVersion (append-only)    publish -> validateWorkflow + employee/tool checks -> live pointer
 start (dashboard, API, webhook) -> WorkflowExecution QUEUED at the trigger node
-runner (engine.startRunner, every 1 s, in the API process)
+Inngest: workflow/run.due per due run -> engine.runOne (claim this run, advance) -> step.sleepUntil; sweep every minute
+without Inngest: runner (engine.startRunner, every 1 s, in the API process)
   claim:   UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED): active workflows, due runAt,
            or RUNNING with an expired lock (its runner died)
   advance: per node: step row -> settings (defaults + {{templates}}) -> handlers[type]
@@ -424,10 +425,32 @@ Request bodies are validated with the Zod schemas in `packages/shared/src/employ
 - `src/components/employees/`: `employee-form.tsx` (create and edit), `meta.tsx` (avatar, status badge).
 - Pages are client components that fetch from the API; there are no server-side data fetches.
 
+## Background jobs (`apps/api/src/jobs.ts`)
+
+```
+knowledge/document.uploaded  { documentId }                 processDocument (records READY or FAILED itself)
+memory/exchange.saved        { tenant, customerId, conversationId, replyId }   loads the exchange, MemoryService.remember
+channel/message.received     { messageId, queueKey }        channelService.answerRecorded; one at a time per queueKey
+workflow/run.due             { executionId }                loop: step.run(engine.runOne) -> step.sleepUntil(next runAt)
+workflow-sweep               cron, every minute             engine.dueRuns -> workflow/run.due for each
+```
+
+- `jobs.send(name, data)` queues a job. Backends: **Inngest** when `INNGEST_EVENT_KEY` or `INNGEST_DEV` is set (never
+  for test apps), serving the functions at `/api/inngest` (`inngest/fastify`); otherwise **in process**: the handler
+  starts at once, not awaited, ordered per `orderedBy` key, and workflows use `engine.startRunner` instead of events
+  and the sweep. `buildApp({ jobs })` takes "inngest", "inline" or a factory (tests capture the definitions with it).
+- Events carry ids only; handlers read what they need from Postgres. An inbound channel message is stored whole on
+  its `ChannelMessage.payload` for the job.
+- Idempotency: a channel job answers only a message still RECEIVED; a workflow job claims its run in Postgres
+  (`SKIP LOCKED`), so duplicate or retried jobs never run a step twice; document processing replaces chunks; memory
+  writes are upserts. Retries: documents 0, memory 1, channels 1, workflows 2.
+- Calls and web chat stay in the request (real time); they are not jobs.
+
 ## Tests
 
 `apps/api/src/*.test.ts` use `node:test` against the real database with throwaway organization
 ids, cleaned up afterwards. Conversation tests inject a fake `AIProvider` through
 `buildApp({ provider, embedder, memory, aiTimeoutMs })`; memory tests wrap the real `MemoryService`
 to await its background `remember` calls; knowledge tests upload the sample files in
-`apps/api/src/fixtures`. There are no dashboard tests in the repo.
+`apps/api/src/fixtures`. `jobs.test.ts` builds the app with a fake queue (`jobs` factory) and runs each Inngest
+function's handler with recording step tools. There are no dashboard tests in the repo.

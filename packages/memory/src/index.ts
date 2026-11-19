@@ -27,7 +27,14 @@ export interface MemoryService {
   recall(scope: CustomerScope & { customerId: string; conversationId?: string }): Promise<Recalled>;
   /** Extracts what is worth keeping from one exchange, validates it and stores it. Returns what was stored. */
   remember(
-    scope: CustomerScope & { customerId: string; conversationId: string; customerMessage: string; reply: string },
+    scope: CustomerScope & {
+      customerId: string;
+      conversationId: string;
+      customerMessage: string;
+      reply: string;
+      /** The saved reply's id, so a queued job can load the exchange instead of carrying its text. */
+      replyId?: string;
+    },
   ): Promise<Fact[]>;
 }
 

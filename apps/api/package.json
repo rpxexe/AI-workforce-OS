@@ -26,6 +26,7 @@
     "@workforce/tts": "workspace:*",
     "@workforce/workflows": "workspace:*",
     "fastify": "^5.12.8",
+    "inngest": "4.26.2",
     "zod": "^4.6.7"
   },
   "devDependencies": {

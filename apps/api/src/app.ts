@@ -9,6 +9,7 @@ import {
 } from "@workforce/ai-provider";
 import { testEmailSender, whatsappProvidersFromEnv, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
+import { processDocument } from "@workforce/knowledge";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
 import { telnyxFromEnv, twilioFromEnv, type TelephonyProvider } from "@workforce/telephony";
@@ -25,11 +26,15 @@ import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
+import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
 import { toolRoutes } from "./tools.ts";
 import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
 import { workflowRoutes } from "./workflows.ts";
 import { workspaceRoutes } from "./workspaces.ts";
+
+/** Advance-then-sleep rounds one workflow/run.due job runs before leaving the rest to the sweep (Inngest caps steps per run). */
+const WORKFLOW_ROUNDS = 300;
 
 /**
  * `authenticate`, `provider`, `embedder`, `memory`, `toolFetch` and `aiTimeoutMs` exist so tests can supply identities, fake models and a fake network;
@@ -50,6 +55,11 @@ export async function buildApp(
     /** WhatsApp providers; defaults to every one .env has credentials for. */
     whatsapp?: WhatsAppProvider[];
     aiTimeoutMs?: number;
+    /**
+     * Background jobs: "inngest" or "inline" (in this process), or a factory tests use to capture the job
+     * definitions. Defaults to Inngest when INNGEST_EVENT_KEY or INNGEST_DEV is set (never for test apps).
+     */
+    jobs?: "inngest" | "inline" | ((definitions: JobDefinitions, schedules: Schedule[]) => Jobs);
     /** The workflow runner: how often it looks for due runs, and how often a Voice Call step checks its call. Tests that give this get a runner. */
     workflows?: { intervalMs?: number; callPollMs?: number };
     logger?: boolean;
@@ -112,19 +122,43 @@ export async function buildApp(
   customerRoutes(app, authenticate);
   toolRoutes(app, authenticate);
 
+  // Background jobs (jobs.ts). Created last, once everything their handlers use exists; `send` is bound late.
+  const durable = !options.authenticate && Boolean(process.env.INNGEST_EVENT_KEY || process.env.INNGEST_DEV);
+  const backend = typeof options.jobs === "function" ? "custom" : (options.jobs ?? (durable ? "inngest" : "inline"));
+  const jobs: { current?: Jobs } = {};
+  const send = <K extends JobName>(name: K, data: JobEvents[K]) => {
+    if (!jobs.current) throw new Error("Background jobs are not set up yet");
+    return jobs.current.send(name, data);
+  };
+  /** Whether jobs go to a queue (Inngest) rather than run here; known only once jobs exist, hence a function. */
+  const queued = () => jobs.current?.backend === "inngest";
+
   // Built on first use, so a missing AI key fails a chat request and not the whole server.
   let provider = options.provider;
   let embedder = options.embedder;
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
-  knowledgeRoutes(app, authenticate, getEmbedder);
+  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }));
   const tools = createToolExecutor(toolRegistry, {
     fetch: options.toolFetch,
     onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
   });
+  const learn = options.memory ?? memoryService;
   const ai = {
     provider: () => (provider ??= providerFromEnv()),
     embedder: getEmbedder,
-    memory: options.memory ?? memoryService,
+    // With a queue, learning from an exchange is a job (memory/exchange.saved) that loads it by id.
+    memory: (p: AIProvider, timeoutMs: number): MemoryService => {
+      const service = learn(p, timeoutMs);
+      return {
+        ...service,
+        remember: async (scope) => {
+          if (!queued() || !scope.replyId) return service.remember(scope);
+          const { organizationId, workspaceId, customerId, conversationId, replyId } = scope;
+          await send("memory/exchange.saved", { organizationId, workspaceId, customerId, conversationId, replyId });
+          return [];
+        },
+      };
+    },
     tools,
     timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
   };
@@ -142,11 +176,19 @@ export async function buildApp(
 
   // Messaging channels: WhatsApp, web chat and email, all answered through the same runtime.
   const whatsapp = options.whatsapp ?? whatsappProvidersFromEnv();
-  const channels = channelService({ ai, stt: voiceConfig.stt, whatsapp, email: testEmailSender, log: app.log });
+  const channels = channelService({
+    ai,
+    stt: voiceConfig.stt,
+    whatsapp,
+    email: testEmailSender,
+    log: app.log,
+    enqueue: (job) => send("channel/message.received", job),
+  });
   channelRoutes(app, authenticate, { service: channels, whatsapp, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
   webChatRoutes(app, channels);
 
-  const engine = createWorkflowEngine({
+  const engine = createWorkflowEngine(
+    {
     ...ai,
     fetch: options.toolFetch ?? safeFetch,
     async placeCall({ employeeId, to, greeting, idempotencyKey, ...tenant }) {
@@ -163,11 +205,76 @@ export async function buildApp(
     },
     callPollMs: options.workflows?.callPollMs ?? 15_000,
     onError: (err, context) => app.log.error({ err }, `${context} failed`),
-  });
+    },
+    {
+      // With a queue, a run that becomes due is a workflow/run.due job at once.
+      onDue: (executionId) =>
+        void (queued() && send("workflow/run.due", { executionId }).catch((err: unknown) => app.log.error({ err, executionId }, "Queueing a workflow run failed"))),
+    },
+  );
   workflowRoutes(app, authenticate, engine, process.env.PUBLIC_URL || null);
-  // Runs workflows in the background, in this process (see DECISIONS.md). Tests run it only when
+
+  const definitions: JobDefinitions = {
+    "knowledge/document.uploaded": {
+      retries: 0, // processDocument records FAILED itself; reprocessing is a person's choice
+      handler: ({ documentId }) => processDocument(documentId, getEmbedder(), (err) => app.log.error({ err, documentId }, "Document processing failed")),
+    },
+    "memory/exchange.saved": {
+      retries: 1, // each try is a model call
+      async handler({ replyId, ...scope }) {
+        const reply = await prisma.conversationMessage.findFirst({
+          where: { id: replyId, role: "ASSISTANT", conversation: { id: scope.conversationId, organizationId: scope.organizationId, workspaceId: scope.workspaceId } },
+        });
+        const question =
+          reply &&
+          (await prisma.conversationMessage.findFirst({
+            where: { conversationId: scope.conversationId, role: "USER", createdAt: { lt: reply.createdAt } },
+            orderBy: { createdAt: "desc" },
+          }));
+        if (!reply || !question) return;
+        await learn(ai.provider(), ai.timeoutMs).remember({ ...scope, customerMessage: question.content, reply: reply.content });
+      },
+    },
+    "channel/message.received": {
+      orderedBy: "queueKey",
+      retries: 1, // only a message still RECEIVED is answered, so a retry after a crash does not answer twice
+      handler: ({ messageId }) => channels.answerRecorded(messageId),
+    },
+    "workflow/run.due": {
+      retries: 2, // a run is claimed in Postgres, so a retried or duplicate job never runs a step twice
+      async handler({ executionId }, step) {
+        // Each round advances the run until it waits; a timer wait sleeps in Inngest, not in a process.
+        for (let round = 0; round < WORKFLOW_ROUNDS; round++) {
+          const next = await step.run(`advance-${round}`, () => engine.runOne(executionId));
+          if (!next) return;
+          await step.sleepUntil(`wait-${round}`, next);
+        }
+        // Longer runs (many Voice Call checks) are picked up again by the sweep.
+      },
+    },
+  };
+  const schedules: Schedule[] = [
+    {
+      id: "workflow-sweep",
+      cron: "* * * * *",
+      // Catches what no event announced: a lost send, a paused workflow resumed, a runner that died mid-step.
+      async handler(step) {
+        const ids = await step.run("find-due-runs", () => engine.dueRuns(100));
+        await Promise.all(ids.map((executionId) => send("workflow/run.due", { executionId })));
+        return ids.length;
+      },
+    },
+  ];
+  jobs.current =
+    typeof options.jobs === "function"
+      ? options.jobs(definitions, schedules)
+      : backend === "inngest"
+        ? inngestJobs(app, definitions, schedules)
+        : inlineJobs(definitions, app.log);
+
+  // Without a queue, workflows run on the in-process runner (see DECISIONS.md). Tests run it only when
   // they ask for it, so test files running side by side never run each other's workflows.
-  const runner = !options.authenticate || options.workflows !== undefined;
+  const runner = !queued() && (!options.authenticate || options.workflows !== undefined);
   const stopRunner = runner ? engine.startRunner(options.workflows?.intervalMs ?? 1000) : async () => {};
 
   app.addHook("onClose", async () => {

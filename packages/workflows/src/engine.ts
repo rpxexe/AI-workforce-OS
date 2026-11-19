@@ -1,12 +1,13 @@
 // Runs workflow versions. The `WorkflowExecution` row is the background job: starting a run
 // inserts a QUEUED row, and runners claim due rows (QUEUED, or WAITING whose time has come) with
 // FOR UPDATE SKIP LOCKED, so several API processes can share the work without running a step twice.
+// Runners are either the in-process poller (startRunner) or a job queue calling runOne per due run.
 //
 //   claim -> advance: node after node, one WorkflowStepExecution per attempt, until
 //            End (COMPLETED), a failure (FAILED, retryable), or a wait (WAITING until runAt,
 //            or until a person continues it)
 import { setTimeout as sleep } from "node:timers/promises";
-import { prisma, type Prisma } from "@workforce/database";
+import { Prisma, prisma } from "@workforce/database";
 import {
   nextNode,
   nodeConfigSchemas,
@@ -45,16 +46,23 @@ function settings(node: WorkflowNode, data: StepRun["data"]) {
   return config;
 }
 
-export function createWorkflowEngine(deps: EngineDeps) {
-  /** Claims up to `limit` due runs of active workflows; also takes back runs whose runner stopped mid-step. */
-  const claim = (limit: number) =>
+/** Due runs of active workflows: queued, waiting whose time has come, or running under an expired lock (their runner died). */
+const DUE = Prisma.sql`w.status = 'ACTIVE' AND w."deletedAt" IS NULL AND (
+  (x.status IN ('QUEUED', 'WAITING') AND x."runAt" <= now())
+  OR (x.status = 'RUNNING' AND x."lockedUntil" < now()))`;
+
+/**
+ * `onDue` hears about runs that became due now (started, retried, continued), so a job queue can
+ * pick them up at once instead of waiting for the next poll.
+ */
+export function createWorkflowEngine(deps: EngineDeps, options: { onDue?: (executionId: string) => void } = {}) {
+  /** Claims up to `limit` due runs (only `id`, when given). */
+  const claim = (limit: number, id?: string) =>
     prisma.$queryRaw<{ id: string }[]>`
       UPDATE "WorkflowExecution" SET status = 'RUNNING', "lockedUntil" = ${lock()}, "updatedAt" = now()
       WHERE id IN (
         SELECT x.id FROM "WorkflowExecution" x JOIN "Workflow" w ON w.id = x."workflowId"
-        WHERE w.status = 'ACTIVE' AND w."deletedAt" IS NULL AND (
-          (x.status IN ('QUEUED', 'WAITING') AND x."runAt" <= now())
-          OR (x.status = 'RUNNING' AND x."lockedUntil" < now()))
+        WHERE ${DUE} ${id ? Prisma.sql`AND x.id = ${id}` : Prisma.empty}
         ORDER BY x."runAt"
         LIMIT ${limit}
         FOR UPDATE OF x SKIP LOCKED)
@@ -168,9 +176,33 @@ export function createWorkflowEngine(deps: EngineDeps) {
   }
 
   let wake: (() => void) | undefined;
+  const due = (executionId: string) => {
+    wake?.();
+    options.onDue?.(executionId);
+  };
 
   return {
     tick,
+
+    /**
+     * Claims one run if it is due and advances it until it ends, fails or waits. Returns when it is
+     * next due if it waits on a timer (ISO string), else null. A job queue calls this per run.
+     */
+    async runOne(executionId: string): Promise<string | null> {
+      const [claimed] = await claim(1, executionId);
+      if (!claimed) return null;
+      await advance(executionId).catch((err: unknown) => deps.onError(err, `workflow execution ${executionId}`));
+      const after = await prisma.workflowExecution.findUnique({ where: { id: executionId }, select: { status: true, runAt: true } });
+      return after?.status === "WAITING" && after.runAt ? after.runAt.toISOString() : null;
+    },
+
+    /** Ids of runs that are due, without claiming them: for a sweep that hands them to a job queue. */
+    async dueRuns(limit: number) {
+      const rows = await prisma.$queryRaw<{ id: string }[]>`
+        SELECT x.id FROM "WorkflowExecution" x JOIN "Workflow" w ON w.id = x."workflowId"
+        WHERE ${DUE} ORDER BY x."runAt" LIMIT ${limit}`;
+      return rows.map((r) => r.id);
+    },
 
     /** Starts a run of the workflow's published version. The caller has authorized `scope`. */
     async start(scope: Scope, workflowId: string, input: Record<string, unknown>, startedBy: string) {
@@ -191,7 +223,7 @@ export function createWorkflowEngine(deps: EngineDeps) {
           startedBy,
         },
       });
-      wake?.();
+      due(execution.id);
       return execution;
     },
 
@@ -201,7 +233,7 @@ export function createWorkflowEngine(deps: EngineDeps) {
         where: { id: executionId, ...scope, status: "FAILED", workflow: { deletedAt: null } },
         data: { status: "QUEUED", runAt: new Date(), error: null, finishedAt: null },
       });
-      wake?.();
+      if (count > 0) due(executionId);
       return count > 0;
     },
 
@@ -228,7 +260,7 @@ export function createWorkflowEngine(deps: EngineDeps) {
         prisma.workflowStepExecution.update({ where: { id: step.id }, data: { state } }),
         prisma.workflowExecution.updateMany({ where: { id: executionId, status: "WAITING", runAt: null }, data: { status: "QUEUED", runAt: new Date() } }),
       ]);
-      wake?.();
+      if (count > 0) due(executionId);
       return count > 0;
     },
 

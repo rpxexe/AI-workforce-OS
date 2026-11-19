@@ -17,6 +17,7 @@ pnpm typecheck    # root tsc + dashboard
 pnpm lint
 pnpm test         # API tests; need the database running
 pnpm db:migrate   # prisma migrate dev + generate
+pnpm inngest:dev  # Inngest dev server for durable background jobs (with INNGEST_DEV=1)
 ```
 
 ## Rules that are easy to break
