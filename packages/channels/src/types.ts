@@ -26,6 +26,8 @@ export type InboundMessage = {
   /** Email only. */
   subject?: string;
   inReplyTo?: string;
+  /** Email only: the tag of a tagged address it was sent to (support+<conversation id>@...), naming the conversation it answers. */
+  threadTag?: string;
   receivedAt: Date;
 };
 
@@ -40,6 +42,10 @@ export type OutboundMessage = {
   /** Email only. */
   subject?: string;
   inReplyTo?: string;
+  /** Email only: where the customer's reply should go (a tagged address that names the conversation). */
+  replyTo?: string;
+  /** Email only: the sender's display name (the employee's). */
+  fromName?: string;
   /** Stable per message, for providers that deduplicate sends (Telnyx), so a retry cannot send twice. */
   idempotencyKey?: string;
 };

@@ -121,8 +121,10 @@ export type EmployeeChannels = {
   channels: EmployeeChannelInfo[];
   /** The WhatsApp providers the server has credentials for; numbers can be saved either way. */
   whatsappProviders: WhatsAppProviderName[];
-  /** Replies by email are recorded, not delivered, until an email provider is chosen. */
-  emailTestMode: true;
+  /** The email provider that delivers replies; null means test mode (replies are logged, not delivered). */
+  emailProvider: "resend" | null;
+  /** Where to point Resend's webhook (received mail and delivery events), when Resend is configured. */
+  emailWebhookUrl: string | null;
 };
 
 export type ChannelMessageStatus =

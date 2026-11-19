@@ -7,7 +7,7 @@
 // Like voice, channels have no logic of their own for answers: `runTurn` writes every reply.
 import { runTurn, type TurnInput } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
-import { ChannelError, splitText, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
+import { ChannelError, splitText, taggedAddress, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
 import { prisma, type Prisma } from "@workforce/database";
 import { parseDocument } from "@workforce/knowledge";
 import type { MemoryService } from "@workforce/memory";
@@ -117,9 +117,18 @@ export function channelService(deps: {
   const whatsappOf = (channel: ChannelRow) => deps.whatsapp.find((p) => p.name === whatsappProviderOf(channel));
 
   /** The conversation a new message on `channel` belongs to: the customer's recent one, or none (start a new one). */
-  const findConversation = async (channel: ChannelRow, customerId: string, inReplyTo?: string) => {
+  const findConversation = async (channel: ChannelRow, customerId: string, thread: Pick<InboundMessage, "inReplyTo" | "threadTag"> = {}) => {
     if (channel.kind === "email") {
-      // Email threads continue when the customer replies to one of our emails, however long after.
+      // Email threads continue when the customer replies to one of our emails, however long after: our replies
+      // go out with Reply-To support+<conversation id>@..., and the test-mode hook matches In-Reply-To.
+      const { inReplyTo, threadTag } = thread;
+      if (threadTag) {
+        const tagged = await prisma.conversation.findFirst({
+          where: { id: threadTag, employeeId: channel.employeeId, channel: "email", customer: { customerId } },
+          select: { id: true },
+        });
+        if (tagged) return tagged.id;
+      }
       if (!inReplyTo) return undefined;
       const sent = await prisma.channelMessage.findFirst({
         where: { channelId: channel.id, direction: "OUTBOUND", providerMessageId: inReplyTo, customerId },
@@ -222,7 +231,7 @@ export function channelService(deps: {
     channel: ChannelRow,
     to: string,
     text: string,
-    context: { customerId: string; conversationId?: string; startedAt: number; subject?: string; inReplyTo?: string },
+    context: { customerId: string; conversationId?: string; startedAt: number; subject?: string; inReplyTo?: string; fromName?: string },
   ) => {
     const sender = senderFor(channel);
     for (const part of splitText(text, CHANNEL_CAPABILITIES[channel.kind as ChannelKind]?.maxChars ?? null)) {
@@ -242,7 +251,16 @@ export function channelService(deps: {
       });
       try {
         if (!sender) throw new ChannelError(`The ${channel.kind === "whatsapp" ? `${whatsappProviderOf(channel)} WhatsApp provider` : channel.kind} is not configured on the server`);
-        const sent = await sender.send({ address: channel.address, to, text: part, subject: context.subject, inReplyTo: context.inReplyTo, idempotencyKey: row?.id });
+        const sent = await sender.send({
+          address: channel.address,
+          to,
+          text: part,
+          subject: context.subject,
+          inReplyTo: context.inReplyTo,
+          fromName: context.fromName,
+          ...(channel.kind === "email" && context.conversationId && { replyTo: taggedAddress(channel.address, context.conversationId) }),
+          idempotencyKey: row?.id,
+        });
         if (row)
           await updateMessage(log, row.id, {
             status: "SENT",
@@ -284,7 +302,7 @@ export function channelService(deps: {
         .catch((err: unknown) => log.warn({ err }, "Marking a WhatsApp message read failed"));
 
     const subject = inbound.subject !== undefined ? (/^re:/i.test(inbound.subject) ? inbound.subject : `Re: ${inbound.subject}`.trim()) : undefined;
-    const reply = { customerId, startedAt, subject, inReplyTo: inbound.channel === "email" ? inbound.providerMessageId : undefined };
+    const reply = { customerId, startedAt, subject, inReplyTo: inbound.channel === "email" ? inbound.providerMessageId : undefined, fromName: live.version.name };
     // The inbound row settles last, after any reply is handed to the channel: RECEIVED means "still being answered".
     if (inbound.unsupported) {
       await send(channel, inbound.from, LINES.unsupported, reply);
@@ -294,7 +312,7 @@ export function channelService(deps: {
     if (media.length > 0) await updateMessage(log, rowId, { media: media as Prisma.InputJsonValue });
     if (!text.trim()) return reject("The message was empty");
 
-    const conversationId = await findConversation(channel, customerId, inbound.inReplyTo);
+    const conversationId = await findConversation(channel, customerId, inbound);
     let input: ReturnType<typeof turnInput>;
     try {
       input = turnInput(channel, live, customerId, conversationId);

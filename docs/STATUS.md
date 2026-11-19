@@ -23,6 +23,11 @@ email, workflow runs with sleeps, a one-minute sweep), with the in-process backe
 without Inngest. Verified with a fake queue running each function's handler, and Inngest's own handler serving the 5
 functions in dev mode; **not yet run against the Inngest dev server or cloud**.
 
+Also done: **email through Resend** for the email channel (received mail via the `email.received` webhook, fetched by
+id; replies threaded by a tagged Reply-To; delivery events), the `send_email` tool and workflow Message steps (from
+`RESEND_FROM`), all with idempotency keys. Test mode remains without `RESEND_API_KEY`. Verified with Resend's API faked
+(`resend.test.ts`); **not yet sent through a real Resend account**.
+
 ## Open items
 
 - **Inngest end to end.** Set `INNGEST_DEV=1` in `.env`, run `pnpm inngest:dev` next to `pnpm dev`, upload a document,
@@ -40,9 +45,13 @@ functions in dev mode; **not yet run against the Inngest dev server or cloud**.
   URLs need the API key (we send none), and whether `type: "WHATSAPP"` and `webhook_url` are accepted on sends.
   Twilio: whether inbound webhooks ever carry `MessageStatus` (we tell receipts apart by `?event=status` on our own
   callback URL instead).
-- **Email replies are not delivered** (test mode, like the email tool): no email provider chosen. Inbound email
-  arrives through `POST /hooks/email/:channelId/:token` in our own JSON shape, so an inbound service (Postmark,
-  SendGrid, Mailgun) needs a small mapping or a forwarding script.
+- **Resend against the real API.** Needs `RESEND_API_KEY`, `RESEND_FROM` and a verified domain with receiving on
+  (MX), a webhook to `PUBLIC_URL/channels/email/resend/webhook` with its secret in `RESEND_WEBHOOK_SECRET`, and the
+  employee's address on that domain. Unconfirmed from the docs: the JSON of errors (we read `name` and `message`),
+  the fields of delivery events beyond `data.email_id`, the received email's header keys (we look up `in-reply-to`
+  case-insensitively), and whether every mail client replies to `Reply-To` with the tag kept (threading falls back to a
+  new conversation, with the customer's memory, if not). The JSON hook `POST /hooks/email/:channelId/:token` remains for
+  other inbound services.
 - **Channels card and message log not tried in a browser**; they typecheck and lint. The widget itself was.
 
 - **The example workflow on a real line** needs the voice keys below, an employee with a phone number, the
@@ -158,8 +167,7 @@ API process), a vector index (search is exact), a relevance floor on retrieved p
 knowledge sources, voice: per-organization Twilio accounts (one platform account from `.env`),
 call recording, the employee ending a call itself, transfer to a human, DTMF, voicemail detection on
 outbound calls, fixed call lines (greeting aside) in languages other than English, a separate call
-worker process (calls run inside the API), real calendar and email providers (the calendar is built in, email is test mode
-and delivers nothing), webhook signing, an audit log page (API only), human approval before a tool
+worker process (calls run inside the API), a real calendar provider (the calendar is built in), webhook signing, an audit log page (API only), human approval before a tool
 runs, availability lookup and cancelling or moving meetings, editing or deleting customer memories (no admin routes yet), relevance ranking of
 memories (all of a customer's facts are recalled, newest 50), merging one person's identities across
 channels, a queue for memory extraction (it runs in the API process after the reply), embedding providers other than OpenRouter, providers other than OpenRouter and Anthropic, summarizing long conversations (the runtime
@@ -168,7 +176,7 @@ at 200 per workspace), avatar image upload (icons only), mirroring Clerk users i
 
 Channels, skipped: outbound WhatsApp templates (needed to write first, or after 24 hours of silence; the error is
 logged), sending media from the employee, images and videos seen by the model (described only), email attachments,
-an email provider (test mode), per-organization WhatsApp accounts (one account per provider, from `.env`), a WhatsApp
+per-organization Resend and WhatsApp accounts (one account per provider, from `.env`), a WhatsApp
 number picker (the admin types the number or Meta's Phone number ID), read receipts and typing on Twilio and Telnyx,
 a provider settings page (credentials stay in `.env`), rotating a web chat identity secret (remove and add the channel),
 markdown in the widget (plain text), the widget's look per employee, rate limits per IP on widget sessions,
@@ -178,7 +186,7 @@ placeholder), merging a customer known by email with the same person known by ph
 Workflows, skipped: permanently deleting workflows (delete is soft), cancelling a single run (deleting stops all),
 a dependency check when archiving an employee a workflow uses (publishing and the step itself catch it), loops and parallel branches, triggers other
 than manual and webhook (no "customer created" or schedule events), automatic per-step retries (retry is manual;
-tools keep their own retry policy), delivered messages (Message is email in test mode, recorded on the step), SMS,
+tools keep their own retry policy), Message channels other than email (Resend), SMS,
 an external CRM (CRM Update writes our customer memory), notifying anyone about a Human Handoff (it waits on the
 Runs tab), webhook signing, run history paging (newest 50), dark mode on the canvas.
 

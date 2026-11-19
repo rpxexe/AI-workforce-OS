@@ -12,7 +12,7 @@ import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
 import type { Branch, NodeConfig, NodeType } from "@workforce/shared";
 import { ENDED_STATUSES } from "@workforce/telephony";
-import { toolRegistry, ToolError, type ToolExecutor } from "@workforce/tools";
+import { toolRegistry, ToolError, type Mailer, type ToolExecutor } from "@workforce/tools";
 import { z } from "zod";
 
 export type PlaceCallRequest = {
@@ -36,6 +36,8 @@ export type EngineDeps = {
   fetch: typeof fetch;
   /** Places an outbound call with an employee; throws `StepError` when it cannot. */
   placeCall: (request: PlaceCallRequest) => Promise<{ callId: string }>;
+  /** Sends Message steps' email; null means test mode (nothing is delivered). */
+  mailer: Mailer | null;
   /** How often a waiting Voice Call step checks whether the call has ended. */
   callPollMs: number;
   /** Hears about failures that are bugs; the run only shows "the step failed unexpectedly". */
@@ -285,13 +287,19 @@ export const handlers: Handlers = {
     return { output: { callId, status: call.status, durationSec: call.durationSec, transcript, customerId: call.customerId } };
   },
 
-  // shortcut: email only, in test mode like the send_email tool: nothing is delivered, the message is kept on the step; add a sender when an email provider is chosen
-  // messageId is the step's key, for the provider's idempotency key when one is added.
+  // Email through the server's mailer (Resend); test mode without one: nothing is delivered, the message is kept on the step.
+  // The step's idempotency key goes to the provider, so a step run again after a crash does not send twice.
   async message(config, run) {
     if (!z.email().safeParse(config.to).success) throw new StepError(`"${config.to}" is not an email address`);
-    return {
-      output: { status: "sent", testMode: true, messageId: run.idempotencyKey, channel: config.channel, to: config.to, subject: config.subject, body: config.body },
-    };
+    const testMode = run.deps.mailer === null;
+    let messageId = run.idempotencyKey;
+    if (run.deps.mailer)
+      try {
+        ({ messageId } = await run.deps.mailer.send({ to: config.to, subject: config.subject, text: config.body, idempotencyKey: run.idempotencyKey }));
+      } catch (err) {
+        throw err instanceof ToolError ? new StepError(err.message) : err;
+      }
+    return { output: { status: "sent", testMode, messageId, channel: config.channel, to: config.to, subject: config.subject, body: config.body } };
   },
 
   async crm_update(config, run) {

@@ -11,7 +11,7 @@ import { prisma, type Prisma } from "@workforce/database";
 import type { ToolExecutionStatus } from "@workforce/shared";
 import { safeFetch } from "./net.ts";
 import type { ToolRegistry } from "./registry.ts";
-import { ToolError } from "./types.ts";
+import { ToolError, type Mailer } from "./types.ts";
 
 /** Already authorized by the caller: the executor trusts these ids and filters on them. */
 export type ToolScope = {
@@ -47,7 +47,7 @@ const abortable = <T>(work: Promise<T>, signal: AbortSignal) =>
  */
 export function createToolExecutor(
   registry: ToolRegistry,
-  options: { fetch?: typeof fetch; onError?: (err: unknown, tool: string) => void } = {},
+  options: { fetch?: typeof fetch; mailer?: Mailer; onError?: (err: unknown, tool: string) => void } = {},
 ): ToolExecutor {
   const fetchForTools = options.fetch ?? safeFetch;
 
@@ -113,7 +113,7 @@ export function createToolExecutor(
         const callSignal = AbortSignal.any([timeout, signal]);
         try {
           const output = await abortable(
-            tool.execute(input.data, { ...scope, executionId, config: config.data, signal: callSignal, fetch: fetchForTools }),
+            tool.execute(input.data, { ...scope, executionId, config: config.data, signal: callSignal, fetch: fetchForTools, mailer: options.mailer }),
             callSignal,
           );
           const checked = tool.output.safeParse(output);

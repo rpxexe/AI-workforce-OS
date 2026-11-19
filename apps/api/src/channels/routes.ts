@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { toInboundEmail, type WhatsAppProvider } from "@workforce/channels";
+import { ChannelError, toInboundEmail, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { Prisma, prisma } from "@workforce/database";
 import {
   ADMIN_ROLE,
@@ -89,7 +89,7 @@ export const toRecord = (m: Prisma.ChannelMessageGetPayload<object>): ChannelMes
 export function channelRoutes(
   app: FastifyInstance,
   authenticate: Authenticate,
-  deps: { service: ChannelService; whatsapp: WhatsAppProvider[]; publicUrl: string | null },
+  deps: { service: ChannelService; whatsapp: WhatsAppProvider[]; resend: EmailProvider | null; publicUrl: string | null },
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const { service, whatsapp } = deps;
@@ -143,6 +143,30 @@ export function channelRoutes(
     });
   });
 
+  // Resend: received mail (fetched in full) and delivery events, Svix-signed.
+  void app.register(async (hooks) => {
+    hooks.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => done(null, body));
+    hooks.post("/channels/email/resend/webhook", async (req, reply) => {
+      if (!deps.resend) throw httpError(503, "Resend is not configured. Missing in .env: RESEND_API_KEY, RESEND_WEBHOOK_SECRET");
+      let parsed: Awaited<ReturnType<EmailProvider["readWebhook"]>>;
+      try {
+        parsed = await deps.resend.readWebhook({ url: baseUrl(deps.publicUrl, req) + req.url, rawBody: typeof req.body === "string" ? req.body : "", headers: req.headers });
+      } catch (err) {
+        // The received email could not be fetched: an error makes Resend send the webhook again.
+        if (err instanceof ChannelError) throw httpError(502, err.message);
+        throw err;
+      }
+      if (!parsed) throw httpError(403, "Invalid webhook signature");
+      for (const update of parsed.statuses) await service.delivery("email", update);
+      // Recording is quick; answering is a background job.
+      for (const inbound of parsed.messages) {
+        const channel = await prisma.employeeChannel.findUnique({ where: { kind_address: { kind: "email", address: inbound.address } } });
+        if (channel) await service.receive(channel, inbound);
+      }
+      return reply.code(200).send();
+    });
+  });
+
   // An inbound-email service (or a forwarding script) posts each email here, in our JSON shape.
   app.post("/hooks/email/:channelId/:token", async (req, reply) => {
     const { channelId, token } = emailHookParams.parse(req.params);
@@ -168,7 +192,12 @@ export function channelRoutes(
     await employeeIn(scope, id);
     const rows = await prisma.employeeChannel.findMany({ where: { employeeId: id, ...within(scope) }, orderBy: { createdAt: "asc" } });
     const url = baseUrl(deps.publicUrl, req);
-    return { channels: rows.map((c) => toInfo(c, scope.role === ADMIN_ROLE, url)), whatsappProviders: whatsapp.map((p) => p.name), emailTestMode: true };
+    return {
+      channels: rows.map((c) => toInfo(c, scope.role === ADMIN_ROLE, url)),
+      whatsappProviders: whatsapp.map((p) => p.name),
+      emailProvider: deps.resend ? "resend" : null,
+      emailWebhookUrl: deps.resend ? `${url}/channels/email/resend/webhook` : null,
+    };
   });
 
   // Creates or replaces the employee's settings for one channel.
