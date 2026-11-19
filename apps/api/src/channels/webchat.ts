@@ -105,14 +105,17 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
     }
     const customerId = await identifyCustomer({ organizationId: channel.organizationId, workspaceId: channel.workspaceId }, externalId);
     const conversationId = await service.findConversation(channel, customerId);
-    const history = conversationId
-      ? await prisma.conversationMessage.findMany({
-          where: { conversationId },
-          orderBy: { createdAt: "desc" },
-          take: 50,
-          select: { role: true, content: true },
-        })
-      : [];
+    const [history, conversation] = conversationId
+      ? await Promise.all([
+          prisma.conversationMessage.findMany({
+            where: { conversationId },
+            orderBy: { createdAt: "desc" },
+            take: 50,
+            select: { role: true, content: true, createdAt: true },
+          }),
+          prisma.conversation.findUnique({ where: { id: conversationId }, select: { status: true } }),
+        ])
+      : [[], null];
     return {
       token: signSession(channel.secret, { c: channel.id, u: customerId, x: externalId, e: Date.now() + SESSION_HOURS * 3_600_000 }),
       visitorId,
@@ -120,7 +123,29 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
       employee: { name: live.version.name },
       greeting: config.greeting,
       messages: history.reverse(),
+      /** WAITING_FOR_HUMAN or HUMAN_ACTIVE: the widget polls for the agent's messages. */
+      status: conversation?.status ?? "AI_ACTIVE",
     };
+  });
+
+  // A person answers the visitor from the inbox: the widget asks for their messages while the conversation is with people.
+  app.get("/chat/:key/messages", async (req) => {
+    const { channel } = await channelFor(req);
+    const session = readSession(channel.secret, channel.id, req.headers.authorization);
+    if (!session) throw httpError(401, "Your chat session has expired. Reload the page to continue.");
+    const { after } = z.object({ after: z.iso.datetime() }).parse(req.query);
+    const conversationId = await service.findConversation(channel, session.u);
+    if (!conversationId) return { status: "AI_ACTIVE", messages: [] };
+    const [conversation, messages] = await Promise.all([
+      prisma.conversation.findUnique({ where: { id: conversationId }, select: { status: true } }),
+      prisma.conversationMessage.findMany({
+        where: { conversationId, role: "AGENT", createdAt: { gt: new Date(after) } },
+        orderBy: { createdAt: "asc" },
+        take: 50,
+        select: { role: true, content: true, createdAt: true },
+      }),
+    ]);
+    return { status: conversation?.status ?? "AI_ACTIVE", messages };
   });
 
   // One visitor message; the reply streams back as server-sent events, like test chat.
@@ -165,6 +190,10 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
       for await (const event of runTurn({ ...input, userMessage: message, signal: gone.signal })) {
         if (event.type === "text") {
           text += event.text;
+          yield frame(event);
+        } else if (event.type === "held") {
+          ended = true;
+          await mark({ status: "HELD", conversationId: event.conversation.id });
           yield frame(event);
         } else if (event.type === "done") {
           ended = true;

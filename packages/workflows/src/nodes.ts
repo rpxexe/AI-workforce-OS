@@ -6,7 +6,7 @@
 // same attempt). Every step with an outside effect is keyed by `run.idempotencyKey`
 // (execution:node:attempt), so the second run finds or deduplicates the first one's effect; where
 // that is impossible it fails instead of acting twice. A manual retry is a new attempt and acts again.
-import { configOf, runTurn } from "@workforce/agent-runtime";
+import { configOf, runTurn, startHandoff, type HandoffNotice } from "@workforce/agent-runtime";
 import { AIProviderError, type AIProvider, type EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
@@ -42,6 +42,8 @@ export type EngineDeps = {
   callPollMs: number;
   /** Hears about failures that are bugs; the run only shows "the step failed unexpectedly". */
   onError: (err: unknown, context: string) => void;
+  /** Tells people about a handoff an AI Employee step's turn started. */
+  onHandoff?: (notice: HandoffNotice) => void;
 };
 
 /** A failure the step expects. Its message is shown on the run. */
@@ -173,9 +175,11 @@ export const handlers: Handlers = {
       channel: "workflow",
       userMessage: config.message,
       timeoutMs: deps.timeoutMs,
+      onHandoff: deps.onHandoff,
     })) {
       if (event.type === "error") throw new StepError(event.message);
-      if (event.type === "done") return { output: { reply: event.messages[1].content, conversationId: event.conversation.id } };
+      if (event.type === "done")
+        return { output: { reply: event.messages[1].content, conversationId: event.conversation.id, handedOff: Boolean(event.handoff) } };
     }
     throw new StepError("The employee did not answer");
   },
@@ -318,8 +322,14 @@ export const handlers: Handlers = {
 
   async human_handoff(config, run) {
     if (typeof run.state?.resumedBy === "string")
-      return { output: { note: config.note, resumedBy: run.state.resumedBy, resumedAt: run.state.resumedAt } };
-    return { wait: { until: null, state: { note: config.note } } };
+      return { output: { note: config.note, conversationId: config.conversationId || null, resumedBy: run.state.resumedBy, resumedAt: run.state.resumedAt } };
+    // With a conversation, it also goes to the agents' inbox. Run again after a crash, the conversation is already with people and nothing changes.
+    if (config.conversationId) {
+      const conversation = await prisma.conversation.findFirst({ where: { id: config.conversationId, ...run.scope }, select: { id: true, organizationId: true, workspaceId: true } });
+      if (!conversation) throw new StepError(`Conversation "${config.conversationId}" not found`);
+      await startHandoff(conversation, { trigger: "workflow_condition", reason: `Workflow: ${config.note}`.slice(0, 500) });
+    }
+    return { wait: { until: null, state: { note: config.note, conversationId: config.conversationId || null } } };
   },
 
   async end() {

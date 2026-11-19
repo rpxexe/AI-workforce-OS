@@ -120,19 +120,39 @@ model Conversation {
   channel        String       @default("test")
   title          String // start of the first user message
 
+  // Who answers the customer. The runtime replies only in AI_ACTIVE and REOPENED.
+  status         ConversationStatus @default(AI_ACTIVE)
+  // The human agent handling it (Clerk user id); null while it waits in the unassigned queue.
+  assignedTo     String?
+  // Consecutive turns that failed; reset by a reply. Reaching the employee's limit hands off.
+  failedTurns    Int                @default(0)
+  resolvedAt     DateTime?
+
   messages  ConversationMessage[]
   customer  CustomerConversation?
   calls     Call[]
+  handoffs  Handoff[]
+  suggestions CopilotSuggestion[]
   createdBy String // Clerk user id, or "voice" for conversations started by a phone call
   createdAt DateTime              @default(now())
   updatedAt DateTime              @updatedAt
 
   @@index([organizationId, workspaceId, employeeId, updatedAt])
+  @@index([organizationId, workspaceId, status, updatedAt])
+}
+
+enum ConversationStatus {
+  AI_ACTIVE
+  WAITING_FOR_HUMAN // handed off; in the queue (assignedTo null) or assigned but not yet picked up
+  HUMAN_ACTIVE // a person is answering; the AI stays silent until handed back
+  RESOLVED
+  REOPENED // resolved, then written to again (or reopened by an agent); the AI answers
 }
 
 enum MessageRole {
   USER
   ASSISTANT
+  AGENT // a human agent, written from the inbox
 }
 
 model ConversationMessage {
@@ -153,6 +173,8 @@ model ConversationMessage {
   sources         Json?
   // Tools called while writing the reply: [{ executionId, tool, status }]
   tools           Json?
+  // AGENT messages: the Clerk user who wrote it.
+  authorId        String?
 
   createdAt DateTime @default(now())
 
@@ -627,6 +649,7 @@ enum MessageDirection {
 
 enum ChannelMessageStatus {
   RECEIVED // inbound, being answered
+  HELD // inbound, kept for the human handling the conversation: the AI did not answer
   ANSWERED
   REJECTED // inbound, deliberately not answered: error says why
   PENDING // outbound, being sent
@@ -668,3 +691,56 @@ model ChannelMessage {
   @@index([organizationId, workspaceId, createdAt])
   @@index([conversationId])
 }
+
+// One hand-over of a conversation from the AI to people, from the moment it was asked for until the
+// conversation is resolved or handed back to the AI. The timestamps are the handoff analytics.
+model Handoff {
+  id              String       @id @default(cuid())
+  organizationId  String
+  workspaceId     String
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  employeeId      String
+  // HANDOFF_TRIGGERS (packages/shared/src/inbox.ts)
+  trigger         String
+  reason          String
+  assignedTo      String? // Clerk user id
+  requestedAt     DateTime     @default(now())
+  acceptedAt      DateTime? // a person took it over
+  firstResponseAt DateTime? // a person's first message
+  endedAt         DateTime?
+  outcome         String? // resolved | returned_to_ai
+
+  @@index([organizationId, workspaceId, requestedAt])
+  @@index([conversationId, endedAt])
+}
+
+// What the AI Copilot suggested to a human agent. Kept apart from the conversation's messages: a
+// suggestion is never sent; the agent's own message records which suggestion it came from.
+model CopilotSuggestion {
+  id             String       @id @default(cuid())
+  organizationId String
+  workspaceId    String
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  requestedBy    String // Clerk user id
+  reply          String
+  summary        String
+  nextAction     String
+  // Customer facts shown with it: [{ key, value }]
+  memory         Json
+  // Knowledge passages it was given: [{ documentId, documentName, sourceName, page, excerpt }]
+  citations      Json
+  provider       String
+  model          String
+  inputTokens    Int
+  outputTokens   Int
+  latencyMs      Int
+  // The AGENT message sent from it, if any, and whether the agent changed the text.
+  usedInMessageId String?
+  edited          Boolean?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
+

@@ -3,7 +3,7 @@
 //
 //   phone audio -> STT -> caller turn -> runTurn (LLM, tools) -> text -> Speaker (TTS) -> phone
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { runTurn } from "@workforce/agent-runtime";
+import { runTurn, type HandoffNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -34,6 +34,7 @@ export type SessionDeps = {
   memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
+  onHandoff?: (notice: HandoffNotice) => void;
   secret: string;
   limits: VoiceLimits;
   log: FastifyBaseLogger;
@@ -46,6 +47,7 @@ const LINES = {
   idleGoodbye: "I haven't heard anything for a while, so I'll end the call now. Goodbye.",
   timeLimit: "We've reached the time limit for this call. Goodbye.",
   cannotHear: "Sorry, I'm having trouble hearing you right now. Please call again later.",
+  withPerson: "A member of our team is handling this now and will get back to you shortly. Goodbye.",
 };
 
 /** The stream token proves a media stream belongs to a call we set up (Twilio does not sign the socket). */
@@ -166,7 +168,8 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     void recordMessage(log, {
       ...base,
       direction: "INBOUND",
-      status: error ? "FAILED" : "ANSWERED",
+      // No reply and no error: people have the conversation, the employee stayed silent.
+      status: error ? "FAILED" : reply === null ? "HELD" : "ANSWERED",
       error,
       from: callerNumber,
       to: ourNumber,
@@ -240,6 +243,8 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     const at = offset();
     const turnStarted = Date.now();
     let replyText = "";
+    // Calls are not transferred: after a handoff the employee says so and hangs up, and a person follows up.
+    let handedOff = false;
     for await (const result of runTurn({
       provider,
       ...scope,
@@ -257,12 +262,19 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       userMessage: userText,
       timeoutMs: deps.timeoutMs,
       signal: current.abort.signal,
+      onHandoff: deps.onHandoff,
     })) {
       if (result.type === "text") {
         speaker.push(result.text);
         replyText += result.text;
+      } else if (result.type === "held") {
+        current.saved = true;
+        handedOff = true;
+        logTurn(userText, null, null, Date.now() - turnStarted);
+        speaker.push(LINES.withPerson);
       } else if (result.type === "done") {
         current.saved = true;
+        if (result.handoff) handedOff = true;
         if (!conversationId) {
           conversationId = result.conversation.id;
           await prisma.call.update({ where: { id: call.id }, data: { conversationId } });
@@ -278,6 +290,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     speaker.end();
     await speaker.played;
     line("EMPLOYEE", speaker.spoken, at, speaker.interrupted);
+    if (handedOff && !speaker.interrupted) return hangUp();
     if (!turn && !speaking()) waitForCaller();
   };
 

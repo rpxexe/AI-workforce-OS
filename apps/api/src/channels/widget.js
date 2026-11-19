@@ -1,4 +1,4 @@
-/* global document, window, localStorage, fetch, TextDecoderStream, URL */
+/* global document, window, localStorage, fetch, TextDecoderStream, URL, setInterval, clearInterval */
 // The web chat widget, served at /widget.js and embedded with:
 //   <script src="https://<api>/widget.js" data-key="wc_..." async></script>
 // Optional attributes: data-customer + data-customer-hash (a visitor the website vouches for),
@@ -13,6 +13,10 @@
   let identity = script.dataset.customer ? { customer: script.dataset.customer, customerHash: script.dataset.customerHash } : null;
   let session = null;
   let busy = false;
+  // While a person from the team has the conversation, their messages are fetched every few seconds.
+  const POLL_MS = 4000;
+  let pollTimer = null;
+  let lastSeen = new Date(0).toISOString();
 
   const css = `
     :host { all: initial; }
@@ -32,8 +36,10 @@
     .log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; line-height: 1.45; }
     .msg { max-width: 85%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .USER { align-self: flex-end; background: var(--mine); color: var(--mine-fg); }
-    .ASSISTANT { align-self: flex-start; background: var(--theirs); }
+    .ASSISTANT, .AGENT { align-self: flex-start; background: var(--theirs); }
+    .AGENT { box-shadow: inset 3px 0 0 var(--mine); }
     .note { align-self: center; color: var(--err); font-size: 13px; text-align: center; }
+    .info { align-self: center; color: var(--muted); font-size: 13px; text-align: center; }
     form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
     textarea { flex: 1; resize: none; height: 40px; max-height: 120px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); font-size: 14px; }
     .send { border: 0; border-radius: 10px; padding: 0 14px; background: var(--mine); color: var(--mine-fg); font-size: 14px; font-weight: 600; }
@@ -89,6 +95,38 @@
     el.setAttribute("role", "alert");
   };
 
+  const info = (text) => {
+    const el = bubble("info", text);
+    el.className = "msg info";
+  };
+  const seen = (iso) => {
+    if (iso && iso > lastSeen) lastSeen = iso;
+  };
+  const withPeople = (status) => status === "WAITING_FOR_HUMAN" || status === "HUMAN_ACTIVE";
+
+  const stopPolling = () => {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  };
+  const poll = async () => {
+    if (!session) return;
+    const res = await fetch(`${api}/chat/${encodeURIComponent(key)}/messages?after=${encodeURIComponent(lastSeen)}`, {
+      headers: { authorization: `Bearer ${session.token}` },
+    }).catch(() => null);
+    if (!res || !res.ok) return;
+    const data = await res.json();
+    for (const m of data.messages) {
+      bubble(m.role, m.content);
+      seen(m.createdAt);
+    }
+    if (!withPeople(data.status)) stopPolling();
+  };
+  const startPolling = () => {
+    if (pollTimer) return;
+    info("A member of our team will reply here.");
+    pollTimer = setInterval(() => void poll(), POLL_MS);
+  };
+
   const post = (path, body, token) =>
     fetch(`${api}/chat/${encodeURIComponent(key)}/${path}`, {
       method: "POST",
@@ -104,8 +142,13 @@
     if (session.visitorId) write(storeKey, session.visitorId);
     $(".title").textContent = session.employee.name;
     log.textContent = "";
+    stopPolling();
     if (session.messages.length === 0) bubble("ASSISTANT", session.greeting);
-    for (const m of session.messages) bubble(m.role, m.content);
+    for (const m of session.messages) {
+      bubble(m.role, m.content);
+      seen(m.createdAt);
+    }
+    if (withPeople(session.status)) startPolling();
   };
 
   const open = async () => {
@@ -151,6 +194,14 @@
           reply.textContent = (started ? reply.textContent : "") + event.text;
           started = true;
           log.scrollTop = log.scrollHeight;
+        } else if (event.type === "held") {
+          // A person has the conversation: no AI reply; theirs arrives by polling.
+          reply.remove();
+          seen(event.message.createdAt);
+          startPolling();
+        } else if (event.type === "done") {
+          seen(event.messages[1].createdAt);
+          if (withPeople(event.conversation.status)) startPolling();
         } else if (event.type === "error") {
           reply.remove();
           note(event.error);
@@ -198,6 +249,8 @@
     identify(customer, customerHash) {
       identity = customer ? { customer, customerHash } : null;
       session = null;
+      stopPolling();
+      lastSeen = new Date(0).toISOString();
       log.textContent = "";
       if (!panel.hidden) void start().catch((err) => note(err.message));
     },

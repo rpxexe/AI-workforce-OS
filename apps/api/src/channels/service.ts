@@ -5,7 +5,7 @@
 //   -> reply split to the channel's limits -> ChannelSender -> audit rows with delivery state
 //
 // Like voice, channels have no logic of their own for answers: `runTurn` writes every reply.
-import { runTurn, type TurnInput } from "@workforce/agent-runtime";
+import { runTurn, type HandoffNotice, type TurnInput } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { ChannelError, splitText, taggedAddress, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
 import { prisma, type Prisma } from "@workforce/database";
@@ -32,6 +32,8 @@ export type Ai = {
   memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
+  /** Tells people about a handoff a turn started. */
+  onHandoff?: (notice: HandoffNotice) => void;
 };
 
 export type ChannelRow = Prisma.EmployeeChannelGetPayload<object>;
@@ -175,6 +177,7 @@ export function channelService(deps: {
       tools: specs.length > 0 ? { executor: ai.tools, specs } : undefined,
       channel: channel.kind,
       timeoutMs: ai.timeoutMs,
+      onHandoff: ai.onHandoff,
     } satisfies Omit<TurnInput, "userMessage">;
   };
 
@@ -226,7 +229,7 @@ export function channelService(deps: {
   const senderFor = (channel: ChannelRow): ChannelSender | null =>
     channel.kind === "whatsapp" ? (whatsappOf(channel) ?? null) : channel.kind === "email" ? deps.email : null;
 
-  /** Sends a reply (split to the channel's limit) and records each part with its delivery state. Stops at the first failure. */
+  /** Sends a reply (split to the channel's limit) and records each part with its delivery state. Stops at the first failure, which it returns. */
   const send = async (
     channel: ChannelRow,
     to: string,
@@ -271,9 +274,10 @@ export function channelService(deps: {
       } catch (err) {
         log.error({ err, channel: channel.kind }, "Sending a reply failed");
         if (row) await updateMessage(log, row.id, { status: "FAILED", error: errorText(err), attempts: err instanceof ChannelError ? err.attempts : 1 });
-        return;
+        return errorText(err);
       }
     }
+    return null;
   };
 
   /** Answers one inbound message. Runs one at a time per customer and channel, so replies keep their order. */
@@ -323,7 +327,10 @@ export function channelService(deps: {
     let replyText = "";
     for await (const event of runTurn({ ...input, userMessage: text })) {
       if (event.type === "text") replyText += event.text;
-      else if (event.type === "done") {
+      else if (event.type === "held") {
+        // A person has this conversation: they answer from the inbox.
+        return updateMessage(log, rowId, { status: "HELD", conversationId: event.conversation.id });
+      } else if (event.type === "done") {
         await send(channel, inbound.from, replyText, { ...reply, conversationId: event.conversation.id });
         return updateMessage(log, rowId, { status: "ANSWERED", conversationId: event.conversation.id });
       } else {
@@ -337,6 +344,40 @@ export function channelService(deps: {
   return {
     findConversation,
     turnInput,
+
+    /**
+     * Delivers a human agent's message to the customer on the conversation's channel. Web chat and test
+     * chat read it from the conversation, so there is nothing to send. Returns the error if sending failed.
+     */
+    async deliverAgentMessage(conversation: { id: string; employeeId: string; channel: string; title: string; customerId: string; to: string; fromName: string }, text: string) {
+      if (conversation.channel === "test") return null;
+      const channel = await prisma.employeeChannel.findUnique({ where: { employeeId_kind: { employeeId: conversation.employeeId, kind: conversation.channel } } });
+      if (!channel) return `The employee no longer has a ${conversation.channel} channel`;
+      const context = { customerId: conversation.customerId, conversationId: conversation.id, startedAt: Date.now() };
+      if (channel.kind === "web_chat") {
+        await recordMessage(log, {
+          organizationId: channel.organizationId,
+          workspaceId: channel.workspaceId,
+          employeeId: channel.employeeId,
+          channelId: channel.id,
+          channel: channel.kind,
+          direction: "OUTBOUND",
+          status: "SENT",
+          customerId: conversation.customerId,
+          conversationId: conversation.id,
+          from: channel.address,
+          to: conversation.to,
+          text,
+          attempts: 1,
+        });
+        return null;
+      }
+      return send(channel, conversation.to, text, {
+        ...context,
+        fromName: conversation.fromName,
+        ...(channel.kind === "email" && { subject: /^re:/i.test(conversation.title) ? conversation.title : `Re: ${conversation.title}` }),
+      });
+    },
 
     /**
      * Takes an inbound message for `channel`: records it (a message seen before is ignored, since

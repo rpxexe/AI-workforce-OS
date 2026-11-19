@@ -366,7 +366,7 @@ test("an AI employee step and a human handoff that waits for a person", async ()
   assert.equal(reply.reply, "OK, noted.");
   const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: reply.conversationId }, include: { customer: { include: { customer: true } } } });
   assert.deepEqual([conversation.channel, conversation.customer?.customer.externalId], ["workflow", "leo@example.com"]);
-  assert.deepEqual(waiting.steps.find((s) => s.nodeId === "review")?.input, { note: "Check Leo: OK, noted." });
+  assert.deepEqual(waiting.steps.find((s) => s.nodeId === "review")?.input, { note: "Check Leo: OK, noted.", conversationId: "" });
 
   assert.equal((await inject("POST", `/workspaces/${ws}/workflow-executions/${started.id}/resume`, undefined, memberOf(orgA))).statusCode, 403);
   assert.equal((await inject("POST", `/workspaces/${ws}/workflow-executions/${started.id}/resume`)).statusCode, 200);

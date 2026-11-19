@@ -110,7 +110,11 @@ export const nodeConfigSchemas = {
     customer: required(200, "the customer's email or phone"),
     fields: pairs.min(1, "Add at least one field"),
   }),
-  human_handoff: z.object({ note: required(2000, "what the person should do") }),
+  human_handoff: z.object({
+    note: required(2000, "what the person should do"),
+    /** A conversation (e.g. {{steps.ai.conversationId}}) to hand to the agents' inbox; empty for none. */
+    conversationId: text(200).default(""),
+  }),
   end: z.object({}),
 } satisfies Record<NodeType, z.ZodType>;
 export type NodeConfig<T extends NodeType> = z.infer<(typeof nodeConfigSchemas)[T]>;

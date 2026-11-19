@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { runTurn, toMessage } from "@workforce/agent-runtime";
+import { runTurn, toMessage, type HandoffNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -16,10 +16,11 @@ import { configOf, employeeParams, within } from "./employees.ts";
 
 const conversationParams = employeeParams.extend({ conversationId: employeeParams.shape.id });
 
-const toSummary = (c: { id: string; title: string; updatedAt: Date }): ConversationSummary => ({
+const toSummary = (c: { id: string; title: string; updatedAt: Date; status: ConversationSummary["status"] }): ConversationSummary => ({
   id: c.id,
   title: c.title,
   updatedAt: c.updatedAt.toISOString(),
+  status: c.status,
 });
 
 const frame = (event: ChatStreamEvent) => `data: ${JSON.stringify(event)}\n\n`;
@@ -37,6 +38,7 @@ export function conversationRoutes(
     memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
     tools: ToolExecutor;
     timeoutMs: number;
+    onHandoff?: (notice: HandoffNotice) => void;
   },
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
@@ -141,6 +143,7 @@ export function conversationRoutes(
       userMessage: message,
       timeoutMs: ai.timeoutMs,
       signal: gone.signal,
+      onHandoff: ai.onHandoff,
     });
     const events = async function* () {
       for await (const event of turn) {

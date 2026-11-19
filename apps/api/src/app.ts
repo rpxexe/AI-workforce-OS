@@ -15,7 +15,7 @@ import { sttFromEnv } from "@workforce/stt";
 import { telnyxFromEnv, twilioFromEnv, type TelephonyProvider } from "@workforce/telephony";
 import { createToolExecutor, safeFetch, ToolError, toolRegistry, type Mailer } from "@workforce/tools";
 import { ttsFromEnv } from "@workforce/tts";
-import { placeCallSchema, type ApiError, type HealthResponse } from "@workforce/shared";
+import { HANDOFF_TRIGGER_LABELS, placeCallSchema, type ApiError, type HealthResponse } from "@workforce/shared";
 import { createWorkflowEngine, StepError } from "@workforce/workflows";
 import Fastify from "fastify";
 import { ZodError } from "zod";
@@ -26,6 +26,8 @@ import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
+import { inboxRoutes } from "./inbox.ts";
+import type { HandoffNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
 import { toolRoutes } from "./tools.ts";
@@ -163,6 +165,23 @@ export async function buildApp(
     mailer,
     onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
   });
+  /** Emails the employee's escalation contact about a handoff (test mode without Resend: logged only). */
+  const onHandoff = (n: HandoffNotice) => {
+    app.log.info({ conversationId: n.conversationId, trigger: n.trigger }, "Conversation handed to people");
+    if (!n.contactEmail) return;
+    const email = {
+      to: n.contactEmail,
+      subject: `${n.employeeName} handed a conversation to your team`,
+      text: `${n.employeeName} handed a conversation to your team.
+
+Why: ${HANDOFF_TRIGGER_LABELS[n.trigger]}. ${n.reason}
+
+Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
+      idempotencyKey: `handoff:${n.handoffId}`,
+    };
+    if (!mailer) return app.log.info({ to: email.to, subject: email.subject }, "Handoff email (test mode, not sent)");
+    mailer.send(email).catch((err: unknown) => app.log.error({ err, conversationId: n.conversationId }, "Handoff email failed"));
+  };
   const learn = options.memory ?? memoryService;
   const ai = {
     provider: () => (provider ??= providerFromEnv()),
@@ -182,6 +201,7 @@ export async function buildApp(
     },
     tools,
     timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
+    onHandoff,
   };
   conversationRoutes(app, authenticate, ai);
   const voiceConfig: VoiceConfig = {
@@ -207,6 +227,7 @@ export async function buildApp(
   });
   channelRoutes(app, authenticate, { service: channels, whatsapp, resend, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
   webChatRoutes(app, channels);
+  inboxRoutes(app, authenticate, ai, channels);
 
   const engine = createWorkflowEngine(
     {
