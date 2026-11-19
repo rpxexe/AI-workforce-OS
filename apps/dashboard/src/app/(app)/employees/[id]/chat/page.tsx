@@ -1,11 +1,14 @@
 "use client";
 
-import type {
-  ChatStreamEvent,
-  ConversationDetail,
-  ConversationMessage,
-  ConversationSummary,
-  EmployeeDetail,
+import {
+  CONVERSATION_STATUS_LABELS,
+  HANDOFF_TRIGGER_LABELS,
+  type ChatStreamEvent,
+  type ConversationDetail,
+  type ConversationMessage,
+  type ConversationStatus,
+  type ConversationSummary,
+  type EmployeeDetail,
 } from "@workforce/shared";
 import { ArrowLeft, Plus, SendHorizontal } from "lucide-react";
 import Link from "next/link";
@@ -21,11 +24,11 @@ import { useApi, useApiQuery, useApiStream } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
-function Bubble({ role, children, meta }: { role: "USER" | "ASSISTANT"; children: string; meta?: (string | undefined)[] }) {
+function Bubble({ role, children, meta }: { role: ConversationMessage["role"]; children: string; meta?: (string | undefined)[] }) {
   const mine = role === "USER";
   return (
     <div className={cn("flex flex-col gap-1", mine ? "items-end" : "items-start")}>
-      <span className="sr-only">{mine ? "You:" : "Employee:"}</span>
+      {role === "AGENT" ? <span className="px-1 text-xs text-muted-foreground">A person from your team</span> : <span className="sr-only">{mine ? "You:" : "Employee:"}</span>}
       <p
         className={cn(
           "max-w-[85%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap",
@@ -83,12 +86,30 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
   /** Who the tester is playing; the employee remembers them across conversations. */
   const [customer, setCustomer] = useState("");
   const [error, setError] = useState<string>();
+  /** Who answers: while people have the conversation (inbox), the AI keeps quiet and their replies are fetched. */
+  const [status, setStatus] = useState<ConversationStatus>();
+  const [notice, setNotice] = useState<string>();
+  const withPeople = status === "WAITING_FOR_HUMAN" || status === "HUMAN_ACTIVE";
 
   const bottom = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // Braces matter: newer browsers return a Promise from scrollIntoView, and an effect must not return one.
     bottom.current?.scrollIntoView({ block: "nearest" });
   }, [messages, pending]);
+
+  useEffect(() => {
+    if (!withPeople || !conversationId) return;
+    const timer = setInterval(() => {
+      api<ConversationDetail>(`${path}/conversations/${conversationId}`).then(
+        (detail) => {
+          setMessages(detail.messages);
+          setStatus(detail.status);
+        },
+        () => {},
+      );
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [api, path, conversationId, withPeople]);
 
   if (employee.error) return <ErrorState message={employee.error.message} onRetry={employee.reload} />;
   const latest = employee.data?.versions[0];
@@ -101,6 +122,8 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
     setConversationId(undefined);
     setMessages([]);
     setError(undefined);
+    setStatus(undefined);
+    setNotice(undefined);
   };
 
   const open = async (conversation: ConversationSummary) => {
@@ -110,6 +133,8 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
       setConversationId(detail.id);
       setMessages(detail.messages);
       setCustomer(detail.customer ?? "");
+      setStatus(detail.status);
+      setNotice(undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not open the conversation. Try again.");
     }
@@ -138,8 +163,13 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
       }, (e) => {
         if (e.type === "text") setPending((p) => p && { ...p, reply: p.reply + e.text });
         else if (e.type === "error") fail(e.error);
-        else {
+        else if (e.type === "held") {
+          setMessages((current) => [...current, e.message]);
+          setStatus(e.conversation.status);
+        } else {
           setConversationId(e.conversation.id);
+          setStatus(e.conversation.status);
+          setNotice(e.handoff && `Handed to people: ${HANDOFF_TRIGGER_LABELS[e.handoff.trigger]}. ${e.handoff.reason}`);
           setMessages((current) => [...current, ...e.messages]);
           history.setData([e.conversation, ...(history.data ?? []).filter((c) => c.id !== e.conversation.id)]);
         }
@@ -241,6 +271,20 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
               )}
               <div ref={bottom} />
             </div>
+
+            {(withPeople || notice) && conversationId && (
+              <p role="status" className="rounded-md border bg-muted/50 px-3 py-2 text-sm">
+                {notice && <>{notice} </>}
+                {withPeople && (
+                  <>
+                    {CONVERSATION_STATUS_LABELS[status!]}: the AI does not answer until someone returns the conversation to it.{" "}
+                    <Link href={`/conversations/${conversationId}`} className="underline underline-offset-2">
+                      Open in the inbox
+                    </Link>
+                  </>
+                )}
+              </p>
+            )}
 
             {error && (
               <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
