@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-17, end of Phase 8.
+Last updated: 2026-11-19, end of Phase 9.
 
 ## Phases
 
@@ -15,9 +15,25 @@ Last updated: 2026-11-17, end of Phase 8.
 | 6 | Tool system: registry, permissions (grants), validation, executor with timeouts and retries, audit log; calendar, email (test mode), HTTP request, webhook | Built; the meeting-booking flow confirmed with a real OpenRouter model, Tools card not yet tried in a browser |
 | 7 | Real-time voice: Twilio inbound and outbound calls, Deepgram STT, ElevenLabs TTS, the same agent runtime, barge-in, transcripts, call state | Built and passing with a simulated Twilio stream; **a real phone call has not happened yet** (needs the Twilio, Deepgram and ElevenLabs keys in `.env`). Do not start Phase 8 before it does |
 | 8 | Visual AI journey builder: React Flow editor, workflow versions, validation (incl. step references), publish/pause, delete (dependency check, confirmation) / restore / duplicate, background engine (Postgres job queue), runs with step records, retry, idempotency keys for steps with outside effects, 12 node types, the lead follow-up example | Built; the example runs end to end in the tests with a faked phone line and model; editor and runs pages checked in headless Edge (desktop and phone width). Started before the real phone call, because the owner pasted the phase |
-| 9+ | Not started | Owner pastes the next phase prompt |
+| 9 | Multichannel: channel abstraction (`@workforce/channels`, normalized inbound/outbound/delivery events), WhatsApp behind one provider interface (Meta Cloud API, Twilio, Telnyx; any of them at once, chosen per number: webhook verification, signatures, text/media/location/buttons, delivery receipts, rate-limit retries, 24-hour window errors, voice notes transcribed, documents read), web chat widget (anonymous or website-verified visitors, streaming), email (inbound webhook, replies in test mode), customers and memory shared across voice/WhatsApp/web chat/email, per-employee channel settings with per-channel tool limits, a message audit log for every channel including voice | Built; 11 tests with fake Meta, Twilio and Telnyx APIs and a fake model (phone call to WhatsApp to web chat with memory and summaries carried over); the widget checked in headless Edge (desktop and phone width). **No real WhatsApp message yet** on any provider, Channels card not tried in a browser |
+| 10+ | Not started | Owner pastes the next phase prompt |
 
 ## Open items
+
+- **WhatsApp against a real provider.** Pick one: Twilio (the voice account's keys; a WhatsApp sender, or the
+  sandbox), Telnyx (`TELNYX_PUBLIC_KEY` added; a WhatsApp number on the account) or Meta (`META_WHATSAPP_ACCESS_TOKEN`,
+  `META_APP_SECRET`, `META_WHATSAPP_VERIFY_TOKEN`). Then `PUBLIC_URL` (ngrok), the provider's webhook URL from the
+  Channels card entered in its console, and the number (Meta: Phone number ID) saved on the card.
+  Unconfirmed from the docs: Meta's typing indicator on read receipts; **Telnyx's inbound WhatsApp payload** (its
+  docs show it only in part: we read `payload.body` as Meta's message object, falling back to the SMS-style
+  `payload.text`/`payload.media`), which Telnyx delivery event names carry WhatsApp statuses, whether its hosted media
+  URLs need the API key (we send none), and whether `type: "WHATSAPP"` and `webhook_url` are accepted on sends.
+  Twilio: whether inbound webhooks ever carry `MessageStatus` (we tell receipts apart by `?event=status` on our own
+  callback URL instead).
+- **Email replies are not delivered** (test mode, like the email tool): no email provider chosen. Inbound email
+  arrives through `POST /hooks/email/:channelId/:token` in our own JSON shape, so an inbound service (Postmark,
+  SendGrid, Mailgun) needs a small mapping or a forwarding script.
+- **Channels card and message log not tried in a browser**; they typecheck and lint. The widget itself was.
 
 - **The example workflow on a real line** needs the voice keys below, an employee with a phone number, the
   calendar tool and a published version. Start it by POSTing a lead to the webhook URL shown on the trigger
@@ -44,9 +60,24 @@ Last updated: 2026-11-17, end of Phase 8.
 
 ## Verified so far
 
+- Phase 9 (`channels.test.ts`, 9 tests, fake Graph API, fake model, real memory service): a phone-call turn teaches
+  name and budget, then a WhatsApp message from the same number (WhatsApp writes it without "+") reaches the same
+  customer, the prompt has the facts and the call's summary, the reply goes to Meta and is logged SENT, the message is
+  marked read, the next message continues the conversation, a retried webhook is not answered twice; web chat with a
+  website-verified phone number (formatted differently) sees the call and WhatsApp summaries; forged identity hashes,
+  other websites' origins and forged session tokens are refused. Delivery receipts only move forward, failures carry the
+  meaning of Meta's code. Rate limits (130429) are retried, the 24-hour window (131047) is not. Voice notes transcribed,
+  documents read, images described, unsupported types answered politely, reactions ignored. Per-channel tool limits (not
+  offered, and refused by the executor if called anyway); anonymous visitors are their own customer; identity-required
+  channels refuse them; turned-off channels and paused employees do not answer; over 20 messages a minute are not
+  answered. Email: answered in test mode, the quoted part of a reply dropped, replies to our email continue the thread.
+  Settings: validation, roles (secrets hidden from members), isolation, one WhatsApp number per employee, the log's filters.
+- The widget in headless Edge (Clerk not involved): greeting, a streamed reply, the visitor id kept, history after a
+  reload, dark mode, desktop and 390 px wide.
+
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
-- Docker Postgres and Redis run via `pnpm infra:up`; all three migrations are applied there.
-- 64 API tests against the Docker Postgres (`pnpm test`). Workflows (12, fake model, fake Twilio, fake network,
+- Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
+- 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
   greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
   through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
@@ -105,11 +136,11 @@ Last updated: 2026-11-17, end of Phase 8.
 
 ## Deliberately not built yet
 
-WhatsApp, web chat, email channel, human handoff in conversations
+Human handoff in conversations
 (escalation settings are stored but the runtime does not act on them, nor on working hours),
 analytics, billing, model routing. In the dashboard, Customers (the API has read routes), Conversations
 and Analytics are placeholder pages. Packages other than `database`, `shared`,
-`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony` and `workflows`, and
+`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows` and `channels`, and
 all three workers, are empty stubs.
 
 Also skipped, small: scanned PDFs (no OCR), a queue for document processing (it runs inside the
@@ -124,6 +155,15 @@ memories (all of a customer's facts are recalled, newest 50), merging one person
 channels, a queue for memory extraction (it runs in the API process after the reply), embedding providers other than OpenRouter, providers other than OpenRouter and Anthropic, summarizing long conversations (the runtime
 sends the last 40 messages), deleting or renaming conversations, workspace rename/delete, hard delete of employees, list pagination (capped
 at 200 per workspace), avatar image upload (icons only), mirroring Clerk users into our database.
+
+Channels, skipped: outbound WhatsApp templates (needed to write first, or after 24 hours of silence; the error is
+logged), sending media from the employee, images and videos seen by the model (described only), email attachments,
+an email provider (test mode), per-organization WhatsApp accounts (one account per provider, from `.env`), a WhatsApp
+number picker (the admin types the number or Meta's Phone number ID), read receipts and typing on Twilio and Telnyx,
+a provider settings page (credentials stay in `.env`), rotating a web chat identity secret (remove and add the channel),
+markdown in the widget (plain text), the widget's look per employee, rate limits per IP on widget sessions,
+SMS, Messenger, Instagram, Telegram, a workspace-wide conversations inbox (the Conversations page is still a
+placeholder), merging a customer known by email with the same person known by phone.
 
 Workflows, skipped: permanently deleting workflows (delete is soft), cancelling a single run (deleting stops all),
 a dependency check when archiving an employee a workflow uses (publishing and the step itself catch it), loops and parallel branches, triggers other

@@ -20,6 +20,8 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
+import { ChannelLog } from "@/components/employees/channel-log";
+import { EmployeeChannels } from "@/components/employees/employee-channels";
 import { EmployeeKnowledge } from "@/components/employees/employee-knowledge";
 import { EmployeePhone } from "@/components/employees/employee-phone";
 import { EmployeeTools } from "@/components/employees/employee-tools";
@@ -332,6 +334,23 @@ export default withWorkspace(function EmployeePage({ workspace }) {
             canEdit={isAdmin && !archived}
             live={data.status === "ACTIVE" && data.publishedVersion !== null}
           />
+        </Section>
+
+        <Section
+          title="Channels"
+          description="Web chat, WhatsApp and email. Every channel reaches the published version, and a customer is remembered across all of them."
+          className="lg:col-span-2"
+        >
+          <EmployeeChannels
+            workspaceId={workspace.id}
+            employeeId={id}
+            canEdit={isAdmin && !archived}
+            live={data.status === "ACTIVE" && data.publishedVersion !== null}
+          />
+        </Section>
+
+        <Section title="Message log" description="Every message in and out, on every channel, with its delivery state." className="lg:col-span-2">
+          <ChannelLog workspaceId={workspace.id} employeeId={id} />
         </Section>
 
         <Section title="Analytics" description="How this employee is performing.">

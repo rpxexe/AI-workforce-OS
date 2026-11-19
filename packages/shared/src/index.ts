@@ -18,3 +18,4 @@ export * from "./customer.ts";
 export * from "./tool.ts";
 export * from "./voice.ts";
 export * from "./workflow.ts";
+export * from "./channel.ts";

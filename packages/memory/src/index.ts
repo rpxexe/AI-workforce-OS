@@ -17,7 +17,7 @@ export type Recalled = {
   /** Most recently learned first. */
   facts: Fact[];
   /** Summaries of the customer's other conversations, newest first. */
-  previous: { summary: string; at: Date }[];
+  previous: { summary: string; at: Date; channel: string }[];
 };
 
 export interface MemoryService {
@@ -86,12 +86,13 @@ export function memoryService(provider: AIProvider, timeoutMs: number): MemorySe
             where: { conversationId: { not: scope.conversationId }, summary: { not: "" } },
             orderBy: { updatedAt: "desc" },
             take: RECALL_CONVERSATIONS,
+            include: { conversation: { select: { channel: true } } },
           },
         },
       });
       return {
         facts: (customer?.memories ?? []).map((m) => ({ category: m.category as MemoryCategory, key: m.key, value: m.value })),
-        previous: (customer?.conversations ?? []).map((c) => ({ summary: c.summary, at: c.updatedAt })),
+        previous: (customer?.conversations ?? []).map((c) => ({ summary: c.summary, at: c.updatedAt, channel: c.conversation.channel })),
       };
     },
 

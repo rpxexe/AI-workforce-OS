@@ -16,6 +16,7 @@ packages/telephony     `TelephonyProvider` and Twilio (REST, TwiML, webhook sign
 packages/stt           `STTProvider` and Deepgram live transcription (turn detection, reconnects).
 packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
+packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), email (test mode), `splitText`.
 workers/*         agent-worker, call-worker, evaluation-worker: empty stubs.
 ```
 
@@ -72,6 +73,14 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   is due; null while waiting for a person), `lockedUntil`, `error`, `startedBy` (user id or "webhook").
 - `WorkflowStepExecution`: one attempt at one node: `attempt`, `status` (RUNNING, WAITING, SUCCEEDED, FAILED),
   `input` (settings with templates filled), `output`, `state` (what a waiting step remembers), `error`.
+- `EmployeeChannel`: a messaging channel an employee answers on: `kind` (web_chat, whatsapp, email), `address` (widget
+  key, the WhatsApp number (Meta: its phone number id), email address; unique per kind, so it routes inbound messages), `enabled`, `config`
+  (`channelConfigSchemas[kind]`), `allowedTools` (null = all granted), `secret` (web chat identity and session
+  signing; part of the email hook URL). One per kind per employee. Not versioned.
+- `ChannelMessage`: the message audit log, one row per message in or out of any channel, voice included: `direction`,
+  `status` (inbound RECEIVED, ANSWERED, REJECTED, FAILED; outbound PENDING, SENT, DELIVERED, READ, FAILED), `from`, `to`,
+  `text`, `media` (what was sent and what was done with it), `providerMessageId` (unique per channel and direction:
+  deduplicates retried webhooks, matches receipts), `customerId`, `conversationId`, `error`, `attempts`, `latencyMs`.
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -148,6 +157,18 @@ GET   /workspaces/:workspaceId/workflow-executions/:executionId   member; with s
 POST  .../workflow-executions/:executionId/retry                admin; FAILED only, from the failed step
 POST  .../workflow-executions/:executionId/resume               admin; continues a Human Handoff
 POST  /hooks/workflows/:id/:token               public; JSON body becomes the trigger data; 202 { executionId }
+GET   .../employees/:id/channels                member; { channels, whatsappProviders }; secrets and the email hook URL for admins only
+PUT   .../employees/:id/channels/:kind          admin; web_chat | whatsapp | email; body { enabled, allowedTools, config }; 409 if another employee has the address
+DELETE .../employees/:id/channels/:kind         admin; the log stays
+GET   /workspaces/:workspaceId/channel-messages member; newest 100; ?employeeId= ?customerId= ?conversationId= ?channel=
+GET   /channels/whatsapp/meta/webhook           public; Meta's subscription handshake (hub.verify_token)
+POST  /channels/whatsapp/:provider/webhook      public; meta | twilio | telnyx; signature checked (X-Hub-Signature-256, X-Twilio-Signature,
+                                                Ed25519); 200 at once (Twilio: empty TwiML), answered in the background
+POST  /hooks/email/:channelId/:token            public; { from, subject, text, messageId, inReplyTo? }; 202
+GET   /widget.js                                public; the web chat widget
+GET   /chat/:key/demo                           public; a page showing the widget
+POST  /chat/:key/session                        public, origin-checked; { visitorId? } or { customer, customerHash }; token, greeting, history
+POST  /chat/:key/messages                       public, origin-checked, Bearer session token; { message }; SSE reply (ChatStreamEvent)
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -258,6 +279,59 @@ stream (apps/api/src/voice/session.ts), one per call:
   them, voice routes answer 503 naming what is missing; the rest of the API works.
 - `apps/api/src/try-call.ts` (`pnpm --filter @workforce/api try-call`): a real call without the
   dashboard, in a throwaway organization.
+
+## Channels
+
+```
+WhatsApp webhook / inbound email -> InboundMessage (packages/channels: normalized, from = +digits or email)
+  -> channelService.receive (apps/api/src/channels/service.ts)
+       audit row INBOUND RECEIVED (createMany skipDuplicates on providerMessageId: retried webhooks stop here)
+       one at a time per channel + customer (in-process queue), then:
+       channel off / over 20 a minute / employee not live -> REJECTED, no reply
+       customer = identify(from)      the same id voice uses (caller number) -> one memory for all channels
+       WhatsApp: mark read + typing (Meta); files: voice notes -> STT.transcribe, documents -> parseDocument, rest described
+       conversation: the customer's one on this channel updated in the last 24 h (email: the one our replied-to email is in)
+       runTurn(channel kind, published version, tools limited by the channel) -> reply
+       splitText(reply, channel limit) -> ChannelSender.send -> OUTBOUND rows PENDING -> SENT/FAILED (+attempts, latency)
+       inbound row -> ANSWERED | FAILED (an apology is sent) | REJECTED, after the reply has left
+WhatsApp status webhook -> DeliveryUpdate -> outbound row SENT < DELIVERED < READ (never backwards), FAILED + reason
+web chat: session (origin, identity) -> signed token -> each message: runTurn streamed as SSE, logged like the rest
+voice: each caller turn and reply is logged to ChannelMessage too (channel "voice")
+```
+
+- Every channel answers with the employee's **published** version through `runTurn`; the channel decides only who
+  the customer is, which conversation continues, and how the reply is delivered. `channel` reaches the system prompt
+  as style rules (`CHANNEL_STYLE` in `context.ts`), and recalled summaries say which channel they came from.
+- Cross-channel continuity: customers are keyed by `normalizeCustomerId` (phone `+digits`, lower-case email), so a
+  caller writing on WhatsApp, or a website visitor the site vouches for with the same number, is the same customer:
+  facts plus the summaries of their last 5 conversations on any channel reach the prompt.
+- Web chat identity: anonymous visitors are `visitor:<uuid>` (kept in localStorage). A website that knows the visitor
+  sends `customer` and `customerHash` = HMAC-SHA256(channel secret, customer), computed on its server; only then is the
+  visitor matched to an existing customer. Session tokens are HMAC-signed `{ channel, customer, expiry }` (12 h).
+- Capability limits: per-channel tool list (the runtime offers only those, and passes them to the executor as
+  `allowedTools`, which denies any other call); web chat can require a verified identity and limits the websites
+  that may show it (the API's own preview page is always allowed); WhatsApp replies are split at 4096 characters;
+  files are read only on WhatsApp, up to 10 MB.
+- WhatsApp providers (`WhatsAppProvider` in `packages/channels/src/types.ts`): `parseWebhook` (verifies and returns
+  messages and receipts, or null), `send`, `downloadMedia`, optional `markRead` and `verifySubscription`, and the
+  webhook `ack`. Implementations: `whatsapp-meta.ts` (Graph API v26.0), `whatsapp-twilio.ts` (Messages API, form
+  webhooks, `StatusCallback` = webhook URL + `?event=status`, media with Basic auth), `whatsapp-telnyx.ts`
+  (`/v2/messages/whatsapp`, Ed25519 webhooks within 5 minutes, `payload.body` read as Meta's message object). All can be
+  configured at once; a WhatsApp channel's `config.provider` (default meta) says which one carries its number, and a
+  webhook from another provider for that number is ignored. Adding a provider: implement the interface, add it to
+  `whatsappProvidersFromEnv` and `WHATSAPP_PROVIDERS`.
+- Send errors: only answers that mean "not sent, try later" are retried twice (1 s, 4 s): HTTP 429, Meta 4, 80007,
+  130429, 131016, 131056, Twilio 20429 and 63018. Network errors and 5xx are not, since a retry could send twice,
+  except on Telnyx, whose sends carry an `Idempotency-Key` (the outbound log row id). Codes an admin will meet (Meta
+  131047 and Twilio 63016, the 24-hour window; 131026; 190; 20003) are logged in plain words.
+- Config: Meta `META_WHATSAPP_ACCESS_TOKEN`, `META_APP_SECRET`, `META_WHATSAPP_VERIFY_TOKEN` (optional
+  `META_GRAPH_VERSION`); Twilio the voice keys `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`; Telnyx `TELNYX_API_KEY` and
+  `TELNYX_PUBLIC_KEY`. Receipt URLs are built from `PUBLIC_URL`. An unconfigured provider's webhook answers 503 naming
+  what is missing; numbers can be saved either way. `buildApp({ whatsapp, publicUrl })` lets tests pass providers
+  with a fake `fetch`.
+- Dashboard: the employee page's Channels card (`components/employees/employee-channels.tsx`: a tab per channel,
+  settings, tool limits, embed code and identity secret, Meta callback URL, email hook) and Message log
+  (`channel-log.tsx`, filter by channel). The widget is `apps/api/src/channels/widget.js`, plain JS in a shadow root.
 
 ## Workflows
 

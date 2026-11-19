@@ -187,7 +187,7 @@ test("memory persists across conversations and is given to the employee", async 
   assert.match(system, /- name: Rahul/);
   assert.match(system, /- interest: enterprise/);
   assert.match(system, /- budget: 50000/);
-  assert.match(system, /Earlier conversations:\n- \d{4}-\d{2}-\d{2}: Rahul asked about the enterprise plan/);
+  assert.match(system, /Earlier conversations, on any channel:\n- \d{4}-\d{2}-\d{2}, test chat: Rahul asked about the enterprise plan/);
 
   // Learning a key again replaces it; a later turn in the same conversation keeps its customer.
   assert.equal(factsOf(await detail(orgA, wsA, customer.id)).budget, "75000");

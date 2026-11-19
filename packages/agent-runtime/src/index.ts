@@ -39,6 +39,7 @@ export type TurnInput = {
   customer?: { id: string; memory: MemoryService; onError: (err: unknown) => void };
   /** The tools granted to the employee, described for the model. Omit when there are none. */
   tools?: { executor: ToolExecutor; specs: ToolSpec[] };
+  /** test | voice | web_chat | whatsapp | email | workflow: sets the reply style, and is stored on new conversations. */
   channel: string;
   userMessage: string;
   timeoutMs: number;
@@ -178,6 +179,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
             conversationId: id,
             customerId: customer?.id,
             timezone: input.employee.workingHours.timezone,
+            allowedTools: tools.specs.map((s) => s.name),
           },
           signal,
         );

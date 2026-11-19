@@ -21,6 +21,8 @@ export type ToolScope = {
   conversationId: string;
   customerId?: string;
   timezone: string;
+  /** The tools offered for this turn (a channel may allow fewer than are granted); others are denied. Omit to allow every granted tool. */
+  allowedTools?: readonly string[];
   /** The audit row id, also the webhook idempotency key. Workflows pass a stable one so a step run twice is recognised. */
   executionId?: string;
 };
@@ -82,6 +84,8 @@ export function createToolExecutor(
 
       const tool = registry.get(call.name);
       if (!tool) return finish("DENIED", { error: `There is no tool named "${call.name}".` });
+      if (scope.allowedTools && !scope.allowedTools.includes(tool.name))
+        return finish("DENIED", { error: `${tool.name} is not available in this conversation.` });
 
       // Checked on every call, against the database, so a revoked grant stops the next call.
       const grant = await prisma.toolPermission.findFirst({
