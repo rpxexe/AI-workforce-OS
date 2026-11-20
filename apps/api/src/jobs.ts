@@ -5,6 +5,9 @@
 //   channel/message.received      answer a WhatsApp or email message (one at a time per customer)
 //   workflow/run.due              advance a workflow run; sleeps until its next step is due
 //   workflow-sweep (cron, 1 min)  hands due workflow runs to workflow/run.due (lost events, crashed runners)
+//   evaluation/requested          grade a conversation with the workspace's evaluators (the evaluation worker)
+//   evaluation/dataset.run        replay a regression dataset against an employee version and grade each case
+//   evaluation-sweep (cron, 5 min) queues evaluations of conversations that went quiet
 //
 // One set of handlers, two backends. Inngest (durable: retries, sleeps and per-customer ordering that
 // survive restarts and span API processes) when INNGEST_EVENT_KEY or INNGEST_DEV is set; otherwise
@@ -20,6 +23,8 @@ export type JobEvents = {
   "memory/exchange.saved": { organizationId: string; workspaceId: string; customerId: string; conversationId: string; replyId: string };
   "channel/message.received": { messageId: string; queueKey: string };
   "workflow/run.due": { executionId: string };
+  "evaluation/requested": { evaluationId: string };
+  "evaluation/dataset.run": { runId: string };
 };
 export type JobName = keyof JobEvents;
 
@@ -45,7 +50,7 @@ export interface Jobs {
   send<K extends JobName>(name: K, data: JobEvents[K]): Promise<void>;
 }
 
-/** Runs jobs in this process, not awaited, in order per `orderedBy` key. Schedules are not run (the workflow runner polls instead). */
+/** Runs jobs in this process, not awaited, in order per `orderedBy` key. Schedules are not run (the workflow runner and evaluation sweep poll instead). */
 export function inlineJobs(definitions: JobDefinitions, log: FastifyBaseLogger): Jobs {
   const steps: Steps = {
     run: (_id, fn) => fn(),

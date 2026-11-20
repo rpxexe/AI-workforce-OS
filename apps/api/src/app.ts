@@ -9,6 +9,7 @@ import {
 } from "@workforce/ai-provider";
 import { resendFromEnv, testEmailSender, whatsappProvidersFromEnv, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
+import { finishRun, queueDueEvaluations, runCase, runEvaluation, type EvaluationDeps } from "@workforce/evaluation-worker";
 import { processDocument } from "@workforce/knowledge";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
@@ -28,8 +29,9 @@ import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
 import { inboxRoutes } from "./inbox.ts";
 import type { HandoffNotice } from "@workforce/agent-runtime";
-import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule } from "./jobs.ts";
+import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
+import { qualityRoutes } from "./quality.ts";
 import { toolRoutes } from "./tools.ts";
 import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
 import { workflowRoutes } from "./workflows.ts";
@@ -37,6 +39,8 @@ import { workspaceRoutes } from "./workspaces.ts";
 
 /** Advance-then-sleep rounds one workflow/run.due job runs before leaving the rest to the sweep (Inngest caps steps per run). */
 const WORKFLOW_ROUNDS = 300;
+/** A conversation is evaluated automatically once it has been quiet this long. */
+const EVALUATION_IDLE_MS = 10 * 60_000;
 
 /**
  * `authenticate`, `provider`, `embedder`, `memory`, `toolFetch` and `aiTimeoutMs` exist so tests can supply identities, fake models and a fake network;
@@ -228,6 +232,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   channelRoutes(app, authenticate, { service: channels, whatsapp, resend, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
   webChatRoutes(app, channels);
   inboxRoutes(app, authenticate, ai, channels);
+  qualityRoutes(app, authenticate, send);
+  const evaluation: EvaluationDeps = { provider: ai.provider, embedder: getEmbedder, timeoutMs: ai.timeoutMs };
 
   const engine = createWorkflowEngine(
     {
@@ -295,6 +301,33 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         // Longer runs (many Voice Call checks) are picked up again by the sweep.
       },
     },
+    "evaluation/requested": {
+      retries: 0, // the evaluation is claimed (PENDING -> RUNNING) and records its own failure; re-running is a person's choice
+      handler: ({ evaluationId }) => runEvaluation(evaluationId, evaluation),
+    },
+    "evaluation/dataset.run": {
+      retries: 0, // replays spend money; cases already graded are skipped if a step runs again
+      async handler({ runId }, step) {
+        const cases = await step.run("cases", async () => {
+          const run = await prisma.evalRun.findUnique({ where: { id: runId }, select: { datasetId: true } });
+          if (!run) return [];
+          return (await prisma.evalCase.findMany({ where: { datasetId: run.datasetId }, orderBy: { createdAt: "asc" }, select: { id: true } })).map((c) => c.id);
+        });
+        try {
+          for (const caseId of cases) await step.run(`case-${caseId}`, () => runCase(runId, caseId, evaluation));
+          await step.run("finish", () => finishRun(runId));
+        } catch (err) {
+          await prisma.evalRun.update({ where: { id: runId }, data: { status: "FAILED", error: err instanceof Error ? err.message.slice(0, 500) : "The run failed", completedAt: new Date() } });
+          throw err;
+        }
+      },
+    },
+  };
+  /** Queues evaluations of conversations that went quiet; the evaluation-sweep schedule, or a timer without Inngest. */
+  const sweepEvaluations = async (step: Pick<Steps, "run">) => {
+    const ids = await step.run("queue-evaluations", () => queueDueEvaluations({ idleMs: EVALUATION_IDLE_MS }));
+    await Promise.all(ids.map((evaluationId) => send("evaluation/requested", { evaluationId })));
+    return ids.length;
   };
   const schedules: Schedule[] = [
     {
@@ -307,6 +340,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         return ids.length;
       },
     },
+    { id: "evaluation-sweep", cron: "*/5 * * * *", handler: sweepEvaluations },
   ];
   jobs.current =
     typeof options.jobs === "function"
@@ -319,8 +353,19 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   // they ask for it, so test files running side by side never run each other's workflows.
   const runner = !queued() && (!options.authenticate || options.workflows !== undefined);
   const stopRunner = runner ? engine.startRunner(options.workflows?.intervalMs ?? 1000) : async () => {};
+  // Likewise the evaluation sweep: every 5 minutes in process, as Inngest's schedule would. Never in test apps:
+  // they share the database with development (tests call queueDueEvaluations for their own organization).
+  const sweeping = !queued() && !options.authenticate;
+  let sweep: Promise<unknown> = Promise.resolve();
+  const timer = sweeping
+    ? setInterval(() => {
+        sweep = sweep.then(() => sweepEvaluations({ run: (_id, fn) => fn() })).catch((err: unknown) => app.log.error({ err }, "Evaluation sweep failed"));
+      }, 5 * 60_000)
+    : undefined;
 
   app.addHook("onClose", async () => {
+    clearInterval(timer);
+    await sweep;
     await stopRunner();
     await prisma.$disconnect();
   });

@@ -17,7 +17,8 @@ packages/stt           `STTProvider` and Deepgram live transcription (turn detec
 packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
 packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), `EmailProvider` (Resend; test mode without it), `splitText`.
-workers/*         agent-worker, call-worker, evaluation-worker: empty stubs.
+workers/evaluation-worker  The evaluation worker: graders, `runEvaluation`, the sweep, regression replays (run as API jobs).
+workers/*         agent-worker, call-worker: empty stubs.
 ```
 
 Packages are named `@workforce/<name>` and export TypeScript source from `src/index.ts`; there is
@@ -89,6 +90,18 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   open (no `endedAt`) per conversation. Its timestamps are the handoff analytics.
 - `CopilotSuggestion`: what the Copilot suggested to an agent (`reply`, `summary`, `nextAction`, `memory`, `citations`,
   usage), apart from the conversation's messages; `usedInMessageId` and `edited` when an agent sent it.
+- `Evaluator`: a grader definition per workspace (`key` for the 8 built-in ones), `enabled`, `currentVersionId`.
+  `EvaluatorVersion`: immutable `name`, `description`, `dimension` (`EVAL_DIMENSIONS`), `kind` (deterministic, llm, rule),
+  `config` (`evaluatorConfigSchemas[kind]`), `passScore`. Saving appends one and makes it current.
+- `Evaluation`: one grading of a conversation as it stood at `lastMessageAt`: links to the conversation, the
+  `employeeVersionId` and `provider`/`model` of its last reply, and the `workflowVersionId` that started it; `trigger`
+  (auto, manual, dataset), `autoKey` (unique: conversation + last message time, so the sweep never queues a state twice),
+  `status` (PENDING, RUNNING, COMPLETED, FAILED), `score` (average of the scored results, 0-100), `passed`, `failures`,
+  `datasetRunId`/`caseId` for regression runs. `EvaluationResult`: one per evaluator version: `status` (scored, skipped,
+  error), `score`, `passed` (score >= passScore), `reason`, `details` ({ findings: [{ message, quote? }], usage? }).
+- `EvalDataset` (name unique per workspace), `EvalCase` (`messages` [{ role: customer | employee, content }] copied from a
+  conversation or written by hand, `expectations`), `EvalRun` (dataset x employee version: `total`, `passed`, `failed`,
+  `score`, `status`).
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -184,6 +197,23 @@ PATCH .../conversations/:conversationId         member; { action: take_over | as
 POST  .../conversations/:conversationId/messages  member; { text, suggestionId? }; takes over, sends on the channel (502 if that fails), then stores
 POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
 GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30)
+GET   /workspaces/:workspaceId/evaluators       member; creates the 8 built-in ones on first call; with 30-day pass counts
+POST  /workspaces/:workspaceId/evaluators       admin; body evaluatorSchema (name, description, dimension, kind, config, passScore); 201
+GET   .../evaluators/:id                        member; current version, all versions, its newest 50 results
+PUT   .../evaluators/:id                        admin; body evaluatorSchema; appends a version and makes it current
+PATCH .../evaluators/:id                        admin; { enabled }
+GET   /workspaces/:workspaceId/evaluations      member; production evaluations, newest 100; ?failed=true ?dimension= ?evaluatorId= ?employeeId= ?days=
+GET   .../conversations/:conversationId/evaluations   member; newest 20 with results (drill-down)
+POST  .../conversations/:conversationId/evaluations   admin; queues a manual evaluation; 202 (PENDING)
+GET   /workspaces/:workspaceId/quality          member; ?days= ?employeeId=; QualityOverview
+GET   /workspaces/:workspaceId/datasets         member; with case counts and the last run
+POST  /workspaces/:workspaceId/datasets         admin; { name, description? }; 409 if the name is taken
+GET   .../datasets/:id                          member; cases and newest 50 runs
+DELETE .../datasets/:id                         admin; 409 while a run is in progress; 204
+POST  .../datasets/:id/cases                    admin; { name, expectations?, conversationId | messages }; 201
+DELETE .../datasets/:id/cases/:caseId           admin; 204
+POST  .../datasets/:id/runs                     admin; { employeeId, version? } (default: published, else latest); 202
+GET   /workspaces/:workspaceId/eval-runs/:id    member; the run with each case's evaluation and results
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -439,6 +469,39 @@ workflow Human Handoff step: optional conversationId -> startHandoff(trigger wor
   names from Clerk members (`lib/members.ts`). Test chat shows agent messages and the handoff state; the employee form
   has the new escalation settings.
 
+## Quality control (Phase 11)
+
+```
+conversation quiet 10 min (sweep: Inngest cron every 5 min, or a timer in process; never in test apps)
+  or "Evaluate now" (admin)  -> createEvaluation: PENDING row with the employee version + model of the last reply and
+                                the workflow version (AI Employee step output, or a Voice Call step's call idempotency key)
+  -> job evaluation/requested -> runEvaluation (workers/evaluation-worker): claim PENDING -> RUNNING
+       load messages (<= lastMessageAt, newest 200), handoffs, tool executions, the employee version's config,
+       the cited pages' text, the case's expectations
+       every enabled evaluator's current version, in parallel:
+         deterministic  tool_success | escalation_handling | reply_latency   (graders.ts, no model)
+         rule           phrase lists, forbid/require, on the employee's or the customer's messages (escaped, whole words)
+         llm            GRADER_PROMPT + rubric + employee config + knowledge + numbered transcript -> JSON score/reason/findings
+       -> EvaluationResult rows + score / passed / failures, COMPLETED (one grader's error does not lose the rest)
+dataset run (admin) -> job evaluation/dataset.run -> per case (step.run): new conversation on channel "evaluation",
+       customer messages through runTurn with the chosen version (no tools, no customer, no handoff notices)
+       -> createEvaluation(dataset) + runEvaluation; a failed replay is a FAILED evaluation with the reason -> finishRun
+```
+
+- Evaluation never runs inside a customer's turn and never writes anything the runtime reads: grades are for people.
+- Scores are 0-100. A result passes at its version's `passScore`; skipped (nothing to judge) and error results do not
+  count. A conversation passes when no result failed; its score is the average of the scored results.
+- The 8 built-in evaluators (`DEFAULT_EVALUATORS` in `workers/evaluation-worker/src/defaults.ts`): correctness,
+  grounding, tone, resolution (LLM); policy rules and satisfaction signals (phrase rules); tool success and escalation
+  handling (deterministic). Created per workspace on the first evaluator list, manual evaluation or dataset run; the
+  sweep also covers workspaces that have none yet.
+- The `evaluation` channel (`EVALUATION_CHANNEL`) keeps replays out of the inbox, handoff analytics, the employee's
+  test-chat list and the sweep. The overview and failures list count only auto and manual evaluations.
+- Dashboard: `/quality` (tabs: Overview, Failures, Evaluators, Datasets), `/quality/evaluators/new` and `[id]` (form:
+  saving adds a version; versions; recent results), `/quality/datasets/[id]` (cases, write a case, run against a version,
+  run results per case). The conversation page has a Quality card (`components/quality/conversation-quality.tsx`): the
+  results with findings, Evaluate now, Add to dataset.
+
 ## Agent runtime
 
 ```
@@ -513,6 +576,9 @@ memory/exchange.saved        { tenant, customerId, conversationId, replyId }   l
 channel/message.received     { messageId, queueKey }        channelService.answerRecorded; one at a time per queueKey
 workflow/run.due             { executionId }                loop: step.run(engine.runOne) -> step.sleepUntil(next runAt)
 workflow-sweep               cron, every minute             engine.dueRuns -> workflow/run.due for each
+evaluation/requested         { evaluationId }               runEvaluation (claims PENDING; records FAILED itself)
+evaluation/dataset.run       { runId }                      runCase per case (skips graded cases), then finishRun
+evaluation-sweep             cron, every 5 minutes          queueDueEvaluations -> evaluation/requested for each
 ```
 
 - `jobs.send(name, data)` queues a job. Backends: **Inngest** when `INNGEST_EVENT_KEY` or `INNGEST_DEV` is set (never

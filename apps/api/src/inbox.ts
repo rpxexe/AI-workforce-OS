@@ -11,6 +11,7 @@ import {
   agentMessageSchema,
   analyticsQuerySchema,
   conversationActionSchema,
+  EVALUATION_CHANNEL,
   inboxQuerySchema,
   INBOX_VIEWS,
   type ConversationStatus,
@@ -36,6 +37,8 @@ const conversationParams = workspaceParams.extend({ conversationId: z.string().m
 /** Channels an agent's message can reach the customer on. Calls are not transferred; workflow conversations have no customer line. */
 const REPLY_CHANNELS = ["test", "web_chat", "whatsapp", "email"];
 const WITH_PEOPLE: ConversationStatus[] = ["WAITING_FOR_HUMAN", "HUMAN_ACTIVE"];
+/** Regression replays are not customer conversations: no inbox, no analytics. */
+const REAL = { channel: { not: EVALUATION_CHANNEL } } satisfies Prisma.ConversationWhereInput;
 
 const viewWhere = (view: InboxView, userId: string): Prisma.ConversationWhereInput =>
   ({
@@ -131,7 +134,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
     const { workspaceId } = workspaceParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
     const { view, employeeId } = inboxQuerySchema.parse(req.query);
-    const where = { ...within(scope), ...(employeeId && { employeeId }) };
+    const where = { ...within(scope), ...REAL, ...(employeeId && { employeeId }) };
     const [rows, byStatus, queue, mine] = await Promise.all([
       prisma.conversation.findMany({
         where: { ...where, ...viewWhere(view, scope.userId) },
@@ -325,23 +328,23 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
     const scope = await inWorkspace(member(req), workspaceId);
     const { days } = analyticsQuerySchema.parse(req.query);
     const since = new Date(Date.now() - days * 86_400_000);
-    const tenant = within(scope);
+    const tenant = { ...within(scope), ...REAL };
     const [active, handoffs, queue, assigned, humanActive, suggestionsTotal, suggestionsUsed, replies] = await Promise.all([
       prisma.conversation.count({ where: { ...tenant, updatedAt: { gte: since } } }),
       // shortcut: the newest 10,000 handoffs of the period; aggregate in SQL when a workspace has more
-      prisma.handoff.findMany({ where: { ...tenant, requestedAt: { gte: since } }, orderBy: { requestedAt: "desc" }, take: 10_000 }),
+      prisma.handoff.findMany({ where: { ...within(scope), conversation: REAL, requestedAt: { gte: since } }, orderBy: { requestedAt: "desc" }, take: 10_000 }),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: null } }),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: { not: null } } }),
       prisma.conversation.count({ where: { ...tenant, status: "HUMAN_ACTIVE" } }),
-      prisma.copilotSuggestion.count({ where: { ...tenant, createdAt: { gte: since } } }),
-      prisma.copilotSuggestion.count({ where: { ...tenant, createdAt: { gte: since }, usedInMessageId: { not: null } } }),
+      prisma.copilotSuggestion.count({ where: { ...within(scope), createdAt: { gte: since } } }),
+      prisma.copilotSuggestion.count({ where: { ...within(scope), createdAt: { gte: since }, usedInMessageId: { not: null } } }),
       // Reply time: from a customer's message to the reply that follows it, by who replied.
       prisma.$queryRaw<{ role: string; gaps: number[] }[]>`
         SELECT role::text AS role, array_agg(gap) AS gaps FROM (
           SELECT m.role, LAG(m.role) OVER w AS previous,
                  EXTRACT(EPOCH FROM (m."createdAt" - LAG(m."createdAt") OVER w)) * 1000 AS gap
           FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
-          WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND m."createdAt" >= ${since}
+          WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND m."createdAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
           WINDOW w AS (PARTITION BY m."conversationId" ORDER BY m."createdAt")
         ) t
         WHERE previous = 'USER' AND role IN ('ASSISTANT', 'AGENT')

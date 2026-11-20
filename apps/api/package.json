@@ -17,6 +17,7 @@
     "@workforce/ai-provider": "workspace:*",
     "@workforce/channels": "workspace:*",
     "@workforce/database": "workspace:*",
+    "@workforce/evaluation-worker": "workspace:*",
     "@workforce/knowledge": "workspace:*",
     "@workforce/memory": "workspace:*",
     "@workforce/shared": "workspace:*",

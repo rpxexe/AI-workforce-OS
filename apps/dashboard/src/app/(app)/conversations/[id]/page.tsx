@@ -14,6 +14,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CHANNEL_LABELS, ConversationStatusBadge, formatDuration, timeAgo } from "@/components/inbox/meta";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
+import { ConversationQuality } from "@/components/quality/conversation-quality";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
@@ -370,6 +371,8 @@ export default withWorkspace(function ConversationPage({ workspace }) {
           }}
         />
       </div>
+
+      <ConversationQuality workspaceId={workspace.id} conversationId={data.id} title={data.title} />
     </div>
   );
 });

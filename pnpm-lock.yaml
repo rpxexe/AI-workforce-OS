@@ -47,6 +47,9 @@ importers:
       '@workforce/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@workforce/evaluation-worker':
+        specifier: workspace:*
+        version: link:../../workers/evaluation-worker
       '@workforce/knowledge':
         specifier: workspace:*
         version: link:../../packages/knowledge
@@ -297,7 +300,20 @@ importers:
 
   workers/call-worker: {}
 
-  workers/evaluation-worker: {}
+  workers/evaluation-worker:
+    dependencies:
+      '@workforce/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
+      '@workforce/ai-provider':
+        specifier: workspace:*
+        version: link:../../packages/ai-provider
+      '@workforce/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@workforce/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
 
 packages:
 
