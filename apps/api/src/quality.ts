@@ -54,7 +54,7 @@ const evaluationInclude = {
 type EvaluationRow = Prisma.EvaluationGetPayload<{ include: typeof evaluationInclude }>;
 
 /** Employee display names: the published version's name, else the latest. */
-async function employeeNames(scope: Scope, ids: string[]) {
+export async function employeeNames(scope: Scope, ids: string[]) {
   const rows = await prisma.aiEmployee.findMany({
     where: { ...scope, id: { in: [...new Set(ids)] } },
     select: { id: true, publishedVersion: { select: { name: true } }, versions: { orderBy: { number: "desc" }, take: 1, select: { name: true } } },
@@ -116,7 +116,7 @@ const toVersion = (v: Prisma.EvaluatorVersionGetPayload<object>): EvaluatorVersi
     createdAt: v.createdAt.toISOString(),
   }) as EvaluatorVersionInfo;
 
-const toRun = (r: Prisma.EvalRunGetPayload<{ include: { employeeVersion: { select: { number: true } } } }>, nameOf: (id: string) => string): EvalRunInfo => ({
+export const toRun = (r: Prisma.EvalRunGetPayload<{ include: { employeeVersion: { select: { number: true } } } }>, nameOf: (id: string) => string): EvalRunInfo => ({
   id: r.id,
   employee: { id: r.employeeId, name: nameOf(r.employeeId) },
   employeeVersion: r.employeeVersion.number,
@@ -150,6 +150,20 @@ const summary = (list: { score: number | null; passed: boolean | null }[]) => ({
   averageScore: mean(list.map((e) => e.score).filter((s) => s !== null)),
   passRate: rate(list.map((e) => e.passed)),
 });
+
+/** A conversation's messages as a regression case (a copy: the case keeps them if the conversation changes or goes). */
+export async function conversationCase(scope: Scope, conversationId: string) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: conversationId, ...scope },
+    include: { messages: { orderBy: { createdAt: "desc" }, take: 40 } },
+  });
+  if (!conversation) throw httpError(404, "Conversation not found");
+  const messages = conversation.messages
+    .reverse()
+    .map((m): CaseMessage => ({ role: m.role === "USER" ? "customer" : "employee", content: m.content.slice(0, 4000) }));
+  if (!messages.some((m) => m.role === "customer")) throw httpError(400, "The conversation has no customer messages to replay.");
+  return messages;
+}
 
 const duplicate = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
 
@@ -471,18 +485,7 @@ export function qualityRoutes(app: FastifyInstance, authenticate: Authenticate, 
     await datasetOf(scope, id);
     const body = caseSchema.parse(req.body);
     let messages = body.messages;
-    if (body.conversationId) {
-      // A copy: the case keeps its messages even if the conversation changes or goes.
-      const conversation = await prisma.conversation.findFirst({
-        where: { id: body.conversationId, ...scope },
-        include: { messages: { orderBy: { createdAt: "desc" }, take: 40 } },
-      });
-      if (!conversation) throw httpError(404, "Conversation not found");
-      messages = conversation.messages
-        .reverse()
-        .map((m): CaseMessage => ({ role: m.role === "USER" ? "customer" : "employee", content: m.content.slice(0, 4000) }));
-      if (!messages.some((m) => m.role === "customer")) throw httpError(400, "The conversation has no customer messages to replay.");
-    }
+    if (body.conversationId) messages = await conversationCase(scope, body.conversationId);
     const created = await prisma.evalCase.create({
       data: {
         datasetId: id,

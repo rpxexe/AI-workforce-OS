@@ -18,6 +18,16 @@ import { deterministic, llm, rules, type GradedMessage, type GradeInput, type Ou
 
 export { DEFAULT_EVALUATORS, ensureDefaultEvaluators } from "./defaults.ts";
 export { deterministic, GRADER_PROMPT, parseGrade, rules, transcript, type GradeInput } from "./graders.ts";
+export {
+  analyzeWorkspace,
+  compareKpi,
+  findFailurePatterns,
+  IMPROVE_PROMPT,
+  KPI_MIN_SAMPLES,
+  parseProposal,
+  workspacesWithFailures,
+  type ImproveDeps,
+} from "./improve.ts";
 
 export type EvaluationDeps = {
   provider: () => AIProvider;

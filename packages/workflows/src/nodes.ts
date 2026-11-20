@@ -6,11 +6,11 @@
 // same attempt). Every step with an outside effect is keyed by `run.idempotencyKey`
 // (execution:node:attempt), so the second run finds or deduplicates the first one's effect; where
 // that is impossible it fails instead of acting twice. A manual retry is a new attempt and acts again.
-import { configOf, runTurn, startHandoff, type HandoffNotice } from "@workforce/agent-runtime";
+import { configOf, ROLLOUT_INCLUDE, runTurn, servedVersion, startHandoff, type HandoffNotice } from "@workforce/agent-runtime";
 import { AIProviderError, type AIProvider, type EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
-import type { Branch, NodeConfig, NodeType } from "@workforce/shared";
+import { normalizeCustomerId, type Branch, type NodeConfig, type NodeType } from "@workforce/shared";
 import { ENDED_STATUSES } from "@workforce/telephony";
 import { toolRegistry, ToolError, type Mailer, type ToolExecutor } from "@workforce/tools";
 import { z } from "zod";
@@ -81,15 +81,18 @@ const MAX_BODY_CHARS = 100_000;
 const aiFailed = (err: unknown) =>
   err instanceof AIProviderError ? new StepError(`The AI provider failed (${err.kind}): ${err.message}`) : err;
 
-/** A published, active employee in the run's workspace, or a StepError. */
-async function liveEmployee(run: StepRun, employeeId: string) {
+/**
+ * A published, active employee in the run's workspace, or a StepError. `publishedVersion` is the version that
+ * answers: a rollout's candidate for its share of customers (keyed by the step's customer, else the run).
+ */
+async function liveEmployee(run: StepRun, employeeId: string, customer?: string) {
   const employee = await prisma.aiEmployee.findFirst({
     where: { id: employeeId, ...run.scope },
-    include: { publishedVersion: true, knowledgeSources: { select: { sourceId: true } }, tools: { select: { tool: true } } },
+    include: { publishedVersion: true, knowledgeSources: { select: { sourceId: true } }, tools: { select: { tool: true } }, ...ROLLOUT_INCLUDE },
   });
   if (!employee) throw new StepError("The employee no longer exists");
   if (employee.status !== "ACTIVE" || !employee.publishedVersion) throw new StepError("The employee is not published and active");
-  return { ...employee, publishedVersion: employee.publishedVersion };
+  return { ...employee, publishedVersion: servedVersion(employee.publishedVersion, employee.activeRollout, customer ? normalizeCustomerId(customer) : run.executionId) };
 }
 
 /** Sends a request through the guarded fetch and returns the status and the body (JSON when it parses). */
@@ -149,7 +152,7 @@ export const handlers: Handlers = {
     // A turn cannot be deduplicated: the employee may have used tools before the runner died.
     if (run.interrupted)
       throw new StepError("This step was interrupted while the employee was answering and may have used tools. Check its conversations, then retry.");
-    const employee = await liveEmployee(run, config.employeeId);
+    const employee = await liveEmployee(run, config.employeeId, config.customer);
     const { deps } = run;
     let provider: AIProvider;
     let embedder: EmbeddingProvider | undefined;

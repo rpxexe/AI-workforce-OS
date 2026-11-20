@@ -12,6 +12,7 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
+import { assertPublishable, release } from "./releases.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
 
@@ -153,13 +154,12 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate)
     const { version } = publishSchema.parse(req.body);
     const target = await prisma.aiEmployeeVersion.findFirst({
       where: { number: version, employee: { id, ...within(scope) } },
-      select: { id: true, employee: { select: { status: true } } },
+      select: { id: true, number: true, employee: { select: { id: true, status: true, publishedVersion: { select: { id: true, number: true } } } } },
     });
     if (!target) throw httpError(404, "Version not found");
-    await prisma.aiEmployee.update({
-      where: { id },
-      data: { publishedVersionId: target.id, ...(target.employee.status === "DRAFT" && { status: "ACTIVE" }) },
-    });
+    if (target.employee.publishedVersion?.id === target.id) return loadDetail(scope, id);
+    await assertPublishable(id, target.id);
+    await prisma.$transaction((tx) => release(tx, { scope, employee: target.employee, version: target, action: "publish", by: scope.userId }));
     return loadDetail(scope, id);
   });
 

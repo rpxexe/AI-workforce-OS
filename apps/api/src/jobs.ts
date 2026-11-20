@@ -8,6 +8,8 @@
 //   evaluation/requested          grade a conversation with the workspace's evaluators (the evaluation worker)
 //   evaluation/dataset.run        replay a regression dataset against an employee version and grade each case
 //   evaluation-sweep (cron, 5 min) queues evaluations of conversations that went quiet
+//   improvement/analyze           finds failure patterns in a workspace and writes improvement suggestions (never changes an employee)
+//   improvement-analysis (cron, daily 06:00) queues improvement/analyze for workspaces with recent failures
 //
 // One set of handlers, two backends. Inngest (durable: retries, sleeps and per-customer ordering that
 // survive restarts and span API processes) when INNGEST_EVENT_KEY or INNGEST_DEV is set; otherwise
@@ -25,6 +27,7 @@ export type JobEvents = {
   "workflow/run.due": { executionId: string };
   "evaluation/requested": { evaluationId: string };
   "evaluation/dataset.run": { runId: string };
+  "improvement/analyze": { organizationId: string; workspaceId: string };
 };
 export type JobName = keyof JobEvents;
 

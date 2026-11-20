@@ -32,6 +32,7 @@ import { DEFAULT_HANDOFF_MESSAGE, handoffBeforeReply, TRANSFER_TOOL, transferReq
 export { buildContext, systemPrompt } from "./context.ts";
 export { asksForHuman, DEFAULT_HANDOFF_MESSAGE, ruleMatches, startHandoff, toNumber, TRANSFER_TOOL, type HandoffRequest } from "./handoff.ts";
 export { suggest, toSuggestion, type CopilotInput } from "./copilot.ts";
+export { ROLLOUT_INCLUDE, rolloutBucket, servedVersion } from "./rollout.ts";
 
 export type TurnInput = {
   provider: AIProvider;

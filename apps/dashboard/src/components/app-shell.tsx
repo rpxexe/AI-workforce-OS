@@ -8,6 +8,7 @@ import {
   Check,
   ChevronsUpDown,
   LayoutDashboard,
+  Lightbulb,
   MessagesSquare,
   Settings,
   ShieldCheck,
@@ -55,6 +56,7 @@ const NAV = [
   { href: "/workflows", label: "Workflows", icon: Workflow },
   { href: "/analytics", label: "Analytics", icon: ChartColumn },
   { href: "/quality", label: "Quality", icon: ShieldCheck },
+  { href: "/improvements", label: "Improvements", icon: Lightbulb },
   { href: "/settings", label: "Settings", icon: Settings },
 ] as const;
 

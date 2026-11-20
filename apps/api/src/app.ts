@@ -9,7 +9,7 @@ import {
 } from "@workforce/ai-provider";
 import { resendFromEnv, testEmailSender, whatsappProvidersFromEnv, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
-import { finishRun, queueDueEvaluations, runCase, runEvaluation, type EvaluationDeps } from "@workforce/evaluation-worker";
+import { analyzeWorkspace, finishRun, queueDueEvaluations, runCase, runEvaluation, workspacesWithFailures, type EvaluationDeps } from "@workforce/evaluation-worker";
 import { processDocument } from "@workforce/knowledge";
 import { memoryService, type MemoryService } from "@workforce/memory";
 import { sttFromEnv } from "@workforce/stt";
@@ -27,6 +27,7 @@ import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { employeeRoutes } from "./employees.ts";
+import { improvementRoutes } from "./improvements.ts";
 import { inboxRoutes } from "./inbox.ts";
 import type { HandoffNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
@@ -233,6 +234,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   webChatRoutes(app, channels);
   inboxRoutes(app, authenticate, ai, channels);
   qualityRoutes(app, authenticate, send);
+  improvementRoutes(app, authenticate, send);
   const evaluation: EvaluationDeps = { provider: ai.provider, embedder: getEmbedder, timeoutMs: ai.timeoutMs };
 
   const engine = createWorkflowEngine(
@@ -322,6 +324,21 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         }
       },
     },
+    "improvement/analyze": {
+      retries: 0, // spends model calls; patterns not written are found again by the next analysis
+      handler: (scope) =>
+        analyzeWorkspace(scope, {
+          provider: ai.provider,
+          timeoutMs: ai.timeoutMs,
+          onError: (err, pattern) => app.log.error({ err, pattern }, "Proposing an improvement failed"),
+        }),
+    },
+  };
+  /** Looks for failure patterns in every workspace that had failures lately; the daily improvement-analysis schedule (Inngest only). */
+  const analyzeAll = async (step: Pick<Steps, "run">) => {
+    const scopes = await step.run("find-workspaces", () => workspacesWithFailures());
+    await Promise.all(scopes.map((scope) => send("improvement/analyze", scope)));
+    return scopes.length;
   };
   /** Queues evaluations of conversations that went quiet; the evaluation-sweep schedule, or a timer without Inngest. */
   const sweepEvaluations = async (step: Pick<Steps, "run">) => {
@@ -341,6 +358,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       },
     },
     { id: "evaluation-sweep", cron: "*/5 * * * *", handler: sweepEvaluations },
+    { id: "improvement-analysis", cron: "0 6 * * *", handler: analyzeAll },
   ];
   jobs.current =
     typeof options.jobs === "function"
