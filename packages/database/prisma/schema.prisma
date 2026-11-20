@@ -27,6 +27,8 @@ model Organization {
   workflowExecutions WorkflowExecution[]
   employeeChannels   EmployeeChannel[]
   channelMessages    ChannelMessage[]
+  evaluators         Evaluator[]
+  evalDatasets       EvalDataset[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -100,6 +102,8 @@ model AiEmployeeVersion {
   workingHours       Json
   escalation         Json
 
+  evaluations Evaluation[]
+  evalRuns    EvalRun[]
   createdBy String // Clerk user id
   createdAt DateTime @default(now())
 
@@ -133,6 +137,7 @@ model Conversation {
   calls     Call[]
   handoffs  Handoff[]
   suggestions CopilotSuggestion[]
+  evaluations Evaluation[]
   createdBy String // Clerk user id, or "voice" for conversations started by a phone call
   createdAt DateTime              @default(now())
   updatedAt DateTime              @updatedAt
@@ -544,9 +549,10 @@ model WorkflowVersion {
   // WorkflowDefinition (packages/shared/src/workflow.ts): nodes, their settings and the edges between them.
   definition   Json
 
-  executions WorkflowExecution[]
-  createdBy  String // Clerk user id
-  createdAt  DateTime            @default(now())
+  executions  WorkflowExecution[]
+  evaluations Evaluation[]
+  createdBy   String // Clerk user id
+  createdAt   DateTime            @default(now())
 
   @@unique([workflowId, number])
 }
@@ -772,4 +778,180 @@ model CallTransfer {
 
   @@index([callId])
   @@index([conversationId])
+}
+
+// ---- Quality control (Phase 11). Evaluation only observes: nothing here changes how employees answer. ----
+
+// A grader definition. Its settings live in versions; saving appends one and makes it current, so every
+// result records exactly which settings produced it. `enabled` is operational, not versioned.
+model Evaluator {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  // The built-in evaluators every workspace starts with (correctness, grounding, ...); null for custom ones.
+  key            String?
+  enabled        Boolean      @default(true)
+
+  currentVersionId String?           @unique
+  currentVersion   EvaluatorVersion? @relation("CurrentEvaluator", fields: [currentVersionId], references: [id])
+
+  versions  EvaluatorVersion[] @relation("EvaluatorVersions")
+  results   EvaluationResult[]
+  createdBy String // Clerk user id, or "system" for the built-in ones
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@unique([workspaceId, key])
+  @@index([organizationId, workspaceId])
+}
+
+// Immutable snapshot of an evaluator's settings. Rows are only ever inserted.
+model EvaluatorVersion {
+  id          String     @id @default(cuid())
+  evaluatorId String
+  evaluator   Evaluator  @relation("EvaluatorVersions", fields: [evaluatorId], references: [id], onDelete: Cascade)
+  currentFor  Evaluator? @relation("CurrentEvaluator")
+  number      Int
+  name        String
+  description String
+  dimension   String // EVAL_DIMENSIONS
+  kind        String // deterministic | llm | rule
+  config      Json // evaluatorConfigSchemas[kind]
+  passScore   Int
+
+  results   EvaluationResult[]
+  createdBy String
+  createdAt DateTime           @default(now())
+
+  @@unique([evaluatorId, number])
+}
+
+enum EvaluationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// One grading of a conversation as it stood at `lastMessageAt`, with what produced it: the employee
+// version and model of its replies, and the workflow version that started it, if any.
+model Evaluation {
+  id                String             @id @default(cuid())
+  organizationId    String
+  workspaceId       String
+  conversationId    String
+  conversation      Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  employeeId        String
+  employeeVersionId String?
+  employeeVersion   AiEmployeeVersion? @relation(fields: [employeeVersionId], references: [id], onDelete: SetNull)
+  provider          String?
+  model             String?
+  workflowVersionId String?
+  workflowVersion   WorkflowVersion?   @relation(fields: [workflowVersionId], references: [id], onDelete: SetNull)
+  trigger           String // auto | manual | dataset
+  // Automatic evaluations: conversation id + last message time, so two sweeps never grade the same state twice.
+  autoKey           String?            @unique
+  datasetRunId      String?
+  datasetRun        EvalRun?           @relation(fields: [datasetRunId], references: [id], onDelete: Cascade)
+  caseId            String?
+  status            EvaluationStatus   @default(PENDING)
+  score             Float? // average of the scored results, 0-100
+  passed            Boolean?
+  failures          Int                @default(0)
+  messageCount      Int
+  lastMessageAt     DateTime
+  error             String?
+  requestedBy       String // Clerk user id, or "system"
+  createdAt         DateTime           @default(now())
+  completedAt       DateTime?
+
+  results EvaluationResult[]
+
+  @@index([organizationId, workspaceId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([datasetRunId])
+}
+
+// What one evaluator version said about one evaluation.
+model EvaluationResult {
+  id                 String           @id @default(cuid())
+  evaluationId       String
+  evaluation         Evaluation       @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  evaluatorId        String
+  evaluator          Evaluator        @relation(fields: [evaluatorId], references: [id], onDelete: Cascade)
+  evaluatorVersionId String
+  evaluatorVersion   EvaluatorVersion @relation(fields: [evaluatorVersionId], references: [id], onDelete: Cascade)
+  dimension          String
+  kind               String
+  status             String // scored | skipped | error
+  score              Int? // 0-100
+  passed             Boolean?
+  reason             String
+  // { findings: [{ message, quote? }], usage?: { provider, model, inputTokens, outputTokens } }
+  details            Json
+  createdAt          DateTime         @default(now())
+
+  @@index([evaluationId])
+  @@index([evaluatorId, createdAt])
+}
+
+// A regression test set: conversations copied from production or written by hand, replayed against an
+// employee version and graded by the workspace's evaluators.
+model EvalDataset {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  name           String
+  description    String       @default("")
+
+  cases     EvalCase[]
+  runs      EvalRun[]
+  createdBy String
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@unique([workspaceId, name])
+}
+
+model EvalCase {
+  id             String      @id @default(cuid())
+  datasetId      String
+  dataset        EvalDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  name           String
+  source         String // conversation | synthetic
+  // The conversation it was copied from; the copy stays if that conversation goes.
+  conversationId String?
+  // [{ role: customer | employee, content }]; replays send the customer's messages in order.
+  messages       Json
+  expectations   String      @default("")
+  createdAt      DateTime    @default(now())
+
+  @@index([datasetId])
+}
+
+// One replay of a dataset against an employee version.
+model EvalRun {
+  id                String            @id @default(cuid())
+  organizationId    String
+  workspaceId       String
+  datasetId         String
+  dataset           EvalDataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  employeeId        String
+  employeeVersionId String
+  employeeVersion   AiEmployeeVersion @relation(fields: [employeeVersionId], references: [id], onDelete: Cascade)
+  status            EvaluationStatus  @default(PENDING)
+  score             Float?
+  total             Int
+  passed            Int               @default(0)
+  failed            Int               @default(0)
+  error             String?
+  startedBy         String
+  createdAt         DateTime          @default(now())
+  completedAt       DateTime?
+
+  evaluations Evaluation[]
+
+  @@index([datasetId, createdAt])
 }

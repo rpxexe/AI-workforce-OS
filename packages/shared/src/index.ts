@@ -20,3 +20,4 @@ export * from "./voice.ts";
 export * from "./workflow.ts";
 export * from "./channel.ts";
 export * from "./inbox.ts";
+export * from "./evaluation.ts";

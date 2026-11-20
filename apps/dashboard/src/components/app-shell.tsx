@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   MessagesSquare,
   Settings,
+  ShieldCheck,
   Users,
   Workflow,
 } from "lucide-react";
@@ -53,6 +54,7 @@ const NAV = [
   { href: "/knowledge", label: "Knowledge", icon: BookOpen },
   { href: "/workflows", label: "Workflows", icon: Workflow },
   { href: "/analytics", label: "Analytics", icon: ChartColumn },
+  { href: "/quality", label: "Quality", icon: ShieldCheck },
   { href: "/settings", label: "Settings", icon: Settings },
 ] as const;
 

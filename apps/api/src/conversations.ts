@@ -5,6 +5,7 @@ import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
 import { toolRegistry, type ToolExecutor } from "@workforce/tools";
 import {
+  EVALUATION_CHANNEL,
   sendMessageSchema,
   type ChatStreamEvent,
   type ConversationDetail,
@@ -48,7 +49,8 @@ export function conversationRoutes(
     const { workspaceId, id } = employeeParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
     const conversations = await prisma.conversation.findMany({
-      where: { employeeId: id, ...within(scope) },
+      // Regression replays are listed on their run, not with the test chats.
+      where: { employeeId: id, ...within(scope), channel: { not: EVALUATION_CHANNEL } },
       orderBy: { updatedAt: "desc" },
       // shortcut: newest 50 only, add a cursor when people need older test chats
       take: 50,

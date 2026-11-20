@@ -27,6 +27,7 @@ export const CHANNEL_LABELS: Record<string, string> = {
   email: "Email",
   voice: "Phone call",
   workflow: "Workflow",
+  evaluation: "Regression test",
 };
 
 /** "45 s", "12 min", "3 h 5 min", "2 d 4 h". */
