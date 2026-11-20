@@ -272,6 +272,25 @@ problem re-discovered.
 - **The daily analysis runs on Inngest only**; without it, "Find improvements" runs it. A second in-process timer was not
   worth it for a once-a-day job.
 
+- **The router is an `AIProvider`** (Phase 13): `ai.provider(route)` returns a provider bound to a tenant and a task, so every
+  caller kept its code and only names its task. Who answered travels on the `done` event (`provider`, `model`, `costUsd`); the
+  router's own name is never stored.
+- **Policies are per organization, not per workspace or employee.** The organization holds the keys and the bill; a task-level
+  policy (chat, voice, memory, ...) covers the task type and latency needs (voice can be pointed at a fast model).
+- **No policy = the platform provider, and the platform is never added silently as a fallback.** An organization that brought
+  its own key may not want its data sent elsewhere, nor the platform to pay; it lists the platform as a fallback if it wants one.
+- **Fallback only before the first text, once per model, at most 3 models.** Text already streamed cannot be taken back
+  (a second model would repeat or contradict it), and a bounded list of concrete providers (never a router) cannot loop.
+  Refusals are not shopped around; a caller that cancelled is not retried. A tool step is a new call, so it is routed again.
+- **A cost limit skips models with no known price.** An unknown price cannot be checked; the error lists every model ruled out
+  and why. OpenRouter's reported cost is recorded after the fact but cannot be known before the call.
+- **Keys are sealed with one server secret** (`AI_CREDENTIALS_KEY`), not a KMS: no new infrastructure. Rotating it means
+  re-entering keys. Without it, keys cannot be stored and everything runs on the platform.
+- **Usage rows are written per attempt and not awaited**, so a failed write never fails a reply; a row lost to a database hiccup
+  is logged.
+- **Latency and cooldown are remembered in the process**, not in the database: they steer ordering only, and a restart just
+  measures again.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.

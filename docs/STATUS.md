@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-20, end of Phase 12.
+Last updated: 2026-11-20, end of Phase 13.
 
 ## Phases
 
@@ -19,7 +19,8 @@ Last updated: 2026-11-20, end of Phase 12.
 | 10 | Human + AI collaboration: handoff triggers (customer request, low confidence, policy risk, repeated failure, high-value customer, configured conditions and workflow steps, tool failure), conversation states (AI active, waiting for human, human active, resolved, reopened) with assignment and an unassigned queue, the AI silent while people have a conversation, agents replying on the customer's channel (test chat, web chat, WhatsApp, email), the AI Copilot (reply, summary, memory, citations, next action; logged apart from messages), handoff analytics and response times, the Conversations inbox and Analytics pages, handoff emails to the escalation contact | Built; 10 tests (`handoff.test.ts`, fake model, fake Graph API). **Inbox, conversation, Analytics pages and the new escalation settings not tried in a browser**; they typecheck, lint and build |
 | 11 | AI quality control: versioned evaluators (deterministic checks, LLM graders, phrase-based policy rules) over eight dimensions with built-in defaults, an asynchronous evaluation worker (sweep of quiet conversations every 5 min, manual "Evaluate now"), results linked to the conversation, employee version, model and workflow version, failures with quoted evidence, the quality overview (score, pass rate, trend, dimensions, employee and version comparison), regression datasets (cases copied from conversations or written by hand) replayed against an employee version without tools | Built; 6 tests (`quality.test.ts`, fake model). **Quality pages and the conversation Quality card not tried in a browser**; they typecheck, lint and build. **LLM graders not run against a real model yet** |
 | 12 | Controlled continuous improvement: failure patterns (an evaluator failing on an employee's live version) -> a model-proposed change to instructions, personality or goals with its evidence -> a person creates the proposed version and replays the employee's regression suite on both versions (fixed and broken cases) -> human approval -> percentage rollout (A/B, sticky per customer across channels) with a chosen KPI compared between versions -> promote or roll back; rollback to the previous live version; a release log; version comparison (field-by-field line diff); the Improvements pages and the employee Releases card | Built; 4 tests (`improvement.test.ts`, fake model). **Improvements pages, Releases card and Compare versions not tried in a browser**; they typecheck, lint and build. **The proposal prompt has not run against a real model yet** |
-| 13+ | Not started | Owner pastes the next phase prompt |
+| 13 | Model routing and BYOAI: provider abstraction (OpenAI, Anthropic, Gemini, OpenRouter, custom OpenAI-compatible), organization keys sealed at rest and never returned, a model policy per task (primary, up to 3 fallbacks, cost limit, timeout, allowed providers, order by list / latency / cost), a router that filters by capability, context and cost and falls back without loops, usage records per attempt (provider, model, tokens, cost, latency, success), replies storing the model that actually answered, the AI models page | Built; 11 tests (`routing.test.ts`: the router with fake providers, and the API with the database and faked providers built from keys). **AI models page not tried in a browser**; it typechecks, lints and builds. **No real OpenAI, Gemini or custom endpoint called yet**; Anthropic with an organization's key untested against the real API |
+| 14+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -32,6 +33,12 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 (`resend.test.ts`); **not yet sent through a real Resend account**.
 
 ## Open items
+
+- **Phase 13 for real.** Set `AI_CREDENTIALS_KEY` (32+ random characters) in `.env`, restart, open AI models, add a key (e.g.
+  OpenAI), set the Conversations policy to that model with the platform as fallback, test-chat an employee, and check the reply's
+  model and the Usage tab. Then edit the key to a wrong one and see the fallback answer and the failed attempt.
+  Unconfirmed from the docs: Gemini's OpenAI-compatible endpoint returning usage in streams (`stream_options.include_usage`);
+  older OpenAI models accepting `max_completion_tokens` (we always send it to OpenAI).
 
 - **Phase 12 in a browser and with a real model.** Get an evaluator failing at least 3 times on a live version (Phase 11
   steps; the tone or policy evaluators are the easiest to trip), press "Find improvements" on Improvements, open the
@@ -98,6 +105,21 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   configured provider). It follows the SDK docs and typechecks; run `AI_PROVIDER=anthropic LIVE_AI=1 pnpm test` once a key is set.
 
 ## Verified so far
+
+- Phase 13 (`routing.test.ts`, 11 tests). Router with fake providers: a failure before any text falls back, both attempts are
+  recorded under one request id, `done` names the model that answered; no fallback after text reached the caller or on a
+  refusal; at most 3 attempts, a model listed twice tried once; the policy timeout moves on (recorded `timeout`), a cancelling
+  caller does not; tools, context, cost (unknown price skipped under a limit) and allowed providers rule models out, and when
+  none is left the error lists each reason and one `none` row is recorded; cheapest and fastest orders (unmeasured models get
+  one turn), a model that just failed goes last, provider-reported cost wins over the estimate. Keys sealed with AES-256-GCM
+  (fresh IV, wrong secret fails). Through the API: keys admin-only, custom providers need a public https base URL (127.0.0.1 and
+  http refused), the key never appears in any response, `keyHint`, unique names, a blank key keeps the stored one, the
+  provider cannot change, other organizations get 404; 503 without `AI_CREDENTIALS_KEY`. Test chat: platform without a policy;
+  with a chat policy the organization's key answers (the provider got the opened key, the reply stores `claude-opus-5-5`); a
+  rate-limited key falls back to the platform (reply stores `fake-1`); usage rows (task, attempt, provider, model, credential,
+  success, error kind, workspace, cost estimated from Anthropic's prices); the usage summary (calls, failures, fallbacks, cost,
+  by model) and its isolation; a key in use cannot be deleted; another organization's key refused in a policy; the default
+  policy covers chat; an allowed-providers list nothing matches fails the turn with a clear error.
 
 - Phase 12 (`improvement.test.ts`, 4 tests, fake model): proposals keep only instructions, personality and goals, must
   validate and differ (no change, declines, non-JSON, oversized refused); KPI verdicts (not enough data under 10 a side,
@@ -172,7 +194,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
-- 109 API tests (Phase 12 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
+- 120 API tests (Phase 13 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 109 at the end of Phase 12. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
   greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
   through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
@@ -231,7 +253,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Deliberately not built yet
 
-Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing, model routing. In the
+Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing. In the
 dashboard, Customers (the API has read routes) is a placeholder page. Packages other than `database`, `shared`,
 `ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows` and `channels`, and
 all three workers, are empty stubs.
@@ -285,6 +307,13 @@ steps or automatic promotion/rollback on the KPI (people decide), more than one 
 a regression gate on manual publishes and rollouts of versions not from suggestions (the suite can be run from its dataset
 page), the daily analysis without Inngest, KPI paging (newest 10,000 evaluations per side), significance beyond a 95% Welch
 test, notifications about new suggestions.
+
+Model routing, skipped: routing embeddings (the 1536-dimension column fixes the model), a "test this key" button (a key is
+proven by its first call; failures show on the Usage tab), per-workspace or per-employee policies (organization and task only),
+a KMS or key rotation (one server secret), private or http base URLs for custom endpoints (public https only, so no local
+Ollama), built-in prices for models other than Anthropic's (entered per key), budgets per period and alerts (only a cost limit
+per call), cost known before an OpenRouter call (recorded after), usage paging (newest 100 calls) and export, a shared
+latency/cooldown memory across API processes, refusal fallbacks inside a provider (a refusal ends the request).
 
 Not installed: Cloudflare R2, a Redis client, Prettier, Turborepo.
 
