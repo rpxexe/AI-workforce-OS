@@ -47,6 +47,8 @@ export async function processDocument(
   documentId: string,
   embedder: EmbeddingProvider,
   onError: (err: unknown) => void = () => {},
+  /** Reads a file kept in the organization's object storage (Phase 14); files in Postgres need none. */
+  load?: (doc: { organizationId: string; storageConnectionId: string; storageKey: string }) => Promise<Uint8Array>,
 ) {
   try {
     const doc = await prisma.knowledgeDocument.update({
@@ -54,7 +56,13 @@ export async function processDocument(
       data: { status: "PROCESSING", error: null },
     });
     try {
-      const chunks = chunkSections(await parseDocument(doc.kind as KnowledgeKind, doc.content)).map((chunk, index) => ({
+      const content =
+        doc.content ??
+        (doc.storageConnectionId && doc.storageKey && load
+          ? await load({ organizationId: doc.organizationId, storageConnectionId: doc.storageConnectionId, storageKey: doc.storageKey })
+          : null);
+      if (!content) throw new EmptyDocument("The stored file could not be found. Upload it again.");
+      const chunks = chunkSections(await parseDocument(doc.kind as KnowledgeKind, content)).map((chunk, index) => ({
         ...chunk,
         index,
         id: randomUUID(),

@@ -23,6 +23,8 @@ export type PlaceCallRequest = {
   greeting?: string;
   /** Placing again with the same key returns the first call instead of dialing. */
   idempotencyKey: string;
+  /** The workflow placing it: its provider overrides apply to the call (Phase 14). */
+  workflowId?: string;
 };
 
 /** Everything the engine needs from outside, so the API and tests can supply their own. */
@@ -159,7 +161,7 @@ export const handlers: Handlers = {
     let provider: AIProvider;
     let embedder: EmbeddingProvider | undefined;
     try {
-      provider = deps.provider({ ...run.scope, task: "chat" });
+      provider = deps.provider({ ...run.scope, employeeId: config.employeeId, workflowId: run.workflowId, task: "chat" });
       if (employee.knowledgeSources.length > 0) embedder = deps.embedder();
     } catch (err) {
       throw aiFailed(err);
@@ -197,7 +199,7 @@ export const handlers: Handlers = {
     let text = "";
     try {
       const data = JSON.stringify(run.data, null, 1).slice(0, 30_000);
-      for await (const event of run.deps.provider({ ...run.scope, task: "workflow" }).stream({
+      for await (const event of run.deps.provider({ ...run.scope, workflowId: run.workflowId, task: "workflow" }).stream({
         system: YES_NO_PROMPT,
         messages: [{ role: "user", content: `Question: ${config.question}\n\nWorkflow data (JSON):\n${data}` }],
         signal: AbortSignal.timeout(run.deps.timeoutMs),
@@ -280,6 +282,7 @@ export const handlers: Handlers = {
         to: config.to,
         greeting: config.greeting || undefined,
         idempotencyKey: run.idempotencyKey,
+        workflowId: run.workflowId,
       });
       return { wait: { until: poll(), state: { callId: placed.callId, placedAt: new Date().toISOString() } } };
     }
@@ -300,11 +303,16 @@ export const handlers: Handlers = {
   // The step's idempotency key goes to the provider, so a step run again after a crash does not send twice.
   async message(config, run) {
     if (!z.email().safeParse(config.to).success) throw new StepError(`"${config.to}" is not an email address`);
-    const testMode = run.deps.mailer === null;
+    let testMode = run.deps.mailer === null;
     let messageId = run.idempotencyKey;
     if (run.deps.mailer)
       try {
-        ({ messageId } = await run.deps.mailer.send({ to: config.to, subject: config.subject, text: config.body, idempotencyKey: run.idempotencyKey }));
+        const sent = await run.deps.mailer.send(
+          { to: config.to, subject: config.subject, text: config.body, idempotencyKey: run.idempotencyKey },
+          { ...run.scope, workflowId: run.workflowId },
+        );
+        messageId = sent.messageId;
+        testMode = sent.testMode ?? false;
       } catch (err) {
         throw err instanceof ToolError ? new StepError(err.message) : err;
       }

@@ -5,7 +5,8 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "ws": "8.23.0"
+    "ws": "8.23.0",
+    "@workforce/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "8.18.2"

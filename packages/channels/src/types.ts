@@ -1,4 +1,4 @@
-import type { ChannelKind, ChannelMedia, WhatsAppProviderName } from "@workforce/shared";
+import type { ChannelKind, ChannelMedia, ProviderErrorKind, WhatsAppProviderName } from "@workforce/shared";
 
 /** A file the customer sent, before it is downloaded: by the provider's media id, or at a URL. */
 export type InboundMedia = ChannelMedia & {
@@ -54,9 +54,12 @@ export type OutboundMessage = {
 export class ChannelError extends Error {
   retryable: boolean;
   attempts = 1;
-  constructor(message: string, retryable = false) {
+  /** Why it failed, when known (Phase 14 senders): decides whether another provider is tried. */
+  kind?: ProviderErrorKind;
+  constructor(message: string, retryable = false, kind?: ProviderErrorKind) {
     super(message);
     this.retryable = retryable;
+    this.kind = kind ?? (retryable ? "rate_limit" : undefined);
   }
 }
 

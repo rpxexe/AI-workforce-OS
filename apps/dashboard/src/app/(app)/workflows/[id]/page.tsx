@@ -12,17 +12,19 @@ import {
   type WorkflowDetail,
   type WorkflowNode,
 } from "@workforce/shared";
-import { ArrowLeft, CircleAlert, Copy, History, Pause, Play, Rocket, Save, Trash2 } from "lucide-react";
+import { ArrowLeft, CircleAlert, Copy, History, Pause, Play, Plug, Rocket, Save, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/employees/meta";
+import { ProviderOverridesForm } from "@/components/providers/provider-overrides";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { NODE_ICONS } from "@/components/workflows/meta";
 import { NEW_NODE_CONFIG, NodeSettings } from "@/components/workflows/node-settings";
@@ -195,6 +197,25 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
                 ))}
               </SelectContent>
             </Select>
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline">
+                  <Plug aria-hidden />
+                  Providers
+                </Button>
+              </SheetTrigger>
+              <SheetContent className="overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-md">
+                <SheetHeader>
+                  <SheetTitle>Providers</SheetTitle>
+                  <SheetDescription>
+                    The AI model, speech and email accounts this workflow&apos;s steps use. They win over the employee&apos;s and the organization&apos;s.
+                  </SheetDescription>
+                </SheetHeader>
+                <div className="px-4 pb-6">
+                  <ProviderOverridesForm path={`${base}/workflows/${id}/providers`} canEdit={isAdmin} />
+                </div>
+              </SheetContent>
+            </Sheet>
             {isAdmin && (
               <>
                 <Button variant="outline" onClick={save} disabled={(!dirty && isLatest) || busy}>

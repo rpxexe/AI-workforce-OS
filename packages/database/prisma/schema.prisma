@@ -32,7 +32,8 @@ model Organization {
   improvementSuggestions ImprovementSuggestion[]
   employeeRollouts   EmployeeRollout[]
   employeeReleases   EmployeeRelease[]
-  aiCredentials      AiCredential[]
+  providerConnections ProviderConnection[]
+  providerAudit      ProviderAuditLog[]
   aiModelPolicies    AiModelPolicy[]
   aiUsage            AiUsage[]
 }
@@ -69,6 +70,8 @@ model AiEmployee {
   workspaceId    String
   workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   status         EmployeeStatus @default(DRAFT)
+  // ProviderOverrides (llm, stt, tts, email): this employee's own providers. Not versioned, like tools and knowledge.
+  providerOverrides Json        @default("{}")
 
   // The version serving production. Editing never changes it; only publishing moves this pointer.
   publishedVersionId String?            @unique
@@ -242,8 +245,10 @@ model KnowledgeDocument {
   name           String
   kind           String // pdf | docx | txt | csv
   sizeBytes      Int
-  // shortcut: the original file lives in Postgres so it can be reprocessed; move to object storage (R2) when wired
-  content        Bytes
+  // The original file, kept for reprocessing: here, or in the organization's storage (storageKey) when it has one.
+  content        Bytes?
+  storageConnectionId String?
+  storageKey     String?
   status         DocumentStatus  @default(PENDING)
   error          String?
   chunkCount     Int             @default(0)
@@ -430,6 +435,7 @@ model PhoneNumber {
   employee         AiEmployee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   number           String       @unique // E.164, e.g. +14155550100
   provider         String       @default("twilio")
+  connectionId     String? // the organization's telephony ProviderConnection; null: the platform's account (.env)
   providerNumberId String // Twilio's PN... sid
   // What the employee says when it picks up. A template, since the model only speaks after the caller.
   greeting         String
@@ -465,6 +471,8 @@ model Call {
   employeeId      String
   employee        AiEmployee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   employeeVersion Int // the published version that took the call
+  connectionId    String? // the telephony ProviderConnection the call runs on; null: the platform's account
+  workflowId      String? // the workflow whose Voice Call step placed it (its provider overrides apply)
   conversationId  String? // set after the first exchange is saved
   conversation    Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   customerId      String?
@@ -539,6 +547,8 @@ model Workflow {
   name           String
   description    String         @default("")
   status         WorkflowStatus @default(DRAFT)
+  // ProviderOverrides: the workflow's own providers; they win over the employee's. Not versioned.
+  providerOverrides Json        @default("{}")
   // Secret part of the webhook trigger URL.
   hookToken      String
   // Set when deleted: hidden, never run, and its runs stopped. Cleared by restore.
@@ -1074,22 +1084,46 @@ model EmployeeRelease {
 
 // An organization's own key for a model provider (BYOAI). The key is sealed with AES-256-GCM under
 // AI_CREDENTIALS_KEY and never leaves the server: responses show only `keyHint`.
-model AiCredential {
+// An organization's account with an outside provider (Phase 14; Phase 13's AiCredential rows became the "llm" ones, same ids).
+model ProviderConnection {
+  id                   String       @id @default(cuid())
+  organizationId       String
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  providerType         String // llm | stt | tts | telephony | messaging | email | storage
+  providerId           String // PROVIDER_CATALOG id, e.g. openai, deepgram, twilio
+  displayName          String
+  // Sealed secrets: v2:<iv>:<tag>:<ciphertext> of a JSON object, or v1 (Phase 13) of a bare API key.
+  encryptedCredentials String
+  credentialHints      Json         @default("{}") // { field: "…abcd" }
+  configuration        Json         @default("{}") // the catalog's non-secret fields
+  status               String       @default("active") // active | disabled
+  isDefault            Boolean      @default(false) // the organization's default for its type (one per type, kept by the API)
+  lastTestedAt         DateTime?
+  lastTestStatus       String? // ok | failed
+  lastTestError        String?
+  rotatedAt            DateTime?
+  createdBy            String
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  @@unique([organizationId, displayName])
+  @@index([organizationId, providerType])
+}
+
+// Who did what to a connection. Never holds a secret.
+model ProviderAuditLog {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name           String
-  kind           String // openai | anthropic | gemini | openrouter | openai_compatible
-  baseUrl        String? // openai_compatible only
-  secret         String // sealed API key: v1:<iv>:<tag>:<ciphertext>, base64
-  keyHint        String // last 4 characters
-  // [{ id, contextTokens, inputPricePerM, outputPricePerM, tools }]: what the router needs to know about models it cannot look up
-  models         Json         @default("[]")
-  createdBy      String
+  connectionId   String?
+  providerType   String
+  providerId     String
+  action         String // create | update | rotate | test | set_default | disable | enable | delete
+  actorId        String
+  detail         Json         @default("{}")
   createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
 
-  @@unique([organizationId, name])
+  @@index([organizationId, createdAt])
 }
 
 // Which models a task may use in an organization, in order, and the limits on them. No row: the platform's provider.
@@ -1116,6 +1150,12 @@ model AiUsage {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   workspaceId    String?
+  providerType   String       @default("llm") // Phase 14: llm | stt | tts | telephony | messaging | email | storage
+  operation      String? // e.g. chat, live_transcribe, transcribe, synthesize, call, send, put, get
+  employeeId     String?
+  workflowId     String?
+  characters     Int? // TTS: characters spoken
+  seconds        Float? // STT: audio heard; telephony: call length
   task           String
   requestId      String // shared by the attempts of one request; attempt > 1 is a fallback
   attempt        Int
@@ -1132,4 +1172,5 @@ model AiUsage {
   createdAt      DateTime     @default(now())
 
   @@index([organizationId, createdAt])
+  @@index([organizationId, providerType, createdAt])
 }

@@ -8,7 +8,13 @@ const greeting = z.string().trim().min(1).max(300);
 export const DEFAULT_INBOUND_GREETING = "Hi, this is {name}. How can I help you today?";
 export const DEFAULT_OUTBOUND_GREETING = "Hi, this is {name}. Is now a good time to talk?";
 
-export const addPhoneNumberSchema = z.object({ number: e164, employeeId: z.string().min(1), greeting: greeting.optional() });
+export const addPhoneNumberSchema = z.object({
+  number: e164,
+  employeeId: z.string().min(1),
+  greeting: greeting.optional(),
+  /** The organization's phone connection that owns the number (Phase 14); default: its default connection, else the platform's accounts. */
+  connectionId: z.string().min(1).optional(),
+});
 export type AddPhoneNumber = z.infer<typeof addPhoneNumberSchema>;
 
 export const placeCallSchema = z.object({

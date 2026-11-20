@@ -1,6 +1,5 @@
 // BYOAI and model routing for the API: an organization's provider keys (sealed at rest, never returned), its
 // model policy per task, the router every model call goes through, and usage reports.
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import {
@@ -16,11 +15,13 @@ import {
   type UsageRecord,
 } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
+import { hintOf, openCredentials, scrubSecrets, sealCredentials } from "@workforce/providers";
 import {
   AI_TASKS,
   credentialSchema,
   credentialUpdateSchema,
   modelPolicySchema,
+  providerOverridesSchema,
   type AiCredential,
   type AiPolicy,
   type AiProviderKind,
@@ -35,31 +36,18 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
 
-// ---- Keys at rest ----
+// ---- Keys at rest (Phase 14: @workforce/providers seals every connection) ----
 
-/** AES-256-GCM under a key derived from AI_CREDENTIALS_KEY. The format names its version so the scheme can change. */
-export function sealKey(plain: string, secret: string): string {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", keyFrom(secret), iv);
-  const data = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-  return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), data.toString("base64")].join(":");
-}
-
-export function openKey(sealed: string, secret: string): string {
-  const [version, iv, tag, data] = sealed.split(":");
-  if (version !== "v1" || !iv || !tag || !data) throw new Error("Unknown sealed key format");
-  const decipher = createDecipheriv("aes-256-gcm", keyFrom(secret), Buffer.from(iv, "base64"));
-  decipher.setAuthTag(Buffer.from(tag, "base64"));
-  return Buffer.concat([decipher.update(Buffer.from(data, "base64")), decipher.final()]).toString("utf8");
-}
-
-const keyFrom = (secret: string) => createHash("sha256").update(secret).digest();
+export { openKey, sealKey } from "@workforce/providers";
 
 /** The secret must be long enough to be random (e.g. `openssl rand -base64 32`). */
 export const credentialsSecretFromEnv = () => {
   const secret = process.env.AI_CREDENTIALS_KEY ?? "";
   return secret.length >= 32 ? secret : null;
 };
+
+/** While rotating AI_CREDENTIALS_KEY: the old one, so connections sealed with it still open (and are sealed again). */
+export const previousSecretFromEnv = () => process.env.AI_CREDENTIALS_KEY_PREVIOUS || null;
 
 // ---- Routing ----
 
@@ -68,62 +56,95 @@ export type Platform = { kind: string; get: (model?: string) => AIProvider };
 /** Builds a provider from an organization's credential; `createProvider`, or a fake in tests. */
 export type ProviderFactory = typeof createProvider;
 
-type CredentialRow = Prisma.AiCredentialGetPayload<object>;
+type ConnectionRow = Prisma.ProviderConnectionGetPayload<object>;
+
+/** The LLM targets an employee's or workflow's overrides name for a route: workflow first (Phase 14). */
+async function overrideTargets(route: Route): Promise<ModelTarget[]> {
+  const [workflow, employee] = await Promise.all([
+    route.workflowId ? prisma.workflow.findFirst({ where: { id: route.workflowId, organizationId: route.organizationId }, select: { providerOverrides: true } }) : null,
+    route.employeeId ? prisma.aiEmployee.findFirst({ where: { id: route.employeeId, organizationId: route.organizationId }, select: { providerOverrides: true } }) : null,
+  ]);
+  const targets: ModelTarget[] = [];
+  for (const row of [workflow, employee]) {
+    const llm = row ? providerOverridesSchema.safeParse(row.providerOverrides).data?.llm : undefined;
+    if (llm) targets.push({ credentialId: llm.connectionId, model: llm.model });
+  }
+  return targets;
+}
 
 /**
- * Builds the routing plan for a request from the organization's policy for the task (or its default policy).
- * No policy: the platform's provider alone, as before Phase 13.
+ * Builds the routing plan for a request. Resolution (Phase 14): the workflow's and the employee's own model first, then
+ * the organization's policy for the task (or its default policy), else its default language-model connection, else the
+ * platform's provider alone, as before Phase 13. Levels after the first are the fallbacks; the platform is never added
+ * silently.
  */
-// shortcut: one or two indexed queries per model call; cache plans per organization for a few seconds if call volume needs it
+// shortcut: a few indexed queries per model call; cache plans per organization for a few seconds if call volume needs it
 export async function planFor(route: Route, platform: Platform, secret: string | null, create: ProviderFactory = createProvider): Promise<RoutePlan> {
-  const policies = await prisma.aiModelPolicy.findMany({ where: { organizationId: route.organizationId, task: { in: [route.task, "default"] } } });
+  const [policies, overrides] = await Promise.all([
+    prisma.aiModelPolicy.findMany({ where: { organizationId: route.organizationId, task: { in: [route.task, "default"] } } }),
+    overrideTargets(route),
+  ]);
   const policy = policies.find((p) => p.task === route.task) ?? policies.find((p) => p.task === "default");
-  if (!policy) return { targets: [{ provider: platform.get(), kind: platform.kind, credentialId: null }], maxCostUsd: null, timeoutMs: null, allowedProviders: [], strategy: "ordered" };
+  let wanted: ModelTarget[] = [...overrides, ...(policy ? [policy.primary as ModelTarget, ...(policy.fallbacks as ModelTarget[])] : [])];
+  if (!policy) {
+    const fallback = await prisma.providerConnection.findFirst({ where: { organizationId: route.organizationId, providerType: "llm", status: "active", isDefault: true } });
+    const model = (fallback?.configuration as { defaultModel?: unknown } | undefined)?.defaultModel;
+    if (fallback && typeof model === "string" && model) wanted.push({ credentialId: fallback.id, model });
+  }
+  if (wanted.length === 0) wanted = [{ credentialId: null, model: "" }];
 
-  const wanted = [policy.primary, ...(policy.fallbacks as ModelTarget[])] as ModelTarget[];
   const ids = [...new Set(wanted.map((t) => t.credentialId).filter((id): id is string => id !== null))];
-  const credentials = ids.length > 0 ? await prisma.aiCredential.findMany({ where: { organizationId: route.organizationId, id: { in: ids } } }) : [];
+  const connections =
+    ids.length > 0 ? await prisma.providerConnection.findMany({ where: { organizationId: route.organizationId, providerType: "llm", status: "active", id: { in: ids } } }) : [];
   const maxOutputTokens = maxOutputTokensFromEnv();
   const targets: RouteTarget[] = [];
   for (const target of wanted) {
     if (target.credentialId === null) {
-      targets.push({ provider: platform.get(target.model), kind: platform.kind, credentialId: null, info: modelInfo(platform.kind, target.model) });
+      targets.push({ provider: platform.get(target.model || undefined), kind: platform.kind, credentialId: null, info: target.model ? modelInfo(platform.kind, target.model) : undefined });
       continue;
     }
-    // A credential deleted after the policy was saved is skipped; deleting one a policy uses is refused anyway.
-    const credential = credentials.find((c) => c.id === target.credentialId);
-    if (!credential) continue;
+    // A connection deleted or disabled after the policy or override was saved is skipped.
+    const connection = connections.find((c) => c.id === target.credentialId);
+    if (!connection) continue;
     if (!secret) throw new AIProviderError("config", "AI_CREDENTIALS_KEY is not set on the server, so the organization's keys cannot be read");
-    targets.push(byoTarget(credential, target.model, secret, maxOutputTokens, create));
+    targets.push(byoTarget(connection, target.model, secret, maxOutputTokens, create));
   }
   return {
     targets,
-    maxCostUsd: policy.maxCostUsd,
-    timeoutMs: policy.timeoutMs,
-    allowedProviders: policy.allowedProviders,
-    strategy: policy.strategy as RoutePlan["strategy"],
+    maxCostUsd: policy?.maxCostUsd ?? null,
+    timeoutMs: policy?.timeoutMs ?? null,
+    allowedProviders: policy?.allowedProviders ?? [],
+    strategy: (policy?.strategy ?? "ordered") as RoutePlan["strategy"],
   };
 }
 
-const byoTarget = (credential: CredentialRow, model: string, secret: string, maxOutputTokens: number, create: ProviderFactory): RouteTarget => {
-  const custom = credential.kind === "openai_compatible";
-  const openSealed = (c: CredentialRow) => {
-    try {
-      return openKey(c.secret, secret);
-    } catch (err) {
-      throw new AIProviderError("config", `The key "${c.name}" cannot be read: AI_CREDENTIALS_KEY changed since it was saved. Enter the key again.`, err);
-    }
-  };
+const configOfRow = (c: ConnectionRow) => c.configuration as { baseUrl?: string; models?: ModelInfo[] };
+
+const byoTarget = (connection: ConnectionRow, model: string, secret: string, maxOutputTokens: number, create: ProviderFactory): RouteTarget => {
+  const custom = connection.providerId === "openai_compatible";
+  let apiKey: string;
+  try {
+    const opened = openCredentials(connection.encryptedCredentials, { current: secret, previous: previousSecretFromEnv() });
+    apiKey = opened.credentials.apiKey ?? "";
+    // Sealed under the previous server secret or in Phase 13's format: seal it again with the current one.
+    if (opened.stale)
+      void prisma.providerConnection
+        .updateMany({ where: { id: connection.id, encryptedCredentials: connection.encryptedCredentials }, data: { encryptedCredentials: sealCredentials(opened.credentials, secret) } })
+        .catch(() => {});
+  } catch (err) {
+    throw new AIProviderError("config", `The key "${connection.displayName}" cannot be read: AI_CREDENTIALS_KEY changed since it was saved. Rotate the key.`, err);
+  }
+  const { baseUrl, models } = configOfRow(connection);
   return {
-    provider: create(credential.kind, {
+    provider: create(connection.providerId, {
       model,
       maxOutputTokens,
-      apiKey: openSealed(credential),
-      ...(custom && credential.baseUrl && { baseUrl: credential.baseUrl.replace(/\/+$/, ""), fetch: safeFetch }),
+      apiKey,
+      ...(custom && baseUrl && { baseUrl: baseUrl.replace(/\/+$/, ""), fetch: safeFetch }),
     }),
-    kind: credential.kind,
-    credentialId: credential.id,
-    info: modelInfo(credential.kind, model, credential.models as ModelInfo[]),
+    kind: connection.providerId,
+    credentialId: connection.id,
+    info: modelInfo(connection.providerId, model, models ?? []),
   };
 };
 
@@ -131,7 +152,18 @@ const byoTarget = (credential: CredentialRow, model: string, secret: string, max
 export function modelRouter(platform: Platform, secret: string | null, log: FastifyBaseLogger, create?: ProviderFactory) {
   const record = ({ route, ...usage }: UsageRecord) => {
     prisma.aiUsage
-      .create({ data: { organizationId: route.organizationId, workspaceId: route.workspaceId ?? null, task: route.task, ...usage } })
+      .create({
+        data: {
+          organizationId: route.organizationId,
+          workspaceId: route.workspaceId ?? null,
+          employeeId: route.employeeId ?? null,
+          workflowId: route.workflowId ?? null,
+          task: route.task,
+          operation: "chat",
+          ...usage,
+          error: usage.error && scrubSecrets(usage.error),
+        },
+      })
       // An organization that does not exist (yet) or a database hiccup loses a usage row, never the reply.
       .catch((err: unknown) => log.warn({ err, route }, "Recording AI usage failed"));
   };
@@ -144,13 +176,14 @@ const taskParams = z.object({ task: z.enum(AI_TASKS) });
 const idParams = z.object({ id: z.string().min(1) });
 const usageQuery = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) });
 
-const toCredential = (c: CredentialRow): AiCredential => ({
+/** Phase 13's view of an LLM connection. */
+const toCredential = (c: ConnectionRow): AiCredential => ({
   id: c.id,
-  name: c.name,
-  kind: c.kind as AiProviderKind,
-  baseUrl: c.baseUrl,
-  keyHint: c.keyHint,
-  models: c.models as ModelInfo[],
+  name: c.displayName,
+  kind: c.providerId as AiProviderKind,
+  baseUrl: configOfRow(c).baseUrl ?? null,
+  keyHint: (c.credentialHints as { apiKey?: string }).apiKey ?? "",
+  models: configOfRow(c).models ?? [],
   createdAt: c.createdAt.toISOString(),
   updatedAt: c.updatedAt.toISOString(),
 });
@@ -166,10 +199,8 @@ const toPolicy = (p: Prisma.AiModelPolicyGetPayload<object>): AiPolicy => ({
   updatedAt: p.updatedAt.toISOString(),
 });
 
-const hintOf = (key: string) => `…${key.slice(-4)}`;
-
 /** A custom base URL must lead to a public address: the server makes the request, so it must not reach the private network. */
-async function assertPublicBaseUrl(baseUrl: string | null) {
+export async function assertPublicBaseUrl(baseUrl: string | null) {
   if (!baseUrl) return;
   const url = new URL(baseUrl);
   if (url.username || url.password) throw httpError(400, "The base URL must not contain credentials");
@@ -195,7 +226,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
   app.get("/ai/settings", async (req): Promise<AiSettings> => {
     const { organizationId } = member(req);
     const [credentials, policies] = await Promise.all([
-      prisma.aiCredential.findMany({ where: { organizationId }, orderBy: { createdAt: "asc" } }),
+      prisma.providerConnection.findMany({ where: { organizationId, providerType: "llm" }, orderBy: { createdAt: "asc" } }),
       prisma.aiModelPolicy.findMany({ where: { organizationId } }),
     ]);
     let model = "(not configured)";
@@ -218,17 +249,20 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
     const body = credentialSchema.parse(req.body);
     await assertPublicBaseUrl(body.baseUrl);
     try {
-      const row = await prisma.aiCredential.create({
+      const row = await prisma.providerConnection.create({
         data: {
           organizationId: auth.organizationId,
-          name: body.name,
-          kind: body.kind,
-          baseUrl: body.baseUrl,
-          secret: sealKey(body.apiKey, key),
-          keyHint: hintOf(body.apiKey),
-          models: body.models,
+          providerType: "llm",
+          providerId: body.kind,
+          displayName: body.name,
+          encryptedCredentials: sealCredentials({ apiKey: body.apiKey }, key),
+          credentialHints: { apiKey: hintOf(body.apiKey) },
+          configuration: { models: body.models, ...(body.baseUrl && { baseUrl: body.baseUrl }) },
           createdBy: auth.userId,
         },
+      });
+      await prisma.providerAuditLog.create({
+        data: { organizationId: auth.organizationId, connectionId: row.id, providerType: "llm", providerId: body.kind, action: "create", actorId: auth.userId },
       });
       reply.code(201);
       return toCredential(row);
@@ -242,19 +276,25 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
     const auth = admin(req);
     const { id } = idParams.parse(req.params);
     const body = credentialUpdateSchema.parse(req.body);
-    const existing = await prisma.aiCredential.findFirst({ where: { id, organizationId: auth.organizationId } });
+    const existing = await prisma.providerConnection.findFirst({ where: { id, organizationId: auth.organizationId, providerType: "llm" } });
     if (!existing) throw httpError(404, "Key not found");
-    if (body.kind !== existing.kind) throw httpError(400, "The provider of a key cannot change; add a new key instead");
+    if (body.kind !== existing.providerId) throw httpError(400, "The provider of a key cannot change; add a new key instead");
     await assertPublicBaseUrl(body.baseUrl);
     try {
-      const row = await prisma.aiCredential.update({
+      const row = await prisma.providerConnection.update({
         where: { id },
         data: {
-          name: body.name,
-          baseUrl: body.baseUrl,
-          models: body.models,
-          ...(body.apiKey && { secret: sealKey(body.apiKey, needSecret()), keyHint: hintOf(body.apiKey) }),
+          displayName: body.name,
+          configuration: { ...(existing.configuration as object), models: body.models, baseUrl: body.baseUrl ?? undefined },
+          ...(body.apiKey && {
+            encryptedCredentials: sealCredentials({ apiKey: body.apiKey }, needSecret()),
+            credentialHints: { apiKey: hintOf(body.apiKey) },
+            rotatedAt: new Date(),
+          }),
         },
+      });
+      await prisma.providerAuditLog.create({
+        data: { organizationId: auth.organizationId, connectionId: id, providerType: "llm", providerId: existing.providerId, action: body.apiKey ? "rotate" : "update", actorId: auth.userId },
       });
       return toCredential(row);
     } catch (err) {
@@ -266,12 +306,15 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
   app.delete("/ai/credentials/:id", async (req, reply) => {
     const auth = admin(req);
     const { id } = idParams.parse(req.params);
-    const existing = await prisma.aiCredential.findFirst({ where: { id, organizationId: auth.organizationId } });
+    const existing = await prisma.providerConnection.findFirst({ where: { id, organizationId: auth.organizationId, providerType: "llm" } });
     if (!existing) throw httpError(404, "Key not found");
     const policies = await prisma.aiModelPolicy.findMany({ where: { organizationId: auth.organizationId } });
     const users = policies.filter((p) => [p.primary, ...(p.fallbacks as ModelTarget[])].some((t) => (t as ModelTarget).credentialId === id)).map((p) => p.task);
     if (users.length > 0) throw httpError(409, `Used by the ${users.join(", ")} model policy. Change those policies first.`);
-    await prisma.aiCredential.delete({ where: { id } });
+    await prisma.providerConnection.delete({ where: { id } });
+    await prisma.providerAuditLog.create({
+      data: { organizationId: auth.organizationId, connectionId: id, providerType: "llm", providerId: existing.providerId, action: "delete", actorId: auth.userId },
+    });
     return reply.code(204).send();
   });
 
@@ -281,7 +324,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
     const body = modelPolicySchema.parse(req.body);
     const targets = [body.primary, ...body.fallbacks];
     const ids = [...new Set(targets.map((t) => t.credentialId).filter((v): v is string => v !== null))];
-    const owned = await prisma.aiCredential.findMany({ where: { organizationId: auth.organizationId, id: { in: ids } }, select: { id: true } });
+    const owned = await prisma.providerConnection.findMany({ where: { organizationId: auth.organizationId, providerType: "llm", id: { in: ids } }, select: { id: true } });
     // Another organization's credential id is as unknown as a made-up one.
     if (owned.length !== ids.length) throw httpError(400, "A model refers to a key this organization does not have");
     const data = { ...body, primary: body.primary, fallbacks: body.fallbacks, updatedBy: auth.userId };
@@ -303,7 +346,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
   app.get("/ai/usage", async (req): Promise<AiUsageSummary> => {
     const { organizationId } = member(req);
     const { days } = usageQuery.parse(req.query);
-    const where = { organizationId, createdAt: { gte: new Date(Date.now() - days * 86_400_000) } };
+    const where = { organizationId, providerType: "llm", createdAt: { gte: new Date(Date.now() - days * 86_400_000) } };
     const sums = { _sum: { inputTokens: true, outputTokens: true, costUsd: true }, _avg: { latencyMs: true }, _count: { _all: true } } as const;
     const [byModel, failedByModel, byTask, fallbacks, recent] = await Promise.all([
       prisma.aiUsage.groupBy({ by: ["provider", "model"], where, ...sums }),

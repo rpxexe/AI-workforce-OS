@@ -20,6 +20,7 @@
     "@workforce/evaluation-worker": "workspace:*",
     "@workforce/knowledge": "workspace:*",
     "@workforce/memory": "workspace:*",
+    "@workforce/providers": "workspace:*",
     "@workforce/shared": "workspace:*",
     "@workforce/stt": "workspace:*",
     "@workforce/telephony": "workspace:*",

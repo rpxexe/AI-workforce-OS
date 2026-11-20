@@ -25,13 +25,19 @@ export type ToolContext<Config> = {
   signal: AbortSignal;
   /** The only way a tool reaches the network; refuses private addresses (see net.ts). */
   fetch: typeof fetch;
-  /** Sends email from the server's sender (Resend); absent when no email provider is configured (test mode). */
+  /** Sends email through the organization's or the server's provider; absent or `testMode` when none is configured. */
   mailer?: Mailer;
 };
 
-/** Sends one email from the server's own sender address. Throws `ToolError` when the provider refuses. */
+/**
+ * Sends one email through the provider that serves `scope` (Phase 14: workflow, employee, organization default, platform).
+ * `testMode` when none is configured: nothing is delivered. Throws `ToolError` when the provider refuses.
+ */
 export interface Mailer {
-  send(email: { to: string; subject: string; text: string; idempotencyKey: string }): Promise<{ messageId: string }>;
+  send(
+    email: { to: string; subject: string; text: string; idempotencyKey: string },
+    scope?: { organizationId: string; workspaceId?: string; employeeId?: string; workflowId?: string },
+  ): Promise<{ messageId: string; testMode?: boolean }>;
 }
 
 /** Every tool is described by one of these. Nothing about it is provider-specific. */

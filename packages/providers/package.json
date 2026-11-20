@@ -1,0 +1,20 @@
+{
+  "name": "@workforce/providers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@workforce/ai-provider": "workspace:*",
+    "@workforce/channels": "workspace:*",
+    "@workforce/shared": "workspace:*",
+    "@workforce/stt": "workspace:*",
+    "@workforce/telephony": "workspace:*",
+    "@workforce/tools": "workspace:*",
+    "@workforce/tts": "workspace:*",
+    "nodemailer": "^10.6.1"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^8.0.2"
+  }
+}

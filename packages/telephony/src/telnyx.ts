@@ -14,7 +14,7 @@ type Credentials = {
  * Telnyx over TeXML, its Twilio-compatible markup: the same webhooks, form fields and statuses as
  * Twilio, a slightly different media stream message format. Plain fetch: no SDK.
  */
-export function telnyxProvider({ apiKey, accountSid, applicationId }: Credentials, api = "https://api.telnyx.com"): TelephonyProvider {
+export function telnyxProvider({ apiKey, accountSid, applicationId }: Credentials, api = "https://api.telnyx.com", http: typeof fetch = fetch): TelephonyProvider {
   // Telnyx does not document signing TeXML's voice URL request, so every webhook URL we hand out
   // carries this secret, and a webhook without it is refused.
   const webhookToken = createHmac("sha256", apiKey).update("telnyx-webhook").digest("hex");
@@ -27,7 +27,7 @@ export function telnyxProvider({ apiKey, accountSid, applicationId }: Credential
   const request = async <T>(method: "GET" | "POST" | "PATCH", path: string, body?: object | URLSearchParams): Promise<T> => {
     let res: Response;
     try {
-      res = await fetch(`${api}${path}`, {
+      res = await http(`${api}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${apiKey}`,

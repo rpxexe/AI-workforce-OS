@@ -21,10 +21,12 @@ import { HANDOFF_TRIGGER_LABELS, placeCallSchema, type ApiError, type HealthResp
 import { createWorkflowEngine, StepError } from "@workforce/workflows";
 import Fastify from "fastify";
 import { ZodError } from "zod";
-import { aiRoutes, credentialsSecretFromEnv, modelRouter, type Platform, type ProviderFactory } from "./ai.ts";
+import { aiRoutes, credentialsSecretFromEnv, modelRouter, previousSecretFromEnv, type Platform, type ProviderFactory } from "./ai.ts";
+import { providerRoutes } from "./providers/routes.ts";
+import { providerService } from "./providers/service.ts";
 import { clerkAuthenticate, type Authenticate } from "./auth.ts";
 import { channelRoutes } from "./channels/routes.ts";
-import { channelService } from "./channels/service.ts";
+import { channelService, whatsappProviderOf } from "./channels/service.ts";
 import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
@@ -58,7 +60,7 @@ export async function buildApp(
     /** The network tools reach; defaults to `safeFetch` (public https only). */
     toolFetch?: typeof fetch;
     /** Telephony, speech and limits; each defaults to what .env configures. */
-    voice?: Partial<VoiceConfig>;
+    voice?: Partial<Omit<VoiceConfig, "providers">>;
     /** The address providers reach the API at, for webhook signatures; defaults to PUBLIC_URL. */
     publicUrl?: string;
     /** Email through Resend, and the sender the send_email tool and Message steps use; default from .env (RESEND_*). */
@@ -70,6 +72,8 @@ export async function buildApp(
     credentialsKey?: string | null;
     /** Builds providers from organizations' keys; tests pass fakes. */
     byoProvider?: ProviderFactory;
+    /** Phase 14: the network adapters built from organizations' connections use (vendors' fixed addresses, and typed addresses); tests pass fakes. */
+    providerFetch?: { vendor?: typeof fetch; user?: typeof fetch };
     /**
      * Background jobs: "inngest" or "inline" (in this process), or a factory tests use to capture the job
      * definitions. Defaults to Inngest when INNGEST_EVENT_KEY or INNGEST_DEV is set (never for test apps).
@@ -80,7 +84,24 @@ export async function buildApp(
     logger?: boolean;
   } = {},
 ) {
-  const app = Fastify({ logger: options.logger ?? true });
+  // Secrets never reach the log: credentials in bodies, keys in headers (Phase 14).
+  const redact = {
+    paths: [
+      "req.headers.authorization",
+      "req.headers.cookie",
+      'req.headers["x-api-key"]',
+      'req.headers["xi-api-key"]',
+      "*.credentials",
+      "*.apiKey",
+      "*.password",
+      "*.secret",
+      "*.authToken",
+      "*.accessToken",
+      "*.encryptedCredentials",
+    ],
+    censor: "[redacted]",
+  };
+  const app = Fastify({ logger: options.logger === false ? false : { redact } });
 
   const dashboardOrigin = process.env.DASHBOARD_ORIGIN ?? "http://localhost:3000";
   await app.register(cors, {
@@ -112,7 +133,9 @@ export async function buildApp(
     if (status >= 500) req.log.error(err);
     // Only errors raised deliberately (httpError, or a 4xx) carry their message to the client.
     const shown = err.expose || status < 500 ? err.message : "Internal server error";
-    return reply.code(status).send({ error: shown } satisfies ApiError);
+    // Field problems found outside Zod (provider connections checked against the registry) keep their paths.
+    const issues = status === 400 ? (err as { issues?: ApiError["issues"] }).issues : undefined;
+    return reply.code(status).send({ error: shown, ...(issues && { issues }) } satisfies ApiError);
   });
 
   app.get("/health", async (_req, reply): Promise<HealthResponse> => {
@@ -156,30 +179,48 @@ export async function buildApp(
     kind: options.provider?.name ?? (process.env.AI_PROVIDER || "openrouter"),
     get: (model) => options.provider ?? (model ? providerFromEnv({ ...process.env, AI_MODEL: model }) : (provider ??= providerFromEnv())),
   };
-  const credentialsKey = options.credentialsKey !== undefined ? options.credentialsKey : credentialsSecretFromEnv();
-  // Every model call in the API goes through the router: the tenant's policy, fallback, usage records.
-  const router = modelRouter(platform, credentialsKey, app.log, options.byoProvider);
-  aiRoutes(app, authenticate, platform, credentialsKey);
-  const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
-  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }));
   // Email: Resend when RESEND_API_KEY is set; otherwise test mode everywhere (logged, not delivered).
   // Test apps never send real email unless they pass a provider.
   const resend = options.email ? options.email.resend : options.authenticate ? null : resendFromEnv();
   const emailFrom = options.email ? options.email.from : process.env.RESEND_FROM;
-  /** The send_email tool's and Message steps' sender: RESEND_FROM through Resend. */
-  const mailer: Mailer | undefined =
-    resend && emailFrom
-      ? {
-          async send({ to, subject, text, idempotencyKey }) {
-            try {
-              const { providerMessageId } = await resend.send({ address: emailFrom, to, subject, text, idempotencyKey });
-              return { messageId: providerMessageId };
-            } catch (err) {
-              throw new ToolError(err instanceof Error ? err.message : "The email could not be sent");
-            }
-          },
-        }
-      : undefined;
+  const credentialsKey = options.credentialsKey !== undefined ? options.credentialsKey : credentialsSecretFromEnv();
+  // Phase 14: organizations' own provider connections, resolved per request (workflow, employee, default, platform).
+  const platformVoice = {
+    telephony: [twilioFromEnv(), telnyxFromEnv()].filter((p): p is TelephonyProvider => p !== null),
+    stt: sttFromEnv(),
+    tts: ttsFromEnv(),
+    ...options.voice,
+  };
+  const whatsapp = options.whatsapp ?? whatsappProvidersFromEnv();
+  const providers = providerService({
+    secret: credentialsKey,
+    previousSecret: previousSecretFromEnv(),
+    platform: { stt: platformVoice.stt, tts: platformVoice.tts, telephony: platformVoice.telephony, whatsapp, email: resend, emailFrom: resend ? (emailFrom ?? null) : null },
+    fetch: options.providerFetch?.vendor,
+    userFetch: options.providerFetch?.user,
+    log: app.log,
+  });
+  // Every model call in the API goes through the router: the tenant's policy, fallback, usage records.
+  const router = modelRouter(platform, credentialsKey, app.log, options.byoProvider);
+  aiRoutes(app, authenticate, platform, credentialsKey);
+  const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
+  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }), providers);
+  /**
+   * The send_email tool's, Message steps' and handoff emails' sender: the provider that serves the request's scope, from
+   * its From address (RESEND_FROM for the platform's Resend). Test mode when none is configured: nothing is delivered.
+   */
+  const mailer: Mailer = {
+    async send({ to, subject, text, idempotencyKey }, scope) {
+      const resolved = scope ? await providers.email(scope) : resend ? { sender: resend, from: emailFrom ?? null, provider: "resend" } : null;
+      if (!resolved?.from) return { messageId: idempotencyKey, testMode: true };
+      try {
+        const { providerMessageId } = await resolved.sender.send({ address: resolved.from, to, subject, text, idempotencyKey });
+        return { messageId: providerMessageId, testMode: false };
+      } catch (err) {
+        throw new ToolError(err instanceof Error ? err.message : "The email could not be sent");
+      }
+    },
+  };
   const tools = createToolExecutor(toolRegistry, {
     fetch: options.toolFetch,
     mailer,
@@ -199,8 +240,10 @@ Why: ${HANDOFF_TRIGGER_LABELS[n.trigger]}. ${n.reason}
 Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       idempotencyKey: `handoff:${n.handoffId}`,
     };
-    if (!mailer) return app.log.info({ to: email.to, subject: email.subject }, "Handoff email (test mode, not sent)");
-    mailer.send(email).catch((err: unknown) => app.log.error({ err, conversationId: n.conversationId }, "Handoff email failed"));
+    mailer
+      .send(email, { organizationId: n.organizationId, workspaceId: n.workspaceId, employeeId: n.employeeId })
+      .then(({ testMode }) => testMode && app.log.info({ to: email.to, subject: email.subject }, "Handoff email (test mode, not sent)"))
+      .catch((err: unknown) => app.log.error({ err, conversationId: n.conversationId }, "Handoff email failed"));
   };
   const learn = options.memory ?? memoryService;
   const timeoutMs = options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000);
@@ -227,27 +270,36 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   };
   conversationRoutes(app, authenticate, ai);
   const voiceConfig: VoiceConfig = {
-    telephony: [twilioFromEnv(), telnyxFromEnv()].filter((p): p is TelephonyProvider => p !== null),
-    stt: sttFromEnv(),
-    tts: ttsFromEnv(),
     publicUrl: process.env.PUBLIC_URL || null,
-    secret: process.env.TWILIO_AUTH_TOKEN || process.env.TELNYX_API_KEY || null,
+    // Signs media stream tokens; organizations' own phone accounts need no platform account, so the credentials key will do.
+    secret: process.env.TWILIO_AUTH_TOKEN || process.env.TELNYX_API_KEY || credentialsKey,
     limits: { idleMs: 15_000, maxCallMs: 30 * 60_000 },
-    ...options.voice,
+    ...platformVoice,
+    providers,
   };
   const voice = voiceRoutes(app, authenticate, voiceConfig, ai);
 
   // Messaging channels: WhatsApp, web chat and email, all answered through the same runtime.
-  const whatsapp = options.whatsapp ?? whatsappProvidersFromEnv();
   const channels = channelService({
     ai,
-    stt: voiceConfig.stt,
-    whatsapp,
-    email: resend ?? testEmailSender,
+    stt: (scope) => providers.stt(scope, "chat"),
+    whatsapp: (channel) => {
+      const connectionId = (channel.config as { connectionId?: string }).connectionId ?? null;
+      const name = whatsappProviderOf(channel);
+      const base = (options.publicUrl ?? process.env.PUBLIC_URL)?.replace(/\/+$/, "");
+      return providers.whatsapp(name, connectionId, base && connectionId ? `${base}/channels/whatsapp/${name}/c/${connectionId}/webhook` : undefined);
+    },
+    email: async (scope) => (await providers.email(scope, "chat"))?.sender ?? testEmailSender,
     log: app.log,
     enqueue: (job) => send("channel/message.received", job),
   });
-  channelRoutes(app, authenticate, { service: channels, whatsapp, resend, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null) });
+  channelRoutes(app, authenticate, { service: channels, whatsapp, resend, publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null), providers });
+  providerRoutes(app, authenticate, {
+    service: providers,
+    secret: credentialsKey,
+    platform: { ...providers.platform, llm: platform.kind },
+    publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null),
+  });
   webChatRoutes(app, channels);
   inboxRoutes(app, authenticate, ai, channels);
   qualityRoutes(app, authenticate, send);
@@ -270,7 +322,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         throw new StepError(shown ? err.message : "The call could not be placed");
       }
     },
-    mailer: mailer ?? null,
+    mailer,
     callPollMs: options.workflows?.callPollMs ?? 15_000,
     onError: (err, context) => app.log.error({ err }, `${context} failed`),
     },
@@ -285,7 +337,13 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   const definitions: JobDefinitions = {
     "knowledge/document.uploaded": {
       retries: 0, // processDocument records FAILED itself; reprocessing is a person's choice
-      handler: ({ documentId }) => processDocument(documentId, getEmbedder(), (err) => app.log.error({ err, documentId }, "Document processing failed")),
+      handler: ({ documentId }) =>
+        processDocument(
+          documentId,
+          getEmbedder(),
+          (err) => app.log.error({ err, documentId }, "Document processing failed"),
+          async (doc) => new Uint8Array(await (await providers.storageById(doc.organizationId, doc.storageConnectionId)).get(doc.storageKey)),
+        ),
     },
     "memory/exchange.saved": {
       retries: 1, // each try is a model call

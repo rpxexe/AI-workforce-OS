@@ -114,7 +114,7 @@ export function conversationRoutes(
     let provider: AIProvider;
     let knowledge: { embedder: EmbeddingProvider; sourceIds: string[] } | undefined;
     try {
-      provider = ai.provider({ organizationId: scope.organizationId, workspaceId: scope.workspaceId, task: "chat" });
+      provider = ai.provider({ organizationId: scope.organizationId, workspaceId: scope.workspaceId, employeeId: id, task: "chat" });
       // The embedder is only needed, and only has to be configured, when knowledge is attached.
       if (sourceIds.length > 0) knowledge = { embedder: ai.embedder(), sourceIds };
     } catch (err) {
