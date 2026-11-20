@@ -154,7 +154,7 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
     const session = readSession(channel.secret, channel.id, req.headers.authorization);
     if (!session) throw httpError(401, "Your chat session has expired. Reload the page to continue.");
     const { message } = chatMessageSchema.parse(req.body);
-    const live = await liveEmployee(channel.employeeId);
+    const live = await liveEmployee(channel.employeeId, session.x);
     if (!live) throw httpError(503, "No one is available to chat right now");
     const startedAt = Date.now();
 

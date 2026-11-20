@@ -24,6 +24,7 @@ import { ChannelLog } from "@/components/employees/channel-log";
 import { EmployeeChannels } from "@/components/employees/employee-channels";
 import { EmployeeKnowledge } from "@/components/employees/employee-knowledge";
 import { EmployeePhone } from "@/components/employees/employee-phone";
+import { EmployeeReleases } from "@/components/employees/employee-releases";
 import { EmployeeTools } from "@/components/employees/employee-tools";
 import { DAY_LABELS, EmployeeAvatar, StatusBadge, formatDate } from "@/components/employees/meta";
 import { ErrorState, LoadingState } from "@/components/states";
@@ -371,6 +372,14 @@ export default withWorkspace(function EmployeePage({ workspace }) {
         </Section>
 
         <Section
+          title="Releases"
+          description="Roll a version out to a share of customers, compare a KPI, then promote or roll back."
+          className="lg:col-span-2"
+        >
+          <EmployeeReleases workspaceId={workspace.id} employee={data} canEdit={isAdmin && !archived} onLiveChange={reload} />
+        </Section>
+
+        <Section
           title="Versions"
           description="Every save is kept. Publishing chooses which version customers are served."
           className="lg:col-span-2"
@@ -381,7 +390,7 @@ export default withWorkspace(function EmployeePage({ workspace }) {
                 <TableHead>Version</TableHead>
                 <TableHead>Saved</TableHead>
                 <TableHead className="hidden sm:table-cell">By</TableHead>
-                <TableHead className="w-24">
+                <TableHead className="w-48">
                   <span className="sr-only">Actions</span>
                 </TableHead>
               </TableRow>
@@ -400,7 +409,12 @@ export default withWorkspace(function EmployeePage({ workspace }) {
                   <TableCell className="hidden text-muted-foreground sm:table-cell">
                     {v.createdBy === userId ? "You" : "A teammate"}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="space-x-2 text-right whitespace-nowrap">
+                    {live !== null && v.number !== live && (
+                      <Button variant="ghost" size="sm" asChild>
+                        <Link href={`/employees/${id}/compare?from=${live}&to=${v.number}`}>Compare with live</Link>
+                      </Button>
+                    )}
                     {isAdmin && !archived && v.number !== live && (
                       <Button variant="outline" size="sm" onClick={() => publish(v.number)}>
                         {live !== null && v.number < live ? "Roll back" : "Publish"}

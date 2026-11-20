@@ -5,7 +5,7 @@
 //   -> reply split to the channel's limits -> ChannelSender -> audit rows with delivery state
 //
 // Like voice, channels have no logic of their own for answers: `runTurn` writes every reply.
-import { runTurn, type HandoffNotice, type TurnInput } from "@workforce/agent-runtime";
+import { ROLLOUT_INCLUDE, runTurn, servedVersion, type HandoffNotice, type TurnInput } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { ChannelError, splitText, taggedAddress, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
 import { prisma, type Prisma } from "@workforce/database";
@@ -63,15 +63,18 @@ const DOCUMENT_KINDS: Record<string, KnowledgeKind> = {
   "text/csv": "csv",
 };
 
-/** The employee's published version and what it works with, or null when it does not answer customers. */
-export async function liveEmployee(employeeId: string) {
+/**
+ * The version that answers this customer (the published one, or a rollout's candidate for its share of
+ * customers) and what it works with, or null when the employee does not answer customers.
+ */
+export async function liveEmployee(employeeId: string, customer?: string) {
   const employee = await prisma.aiEmployee.findUnique({
     where: { id: employeeId },
-    include: { publishedVersion: true, knowledgeSources: { select: { sourceId: true } }, tools: { select: { tool: true } } },
+    include: { publishedVersion: true, knowledgeSources: { select: { sourceId: true } }, tools: { select: { tool: true } }, ...ROLLOUT_INCLUDE },
   });
   if (employee?.status !== "ACTIVE" || !employee.publishedVersion) return null;
   return {
-    version: employee.publishedVersion,
+    version: servedVersion(employee.publishedVersion, employee.activeRollout, customer),
     sourceIds: employee.knowledgeSources.map((k) => k.sourceId),
     tools: employee.tools.map((t) => t.tool),
   };
@@ -288,7 +291,7 @@ export function channelService(deps: {
 
     if (!channel.enabled) return reject("The channel is turned off");
     if (await overLimit(channel.id, inbound.from)) return reject(`Rate limited: more than ${RATE_LIMIT_PER_MINUTE} messages in a minute`);
-    const live = await liveEmployee(channel.employeeId);
+    const live = await liveEmployee(channel.employeeId, inbound.from);
     if (!live) return reject("The employee is not published, or is paused");
 
     let provider: AIProvider;

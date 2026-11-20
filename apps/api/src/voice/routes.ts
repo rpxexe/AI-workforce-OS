@@ -1,3 +1,4 @@
+import { ROLLOUT_INCLUDE, servedVersion } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -116,10 +117,10 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     return telephony;
   };
 
-  /** The published version that answers calls, or null if the employee cannot take calls. */
-  const liveVersion = async (employeeId: string) => {
-    const employee = await prisma.aiEmployee.findUnique({ where: { id: employeeId }, include: { publishedVersion: true } });
-    return employee?.status === "ACTIVE" && employee.publishedVersion ? employee.publishedVersion : null;
+  /** The version that answers a call with this customer (published, or a rollout's candidate), or null if the employee cannot take calls. */
+  const liveVersion = async (employeeId: string, customer: string) => {
+    const employee = await prisma.aiEmployee.findUnique({ where: { id: employeeId }, include: { publishedVersion: true, ...ROLLOUT_INCLUDE } });
+    return employee?.status === "ACTIVE" && employee.publishedVersion ? servedVersion(employee.publishedVersion, employee.activeRollout, customer) : null;
   };
 
   // ---- Provider webhooks and the media stream (public, signature-checked) ----
@@ -146,7 +147,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       const { CallSid: sid = "", From: from = "", To: to = "" } = params;
       const number = await prisma.phoneNumber.findUnique({ where: { number: to } });
       if (!number || number.provider !== telephony.name) return telephony.sayAndHangUp("This number is not in service.");
-      const version = await liveVersion(number.employeeId);
+      const version = await liveVersion(number.employeeId, from);
       if (!version) return telephony.sayAndHangUp("Sorry, no one is available to take your call right now. Please try again later.");
 
       // The provider retries webhooks; one call row per call.
@@ -346,7 +347,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         throw httpError(409, "An earlier try stopped while placing this call, so it may have been placed. Check the employee's calls, then retry the run.");
     }
     await employeeIn(scope, id);
-    const version = await liveVersion(id);
+    const version = await liveVersion(id, body.to);
     if (!version) throw httpError(409, "Publish this employee and make sure it is active before it makes calls");
     const from = await prisma.phoneNumber.findFirst({
       where: { employeeId: id, ...within(scope), ...(body.phoneNumberId && { id: body.phoneNumberId }) },

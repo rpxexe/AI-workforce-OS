@@ -112,17 +112,22 @@ after(async () => {
   await deleteOrgs(org);
 });
 
-test("the queue serves one function per job, the workflow sweep and the evaluation sweep", () => {
+test("the queue serves one function per job, the workflow sweep, the evaluation sweep and the improvement analysis", () => {
   assert.deepEqual(Object.keys(definitions).sort(), [
     "channel/message.received",
     "evaluation/dataset.run",
     "evaluation/requested",
+    "improvement/analyze",
     "knowledge/document.uploaded",
     "memory/exchange.saved",
     "workflow/run.due",
   ]);
   assert.equal(definitions["channel/message.received"].orderedBy, "queueKey");
-  assert.deepEqual(schedules.map((s) => [s.id, s.cron]), [["workflow-sweep", "* * * * *"], ["evaluation-sweep", "*/5 * * * *"]]);
+  assert.deepEqual(schedules.map((s) => [s.id, s.cron]), [
+    ["workflow-sweep", "* * * * *"],
+    ["evaluation-sweep", "*/5 * * * *"],
+    ["improvement-analysis", "0 6 * * *"],
+  ]);
 });
 
 test("workflows: a run becomes a job, sleeps through its wait in the queue, and a duplicate job does nothing", async () => {
@@ -241,7 +246,7 @@ test("channels: a WhatsApp message is answered by its job, once", async () => {
   assert.equal(waSent, 1);
 });
 
-test("with Inngest itself, /api/inngest serves the eight functions (six jobs, two schedules)", async () => {
+test("with Inngest itself, /api/inngest serves the ten functions (seven jobs, three schedules)", async () => {
   // Dev mode needs no keys and no network to describe itself.
   process.env.INNGEST_DEV = "1";
   const real = await buildApp({ authenticate: headerAuth, provider: model, embedder, logger: false, whatsapp: [], jobs: "inngest" });
@@ -249,7 +254,7 @@ test("with Inngest itself, /api/inngest serves the eight functions (six jobs, tw
     const res = await real.inject({ method: "GET", url: "/api/inngest" });
     assert.equal(res.statusCode, 200, res.payload);
     const body = res.json<{ function_count?: number; mode?: string }>();
-    assert.equal(body.function_count, 8);
+    assert.equal(body.function_count, 10);
     assert.equal(body.mode, "dev");
   } finally {
     delete process.env.INNGEST_DEV;

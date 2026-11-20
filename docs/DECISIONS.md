@@ -244,6 +244,34 @@ problem re-discovered.
 - **Test apps never run the evaluation sweep**: tests share the database with development, and a global sweep would
   queue evaluations of the developer's own conversations. Tests call `queueDueEvaluations` with their organization.
 
+- **Improvement never edits an employee by itself** (Phase 12). The analysis job writes suggestions only. A version is created
+  when an admin asks to test a suggestion, it is not published, and it can be neither published nor rolled out until an admin
+  approves it after the regression runs finished. Promote, roll back and publish are admin requests. This answers "never
+  silently modify production" while keeping versions append-only: a suggestion's version is an ordinary version with a link.
+- **The model may change only instructions, personality and goals.** Channels, tools, knowledge and escalation decide what the
+  employee can do and who is told; a grader's verdict is not enough reason to change them. Proposals outside those fields are
+  dropped by code (`parseProposal`), and the merged configuration must pass the same schema the form uses.
+- **A pattern is an evaluator failing on the live version** (3+ failures, 20%+ of its results, 14 days), one suggestion per
+  version and evaluator, ever: a rejected suggestion is not proposed again for that version, and a new version starts fresh.
+- **The regression suite is a Phase 11 dataset linked to the employee**, not a new kind of thing: admins see and edit it on the
+  dataset page, and testing a suggestion adds the conversations that failed (with "do not repeat" expectations) and a few
+  recent passing ones (so a fix that breaks what worked shows as "broken"). Both versions are replayed on the same cases at
+  the same time, so a model's day-to-day variation affects both.
+- **Rollouts are per customer, by hash, not per message**: sha256(rollout id + customer key) mod 100 against the share, so a
+  customer keeps one version across messages and channels, and raising the share never moves anyone back. No assignment
+  table. One candidate per rollout and one rollout per employee (a unique column set only while active).
+- **Publishing is blocked during a rollout**: the control is the published version, so moving it mid-test would mix the
+  comparison. Promote or roll back first.
+- **The KPI is read from evaluations** (Phase 11) by the employee version of each conversation's last reply: average score,
+  share passing, or one dimension's pass rate. The control side also counts 14 days before the rollout, so a 5% rollout still
+  has a baseline; the verdict waits for 10 conversations per side and a difference beyond a 95% Welch test. People promote or
+  roll back; nothing acts on the verdict automatically.
+- **Rollback publishes the version that was live before the current one**, from a release log that every publish, promote and
+  rollback writes (`EmployeeRelease`). Rollbacks are skipped when looking back, so two rollbacks go back two versions instead
+  of flipping between two.
+- **The daily analysis runs on Inngest only**; without it, "Find improvements" runs it. A second in-process timer was not
+  worth it for a once-a-day job.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.
@@ -300,6 +328,11 @@ problem re-discovered.
 
 - **Heredocs through the Bash tool still fail** when the text has quotes or backticks (hit again in Phase 10). Write
   the script with the file tool, then run it.
+
+- **`prisma migrate dev` refuses to run non-interactively when it would warn** (here: a new unique column). Write the SQL
+  with `prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script` into a new migration folder,
+  then `prisma migrate deploy` (Phase 12).
+- **`schema.prisma` has CRLF line endings**; edit scripts that match multi-line text must normalise them first.
 
 ## Checking the signed-in UI without a login
 

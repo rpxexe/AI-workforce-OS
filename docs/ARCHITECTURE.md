@@ -17,7 +17,7 @@ packages/stt           `STTProvider` and Deepgram live transcription (turn detec
 packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
 packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), `EmailProvider` (Resend; test mode without it), `splitText`.
-workers/evaluation-worker  The evaluation worker: graders, `runEvaluation`, the sweep, regression replays (run as API jobs).
+workers/evaluation-worker  The evaluation worker: graders, `runEvaluation`, the sweep, regression replays, improvement analysis and `compareKpi` (run as API jobs).
 workers/*         agent-worker, call-worker: empty stubs.
 ```
 
@@ -102,6 +102,16 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
 - `EvalDataset` (name unique per workspace), `EvalCase` (`messages` [{ role: customer | employee, content }] copied from a
   conversation or written by hand, `expectations`), `EvalRun` (dataset x employee version: `total`, `passed`, `failed`,
   `score`, `status`).
+- `EvalDataset.employeeId` (unique, nullable): marks a dataset as that employee's regression suite.
+- `ImprovementSuggestion`: one per failure pattern (`baseVersionId` + `evaluatorId`, unique): `dimension`, `title`, `reason`,
+  `evidence` (counts and the newest failing examples with reasons and quotes), `change` ({ summary, fields } with the new
+  value of each changed field among systemInstructions, personality, goals), `kpi`, `proposedVersionId` (the version made
+  from it, once a person asks), `baselineRunId`/`candidateRunId` (regression runs), `approval` (pending, approved,
+  rejected) with `decidedBy`, `decidedAt`, `decisionNote`.
+- `EmployeeRollout`: a candidate version served to `percent`% of customers next to the published (control) version;
+  `status` active, promoted or rolled_back; `kpi`; `suggestionId`; `activeEmployeeId` (unique, set only while active: one
+  active rollout per employee). `EmployeeRelease`: every move of the live pointer (`action` publish, rollback, promote;
+  `version`, `previousVersion`, `by`).
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -130,7 +140,7 @@ GET   /workspaces/:workspaceId/employees        member; ?archived=true for the a
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
-POST  .../employees/:id/publish                 admin; body { version }; first publish activates
+POST  .../employees/:id/publish                 admin; body { version }; first publish activates; 409 while a rollout runs or for an unapproved suggestion's version; logs a release
 PATCH .../employees/:id/status                  admin; ACTIVE | PAUSED | ARCHIVED
 POST  .../employees/:id/duplicate               admin; new draft from the latest version
 GET   .../employees/:id/conversations           member; newest 50
@@ -214,6 +224,16 @@ POST  .../datasets/:id/cases                    admin; { name, expectations?, co
 DELETE .../datasets/:id/cases/:caseId           admin; 204
 POST  .../datasets/:id/runs                     admin; { employeeId, version? } (default: published, else latest); 202
 GET   /workspaces/:workspaceId/eval-runs/:id    member; the run with each case's evaluation and results
+GET   /workspaces/:workspaceId/improvements     member; newest 100 suggestions; ?employeeId=
+POST  .../improvements/analyze                  admin; queues improvement/analyze; 202
+GET   .../improvements/:id                      member; ImprovementDetail (evidence, base and proposed config, tests, rollout)
+POST  .../improvements/:id/test                 admin; creates the proposed version once, fills the regression suite, runs it on base and proposed; 202
+POST  .../improvements/:id/decision             admin; { decision: approve | reject, note }; approve needs both runs COMPLETED
+GET   .../employees/:id/releases                member; active rollout and history with KPI results, release log, suite, rollbackTo
+POST  .../employees/:id/regression-suite        admin; creates the suite if missing; { id }
+POST  .../employees/:id/rollouts                admin; { version, percent, kpi }; 201; 409 if one runs or the suggestion is unapproved
+PATCH .../employees/:id/rollouts/:rolloutId     admin; { action: set_percent (percent) | promote | rollback }
+POST  .../employees/:id/rollback                admin; publishes the version live before the current one; 409 during a rollout
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -502,6 +522,40 @@ dataset run (admin) -> job evaluation/dataset.run -> per case (step.run): new co
   run results per case). The conversation page has a Quality card (`components/quality/conversation-quality.tsx`): the
   results with findings, Evaluate now, Add to dataset.
 
+## Continuous improvement (Phase 12)
+
+```
+improvement/analyze (button, or the daily improvement-analysis schedule on Inngest for workspaces with recent failures)
+  -> findFailurePatterns: production results failing >= 3 times and >= 20% on an ACTIVE employee's live version, last 14 days,
+     with no suggestion for that version + evaluator yet (workers/evaluation-worker/src/improve.ts)
+  -> per pattern (5 per run): IMPROVE_PROMPT + configuration + check (rubric or rules) + 8 failing examples -> JSON
+  -> parseProposal: only systemInstructions, personality, goals; valid config; must differ -> ImprovementSuggestion
+     (no version is created: nothing about the employee changes)
+admin "test" -> version N+1 = base + change (createdBy the admin, unpublished)
+             -> regression suite (EvalDataset.employeeId; created on first use) + the evidence conversations ("do not repeat")
+                + up to 5 recent passing conversations (guards) as cases
+             -> two EvalRuns (base, proposed) -> evaluation/dataset.run each (Phase 11 replay + grading)
+             -> TestComparison per case: fixed / broken / same
+admin decision (approve needs both runs COMPLETED) -> rollout (admin): EmployeeRollout active, percent, kpi
+serving: liveEmployee (channels, web chat), liveVersion (voice), the workflow AI Employee step
+  -> servedVersion(published, activeRollout, customer key): sha256(rollout id + key) % 100 < percent -> candidate
+KPI: production evaluations (auto, manual) per version; candidate since the start, control from 14 days before the start;
+     compareKpi: means (score, or 0/100 per pass) and a two-sided 95% Welch test, verdict only with >= 10 per side
+promote -> rollout promoted + publish (release "promote")   rollback -> rollout rolled_back (nothing published)
+employee rollback -> publishes rollbackTarget: the previousVersion of the newest non-rollback release of the live version
+```
+
+- The customer key is the channel's normalized customer id (`+digits` phone, lower-case email, `visitor:<id>`), so a
+  customer gets the same version on calls, WhatsApp, email and web chat. Workflows use the step's customer, else the run id.
+  Test chat keeps using the latest version; Copilot keeps the published one.
+- Raising the share keeps everyone already on the candidate; lowering it moves some back.
+- Publishing is refused while a rollout runs and for a suggestion's version until it is approved (`assertPublishable` in
+  `apps/api/src/releases.ts`). Every pointer move goes through `release()`, which writes `EmployeeRelease`.
+- Dashboard: `/improvements` (list, Find improvements), `/improvements/[id]` (pipeline, evidence, proposed change as a diff,
+  regression tests per case, approval with a note, rollout), the employee page's Releases card
+  (`components/employees/employee-releases.tsx`: rollout panel or start, roll back to the previous version, regression suite,
+  history) and `/employees/[id]/compare` (two versions, field-by-field line diff, `components/improvements/config-diff.tsx`).
+
 ## Agent runtime
 
 ```
@@ -579,6 +633,8 @@ workflow-sweep               cron, every minute             engine.dueRuns -> wo
 evaluation/requested         { evaluationId }               runEvaluation (claims PENDING; records FAILED itself)
 evaluation/dataset.run       { runId }                      runCase per case (skips graded cases), then finishRun
 evaluation-sweep             cron, every 5 minutes          queueDueEvaluations -> evaluation/requested for each
+improvement/analyze          { organizationId, workspaceId } analyzeWorkspace: patterns -> suggestions (never a version)
+improvement-analysis         cron, daily 06:00              workspacesWithFailures -> improvement/analyze for each (Inngest only)
 ```
 
 - `jobs.send(name, data)` queues a job. Backends: **Inngest** when `INNGEST_EVENT_KEY` or `INNGEST_DEV` is set (never

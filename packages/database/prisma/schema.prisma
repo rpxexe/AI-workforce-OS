@@ -29,6 +29,9 @@ model Organization {
   channelMessages    ChannelMessage[]
   evaluators         Evaluator[]
   evalDatasets       EvalDataset[]
+  improvementSuggestions ImprovementSuggestion[]
+  employeeRollouts   EmployeeRollout[]
+  employeeReleases   EmployeeRelease[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -75,6 +78,13 @@ model AiEmployee {
   phoneNumbers     PhoneNumber[]
   calls            Call[]
   channels         EmployeeChannel[]
+  suggestions      ImprovementSuggestion[]
+  rollouts         EmployeeRollout[]      @relation("Rollouts")
+  // The rollout serving a share of customers a candidate version right now (at most one).
+  activeRollout    EmployeeRollout?       @relation("ActiveRollout")
+  releases         EmployeeRelease[]
+  // The regression dataset versions of this employee are tested against before release.
+  regressionSuite  EvalDataset?
   createdBy String // Clerk user id
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
@@ -104,6 +114,10 @@ model AiEmployeeVersion {
 
   evaluations Evaluation[]
   evalRuns    EvalRun[]
+  suggestionsBased    ImprovementSuggestion[] @relation("SuggestionBase")
+  proposedBy          ImprovementSuggestion?  @relation("SuggestionProposed")
+  rolloutsAsControl   EmployeeRollout[]       @relation("RolloutControl")
+  rolloutsAsCandidate EmployeeRollout[]       @relation("RolloutCandidate")
   createdBy String // Clerk user id
   createdAt DateTime @default(now())
 
@@ -905,6 +919,9 @@ model EvalDataset {
   workspaceId    String
   name           String
   description    String       @default("")
+  // Set on an employee's regression suite: changes to that employee are tested on these cases before release.
+  employeeId     String?      @unique
+  employee       AiEmployee?  @relation(fields: [employeeId], references: [id], onDelete: SetNull)
 
   cases     EvalCase[]
   runs      EvalRun[]
@@ -952,6 +969,102 @@ model EvalRun {
   completedAt       DateTime?
 
   evaluations Evaluation[]
+  baselineFor  ImprovementSuggestion? @relation("SuggestionBaseline")
+  candidateFor ImprovementSuggestion? @relation("SuggestionCandidate")
 
   @@index([datasetId, createdAt])
+}
+
+// ---- Continuous improvement (Phase 12) ----
+
+// A change proposed for an employee from a pattern of evaluation failures on one version. It never changes
+// production by itself: a person creates the version and tests it, a person approves, a person rolls it out.
+model ImprovementSuggestion {
+  id                String                @id @default(cuid())
+  organizationId    String
+  organization      Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId       String
+  employeeId        String
+  employee          AiEmployee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  // The version the failures happened on; the proposed version is this one with the change applied.
+  baseVersionId     String
+  baseVersion       AiEmployeeVersion     @relation("SuggestionBase", fields: [baseVersionId], references: [id], onDelete: Cascade)
+  // The pattern: the evaluator that kept failing, and its dimension.
+  evaluatorId       String
+  dimension         String
+  title             String
+  reason            String
+  // { failures, results, examples: [{ evaluationId, conversationId, reason, findings: [{ message, quote? }] }] }
+  evidence          Json
+  // { summary, fields: { systemInstructions?, personality?, goals? } }: the new values of the changed fields.
+  change            Json
+  // The KPI the change should move: score | pass_rate | an evaluation dimension.
+  kpi               String
+  proposedVersionId String?               @unique
+  proposedVersion   AiEmployeeVersion?    @relation("SuggestionProposed", fields: [proposedVersionId], references: [id], onDelete: SetNull)
+  // Regression suite runs: the base version and the proposed one, on the same cases.
+  baselineRunId     String?               @unique
+  baselineRun       EvalRun?              @relation("SuggestionBaseline", fields: [baselineRunId], references: [id], onDelete: SetNull)
+  candidateRunId    String?               @unique
+  candidateRun      EvalRun?              @relation("SuggestionCandidate", fields: [candidateRunId], references: [id], onDelete: SetNull)
+  approval          String                @default("pending") // pending | approved | rejected
+  decidedBy         String?
+  decidedAt         DateTime?
+  decisionNote      String                @default("")
+  rollouts          EmployeeRollout[]
+  createdBy         String // "system" (the analysis job) or a Clerk user id
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  // One suggestion per failure pattern: a version and an evaluator.
+  @@unique([baseVersionId, evaluatorId])
+  @@index([organizationId, workspaceId, createdAt])
+}
+
+// A candidate version served to a share of customers next to the published one (A/B), until a person
+// promotes it (publishes it) or rolls it back.
+model EmployeeRollout {
+  id                 String                 @id @default(cuid())
+  organizationId     String
+  organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId        String
+  employeeId         String
+  employee           AiEmployee             @relation("Rollouts", fields: [employeeId], references: [id], onDelete: Cascade)
+  // Set while active (the unique index allows one active rollout per employee); null once it ends.
+  activeEmployeeId   String?                @unique
+  activeFor          AiEmployee?            @relation("ActiveRollout", fields: [activeEmployeeId], references: [id], onDelete: Cascade)
+  controlVersionId   String
+  controlVersion     AiEmployeeVersion      @relation("RolloutControl", fields: [controlVersionId], references: [id], onDelete: Cascade)
+  candidateVersionId String
+  candidateVersion   AiEmployeeVersion      @relation("RolloutCandidate", fields: [candidateVersionId], references: [id], onDelete: Cascade)
+  suggestionId       String?
+  suggestion         ImprovementSuggestion? @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
+  // Share of customers (1-100) served the candidate; a customer keeps their side while it does not shrink.
+  percent            Int
+  status             String // active | promoted | rolled_back
+  kpi                String
+  startedBy          String
+  startedAt          DateTime               @default(now())
+  endedBy            String?
+  endedAt            DateTime?
+
+  @@index([employeeId, startedAt])
+}
+
+// Every change of the live version: publish, rollback, a promoted rollout. Read for "roll back to the previous version".
+model EmployeeRelease {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId     String
+  employeeId      String
+  employee        AiEmployee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  action          String // publish | rollback | promote
+  version         Int
+  previousVersion Int?
+  rolloutId       String?
+  by              String
+  createdAt       DateTime     @default(now())
+
+  @@index([employeeId, createdAt])
 }
