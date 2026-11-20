@@ -8,13 +8,15 @@ import {
   type ToolCall,
 } from "./types.ts";
 
-type Vendor = {
+export type Vendor = {
   name: string;
   baseUrl: string;
-  /** Environment variables holding the key and an optional base URL override. */
+  /** Environment variables holding the platform's key and an optional base URL override. */
   keyVar: string;
   baseUrlVar: string;
   defaultModel: string;
+  /** OpenAI's newer models refuse `max_tokens` and take `max_completion_tokens`. */
+  maxTokensField?: "max_tokens" | "max_completion_tokens";
 };
 
 /** The parts of a streamed chat-completions chunk this provider reads. */
@@ -27,7 +29,8 @@ type Chunk = {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+  /** `cost` (US dollars) is OpenRouter's addition. */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number } | null;
   error?: { message?: string; code?: number | string };
 };
 
@@ -71,26 +74,30 @@ const parseArguments = (text: string): unknown => {
 };
 
 /**
- * Any service that speaks the OpenAI chat-completions streaming protocol: OpenRouter today;
- * OpenAI or a self-hosted endpoint is one more entry in `PROVIDERS`.
+ * Any service that speaks the OpenAI chat-completions streaming protocol: OpenRouter, OpenAI, Gemini's
+ * OpenAI-compatible endpoint, or an organization's own endpoint. The key is the organization's when given
+ * (BYOAI), else the platform's from .env.
  */
 export const openAICompatibleProvider =
   (vendor: Vendor) =>
-  ({ model = vendor.defaultModel, maxOutputTokens }: ProviderSettings, env: Record<string, string | undefined>): AIProvider => ({
+  (
+    { model = vendor.defaultModel, maxOutputTokens, apiKey, baseUrl, fetch: send = fetch }: ProviderSettings,
+    env: Record<string, string | undefined>,
+  ): AIProvider => ({
     name: vendor.name,
     model,
     async *stream({ system, messages, tools, signal }) {
-      const key = env[vendor.keyVar];
+      const key = apiKey ?? env[vendor.keyVar];
       if (!key) throw new AIProviderError("auth", `${vendor.keyVar} is not set`);
 
       let res: Response;
       try {
-        res = await fetch(`${env[vendor.baseUrlVar] || vendor.baseUrl}/chat/completions`, {
+        res = await send(`${baseUrl ?? (env[vendor.baseUrlVar] || vendor.baseUrl)}/chat/completions`, {
           method: "POST",
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
           body: JSON.stringify({
             model,
-            max_tokens: maxOutputTokens,
+            [vendor.maxTokensField ?? "max_tokens"]: maxOutputTokens,
             stream: true,
             stream_options: { include_usage: true },
             messages: [{ role: "system", content: system }, ...messages.flatMap(toWire)],
@@ -160,6 +167,9 @@ export const openAICompatibleProvider =
         inputTokens: usage?.prompt_tokens ?? 0,
         outputTokens: usage?.completion_tokens ?? 0,
         ...(toolCalls.length > 0 && { toolCalls }),
+        provider: vendor.name,
+        model,
+        ...(typeof usage?.cost === "number" && { costUsd: usage.cost }),
       };
     },
   });

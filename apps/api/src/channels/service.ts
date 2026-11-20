@@ -6,7 +6,7 @@
 //
 // Like voice, channels have no logic of their own for answers: `runTurn` writes every reply.
 import { ROLLOUT_INCLUDE, runTurn, servedVersion, type HandoffNotice, type TurnInput } from "@workforce/agent-runtime";
-import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
+import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { ChannelError, splitText, taggedAddress, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
 import { prisma, type Prisma } from "@workforce/database";
 import { parseDocument } from "@workforce/knowledge";
@@ -27,9 +27,11 @@ import type { FastifyBaseLogger } from "fastify";
 import { configOf } from "../employees.ts";
 
 export type Ai = {
-  provider: () => AIProvider;
+  /** A provider bound to a route (tenant and task): the model router. */
+  provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
-  memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+  /** Customer memory for a tenant; extraction runs on the tenant's "memory" model. */
+  memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
   /** Tells people about a handoff a turn started. */
@@ -158,7 +160,8 @@ export function channelService(deps: {
 
   /** Everything `runTurn` needs to answer `customerId` on `channel`, except the message. Throws if the AI provider is not configured. */
   const turnInput = (channel: ChannelRow, live: LiveEmployee, customerId: string, conversationId: string | undefined) => {
-    const provider = ai.provider();
+    const tenant = { organizationId: channel.organizationId, workspaceId: channel.workspaceId };
+    const provider = ai.provider({ ...tenant, task: "chat" });
     // The channel may allow fewer tools than are granted; the executor refuses any other.
     const allowed = channel.allowedTools as string[] | null;
     const specs = toolRegistry.specs(live.tools.filter((t) => !allowed || allowed.includes(t)));
@@ -174,7 +177,7 @@ export function channelService(deps: {
       knowledge: live.sourceIds.length > 0 ? { embedder: ai.embedder(), sourceIds: live.sourceIds } : undefined,
       customer: {
         id: customerId,
-        memory: ai.memory(provider, ai.timeoutMs),
+        memory: ai.memory(tenant),
         onError: (err: unknown) => log.error({ err, channel: channel.kind }, "Updating customer memory failed"),
       },
       tools: specs.length > 0 ? { executor: ai.tools, specs } : undefined,
@@ -294,14 +297,7 @@ export function channelService(deps: {
     const live = await liveEmployee(channel.employeeId, inbound.from);
     if (!live) return reject("The employee is not published, or is paused");
 
-    let provider: AIProvider;
-    try {
-      provider = ai.provider();
-    } catch (err) {
-      log.error({ err }, "AI provider is misconfigured");
-      return updateMessage(log, rowId, { status: "FAILED", error: "The AI provider is not configured correctly on the server" });
-    }
-    const customerId = await ai.memory(provider, ai.timeoutMs).identify(scope, inbound.from);
+    const customerId = await ai.memory(scope).identify(scope, inbound.from);
     await updateMessage(log, rowId, { customerId });
     if (channel.kind === "whatsapp")
       whatsappOf(channel)

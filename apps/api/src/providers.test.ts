@@ -55,7 +55,7 @@ test("openrouter is the default provider and streams text, then usage", async ()
   assert.deepEqual(await run(env({ AI_MODEL: "vendor/model" })), [
     { type: "text", text: "Hel" },
     { type: "text", text: "lo" },
-    { type: "done", inputTokens: 9, outputTokens: 2 },
+    { type: "done", inputTokens: 9, outputTokens: 2, provider: "openrouter", model: "vendor/model" },
   ]);
   assert.equal(received?.authorization, "Bearer test-key");
   assert.equal(received?.body.model, "vendor/model");
@@ -125,6 +125,8 @@ test("openrouter tool calls: tools are sent, streamed call fragments are joined,
         // Unparseable arguments are passed on as text, for the executor's validation to refuse.
         { id: "call_b", name: "send_email", input: "not json" },
       ],
+      provider: "openrouter",
+      model: "openrouter/auto",
     },
   ]);
   assert.deepEqual(received?.body.tools, [

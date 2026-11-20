@@ -2,7 +2,7 @@
 // -> graders -> results -> failures. It runs as background jobs (apps/api/src/jobs.ts), never inside a
 // customer's turn, and it only writes evaluation tables: nothing here changes how employees answer.
 import { configOf, runTurn } from "@workforce/agent-runtime";
-import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
+import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { Prisma, prisma } from "@workforce/database";
 import {
   EVALUATION_CHANNEL,
@@ -30,7 +30,8 @@ export {
 } from "./improve.ts";
 
 export type EvaluationDeps = {
-  provider: () => AIProvider;
+  /** A provider bound to a route (tenant and task): the model router. */
+  provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
   timeoutMs: number;
 };
@@ -223,7 +224,7 @@ export async function runEvaluation(evaluationId: string, deps: EvaluationDeps):
       excerpts: await excerptsOf(scope, messages),
       expectations: testCase?.expectations ?? "",
       now: new Date(),
-      provider: () => (provider ??= deps.provider()),
+      provider: () => (provider ??= deps.provider({ ...scope, task: "evaluation" })),
       timeoutMs: deps.timeoutMs,
     };
 
@@ -301,7 +302,8 @@ export async function runCase(runId: string, caseId: string, deps: EvaluationDep
   });
   let failure: string | null = null;
   try {
-    const provider = deps.provider();
+    // A replay answers like production does, so it uses the "chat" model.
+    const provider = deps.provider({ ...scope, task: "chat" });
     const sourceIds = employee.knowledgeSources.map((k) => k.sourceId);
     const knowledge = sourceIds.length > 0 ? { embedder: deps.embedder(), sourceIds } : undefined;
     for (const message of (testCase.messages as CaseMessage[]).filter((m) => m.role === "customer")) {

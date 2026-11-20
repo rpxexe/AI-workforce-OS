@@ -7,7 +7,7 @@
 // (execution:node:attempt), so the second run finds or deduplicates the first one's effect; where
 // that is impossible it fails instead of acting twice. A manual retry is a new attempt and acts again.
 import { configOf, ROLLOUT_INCLUDE, runTurn, servedVersion, startHandoff, type HandoffNotice } from "@workforce/agent-runtime";
-import { AIProviderError, type AIProvider, type EmbeddingProvider } from "@workforce/ai-provider";
+import { AIProviderError, type AIProvider, type EmbeddingProvider, type Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
 import { normalizeCustomerId, type Branch, type NodeConfig, type NodeType } from "@workforce/shared";
@@ -27,9 +27,11 @@ export type PlaceCallRequest = {
 
 /** Everything the engine needs from outside, so the API and tests can supply their own. */
 export type EngineDeps = {
-  provider: () => AIProvider;
+  /** A provider bound to a route (tenant and task): the model router. */
+  provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
-  memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+  /** Customer memory for a tenant; extraction runs on the tenant's "memory" model. */
+  memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
   /** Network access for HTTP Request and Webhook nodes: `safeFetch` (public https only) in production. */
@@ -157,12 +159,12 @@ export const handlers: Handlers = {
     let provider: AIProvider;
     let embedder: EmbeddingProvider | undefined;
     try {
-      provider = deps.provider();
+      provider = deps.provider({ ...run.scope, task: "chat" });
       if (employee.knowledgeSources.length > 0) embedder = deps.embedder();
     } catch (err) {
       throw aiFailed(err);
     }
-    const memory = deps.memory(provider, deps.timeoutMs);
+    const memory = deps.memory(run.scope);
     const customerId = config.customer ? await memory.identify(run.scope, config.customer) : undefined;
     const specs = toolRegistry.specs(employee.tools.map((t) => t.tool));
     for await (const event of runTurn({
@@ -195,7 +197,7 @@ export const handlers: Handlers = {
     let text = "";
     try {
       const data = JSON.stringify(run.data, null, 1).slice(0, 30_000);
-      for await (const event of run.deps.provider().stream({
+      for await (const event of run.deps.provider({ ...run.scope, task: "workflow" }).stream({
         system: YES_NO_PROMPT,
         messages: [{ role: "user", content: `Question: ${config.question}\n\nWorkflow data (JSON):\n${data}` }],
         signal: AbortSignal.timeout(run.deps.timeoutMs),

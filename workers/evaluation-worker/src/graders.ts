@@ -222,7 +222,7 @@ export async function llm(config: EvaluatorConfig<"llm">, dimension: EvalDimensi
     signal: AbortSignal.timeout(input.timeoutMs),
   })) {
     if (event.type === "text") text += event.text;
-    else Object.assign(usage, { inputTokens: event.inputTokens, outputTokens: event.outputTokens });
+    else Object.assign(usage, { inputTokens: event.inputTokens, outputTokens: event.outputTokens, provider: event.provider ?? usage.provider, model: event.model ?? usage.model });
   }
   return { ...parseGrade(text), usage };
 }

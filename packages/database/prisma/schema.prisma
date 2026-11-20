@@ -32,6 +32,9 @@ model Organization {
   improvementSuggestions ImprovementSuggestion[]
   employeeRollouts   EmployeeRollout[]
   employeeReleases   EmployeeRelease[]
+  aiCredentials      AiCredential[]
+  aiModelPolicies    AiModelPolicy[]
+  aiUsage            AiUsage[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -1067,4 +1070,66 @@ model EmployeeRelease {
   createdAt       DateTime     @default(now())
 
   @@index([employeeId, createdAt])
+}
+
+// An organization's own key for a model provider (BYOAI). The key is sealed with AES-256-GCM under
+// AI_CREDENTIALS_KEY and never leaves the server: responses show only `keyHint`.
+model AiCredential {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  kind           String // openai | anthropic | gemini | openrouter | openai_compatible
+  baseUrl        String? // openai_compatible only
+  secret         String // sealed API key: v1:<iv>:<tag>:<ciphertext>, base64
+  keyHint        String // last 4 characters
+  // [{ id, contextTokens, inputPricePerM, outputPricePerM, tools }]: what the router needs to know about models it cannot look up
+  models         Json         @default("[]")
+  createdBy      String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, name])
+}
+
+// Which models a task may use in an organization, in order, and the limits on them. No row: the platform's provider.
+model AiModelPolicy {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  task             String // AI_TASKS; "default" covers tasks without their own row
+  primary          Json // { credentialId: string | null (platform), model }
+  fallbacks        Json         @default("[]")
+  maxCostUsd       Float?
+  timeoutMs        Int?
+  allowedProviders String[]
+  strategy         String       @default("ordered") // ordered | fastest | cheapest
+  updatedBy        String
+  updatedAt        DateTime     @updatedAt
+
+  @@unique([organizationId, task])
+}
+
+// One attempt at one model: which provider and model actually handled (or failed) a request, tokens, cost, latency.
+model AiUsage {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String?
+  task           String
+  requestId      String // shared by the attempts of one request; attempt > 1 is a fallback
+  attempt        Int
+  provider       String
+  model          String
+  credentialId   String? // null: the platform's provider
+  inputTokens    Int
+  outputTokens   Int
+  costUsd        Float? // reported by the provider, else estimated from known prices; null when unknown
+  latencyMs      Int
+  success        Boolean
+  errorKind      String?
+  error          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
 }
