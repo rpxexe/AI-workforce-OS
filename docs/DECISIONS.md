@@ -219,6 +219,31 @@ problem re-discovered.
 - **Escalation settings added later are filled with defaults when read** (`configOf`), so old versions stay immutable
   and still load in the form.
 
+- **Evaluation observes, never steers** (Phase 11). Grades live in their own tables, the runtime reads none of them, and
+  jobs grade after the fact. Acting on them (alerts, routing, prompt changes) is a later decision.
+- **Evaluators follow the versioning model, with one difference**: saving appends a version, but it becomes current at
+  once (no separate publish), because a grader changes no customer-facing behaviour. Every result names the version that
+  produced it, so changing a rubric never rewrites history.
+- **Three grader kinds**: deterministic checks for what the data already knows (tool outcomes, handoff timestamps, reply
+  latency), phrase rules for policy (cheap, explainable, testable), and LLM graders with a rubric for judgement
+  (correctness, grounding, tone, resolution). Policy rules are phrase lists, not regular expressions: admins' patterns run
+  on the server, and an escaped phrase list cannot be a slow regex.
+- **Automatic evaluation waits for a quiet conversation** (10 minutes, swept every 5), not every turn: one grading per
+  conversation state, and a duplicate state is refused by a unique key. The cost is LLM grader calls (four per
+  conversation with the defaults), so LLM evaluators can be turned off one by one.
+- **The evaluation worker is a package run as API jobs** (`workers/evaluation-worker`, through `jobs.ts` on Inngest or in
+  process), like every other background job. A separate process would need its own deployment; move it when grading
+  should scale apart from the API.
+- **Links are resolved when the evaluation is created**: the employee version and model of the last reply, and the
+  workflow version from data workflows already write (an AI Employee step's output, a Voice Call step's call idempotency
+  key). No new column on conversations.
+- **Regression replays go through `runTurn`** on a conversation with the `evaluation` channel, with the chosen version,
+  so knowledge retrieval, prompts and handoff logic are the production ones. They get no tools (a replay must not book or
+  send anything), no customer memory and no handoff notifications; the channel keeps them out of the inbox, analytics and
+  the sweep.
+- **Test apps never run the evaluation sweep**: tests share the database with development, and a global sweep would
+  queue evaluations of the developer's own conversations. Tests call `queueDueEvaluations` with their organization.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.

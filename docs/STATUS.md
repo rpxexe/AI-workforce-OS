@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-19, end of Phase 10.
+Last updated: 2026-11-20, end of Phase 11.
 
 ## Phases
 
@@ -17,7 +17,8 @@ Last updated: 2026-11-19, end of Phase 10.
 | 8 | Visual AI journey builder: React Flow editor, workflow versions, validation (incl. step references), publish/pause, delete (dependency check, confirmation) / restore / duplicate, background engine (Postgres job queue), runs with step records, retry, idempotency keys for steps with outside effects, 12 node types, the lead follow-up example | Built; the example runs end to end in the tests with a faked phone line and model; editor and runs pages checked in headless Edge (desktop and phone width). Started before the real phone call, because the owner pasted the phase |
 | 9 | Multichannel: channel abstraction (`@workforce/channels`, normalized inbound/outbound/delivery events), WhatsApp behind one provider interface (Meta Cloud API, Twilio, Telnyx; any of them at once, chosen per number: webhook verification, signatures, text/media/location/buttons, delivery receipts, rate-limit retries, 24-hour window errors, voice notes transcribed, documents read), web chat widget (anonymous or website-verified visitors, streaming), email (inbound webhook, replies in test mode), customers and memory shared across voice/WhatsApp/web chat/email, per-employee channel settings with per-channel tool limits, a message audit log for every channel including voice | Built; 11 tests with fake Meta, Twilio and Telnyx APIs and a fake model (phone call to WhatsApp to web chat with memory and summaries carried over); the widget checked in headless Edge (desktop and phone width). **No real WhatsApp message yet** on any provider, Channels card not tried in a browser |
 | 10 | Human + AI collaboration: handoff triggers (customer request, low confidence, policy risk, repeated failure, high-value customer, configured conditions and workflow steps, tool failure), conversation states (AI active, waiting for human, human active, resolved, reopened) with assignment and an unassigned queue, the AI silent while people have a conversation, agents replying on the customer's channel (test chat, web chat, WhatsApp, email), the AI Copilot (reply, summary, memory, citations, next action; logged apart from messages), handoff analytics and response times, the Conversations inbox and Analytics pages, handoff emails to the escalation contact | Built; 10 tests (`handoff.test.ts`, fake model, fake Graph API). **Inbox, conversation, Analytics pages and the new escalation settings not tried in a browser**; they typecheck, lint and build |
-| 11+ | Not started | Owner pastes the next phase prompt |
+| 11 | AI quality control: versioned evaluators (deterministic checks, LLM graders, phrase-based policy rules) over eight dimensions with built-in defaults, an asynchronous evaluation worker (sweep of quiet conversations every 5 min, manual "Evaluate now"), results linked to the conversation, employee version, model and workflow version, failures with quoted evidence, the quality overview (score, pass rate, trend, dimensions, employee and version comparison), regression datasets (cases copied from conversations or written by hand) replayed against an employee version without tools | Built; 6 tests (`quality.test.ts`, fake model). **Quality pages and the conversation Quality card not tried in a browser**; they typecheck, lint and build. **LLM graders not run against a real model yet** |
+| 12+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -30,6 +31,12 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 (`resend.test.ts`); **not yet sent through a real Resend account**.
 
 ## Open items
+
+- **Phase 11 in a browser and with a real model.** Open Quality (the eight built-in evaluators appear on first visit), have a
+  test chat, press "Evaluate now" on the conversation's Quality card, check the results, then wait 10 minutes after a
+  conversation to see the sweep grade it. Make a dataset, add that conversation to it, run it against the live and a draft
+  version. Each graded conversation costs four model calls with the default evaluators (correctness, grounding, tone,
+  resolution); turn LLM evaluators off on the Evaluators tab to save money.
 
 - **Phase 10 in a browser.** Sign in, open Conversations, test-chat an employee with escalation on ("Can I talk to a
   human?"), take it over from the inbox, reply, ask the Copilot, return it to the AI; check Analytics. The assignee list
@@ -85,6 +92,23 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Verified so far
 
+- Phase 11 (`quality.test.ts`, 6 tests, fake model): the grade parser (scores rounded, null = skipped, out-of-range and
+  non-JSON = error); phrase rules match whole words in any case, regex characters stay literal, forbid and require;
+  tool success, reply latency and escalation checks (an ignored request for a person fails, a handoff picked up in time
+  passes, one left open past the limit fails, nothing to judge = skipped). Evaluators: 8 defaults created once even on two
+  simultaneous first visits, saving adds version 2 and makes it current, the switch, validation paths, members 403 on
+  writes, other organizations 404. A test chat is not graded during the turn; "Evaluate now" (admins) queues it, the job
+  grades it with links to employee version 1 and model `fake-1`, the policy rule fails quoting "I guarantee", the tone
+  grader's finding and score are stored, tool and escalation checks are skipped, score = average of scored results,
+  failures counted; each LLM grader saw the rubric, the employee's configuration and the numbered transcript. Failures
+  list and dimension filter, the overview (trend days, dimensions, employee and version comparison, top failures),
+  evaluator 30-day stats. The sweep skips conversations not quiet long enough, grades once per conversation state (a
+  duplicate job does nothing), and again after a new message. The workflow version is found from an AI Employee step's
+  output. Datasets: case copied from a conversation, synthetic case, validation, run against v1: one case passes, one
+  whose second turn fails is FAILED with the reason, expectations reach the graders, no registry tools offered; replays
+  are on the `evaluation` channel and stay out of the inbox, the employee's test chats, the failures list and the sweep;
+  delete; isolation.
+
 - Live call transfer (`voice.test.ts`, simulated Twilio stream and signed webhooks): "Can I speak to a person
   please?" on a call to an employee with a transfer number: the handoff line, "I'm connecting you now. Please hold.",
   an INITIATED `CallTransfer` row (with conversation and handoff), then the provider is asked to dial with the result
@@ -128,7 +152,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
-- 98 API tests (Phase 10 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
+- 105 API tests (Phase 11 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
   greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
   through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
@@ -187,7 +211,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Deliberately not built yet
 
-Working hours (stored, not acted on), analytics beyond handoffs and response times, billing, model routing. In the
+Working hours (stored, not acted on), analytics beyond handoffs, response times and quality, billing, model routing. In the
 dashboard, Customers (the API has read routes) is a placeholder page. Packages other than `database`, `shared`,
 `ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows` and `channels`, and
 all three workers, are empty stubs.
@@ -225,6 +249,14 @@ than manual and webhook (no "customer created" or schedule events), automatic pe
 tools keep their own retry policy), Message channels other than email (Resend), SMS,
 an external CRM (CRM Update writes our customer memory), notifying anyone about a Human Handoff (it waits on the
 Runs tab), webhook signing, run history paging (newest 50), dark mode on the canvas.
+
+Quality, skipped: acting on grades (by design: nothing changes production behaviour), alerts on failures, sampling (every
+quiet conversation is graded), grading voice calls from the timed transcript (the conversation's messages are graded),
+tools in regression replays (none are offered, so a replay never books or sends), customer memory in replays, comparing
+two runs side by side (runs are listed with their scores), deleting evaluators (turn them off), reruns of a FAILED
+evaluation other than "Evaluate now", a run that crashed stays RUNNING, evaluator weights (every scored result counts
+equally), human labels on results, paging (newest 100 failures, 50 runs, 10,000 evaluations per overview period), the
+exact passages a reply was given (graders get the cited pages' current text).
 
 Not installed: Cloudflare R2, a Redis client, Prettier, Turborepo.
 
