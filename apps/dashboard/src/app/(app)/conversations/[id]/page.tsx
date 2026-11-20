@@ -288,7 +288,7 @@ export default withWorkspace(function ConversationPage({ workspace }) {
         </p>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <Card>
           <CardContent className="flex flex-col gap-4">
             <div role="log" aria-label="Conversation" className="flex h-[55vh] min-h-64 flex-col gap-3 overflow-y-auto pr-1">
@@ -304,7 +304,7 @@ export default withWorkspace(function ConversationPage({ workspace }) {
                     </span>
                     <p
                       className={cn(
-                        "max-w-[85%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap",
+                        "max-w-[85%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere",
                         e.role === "USER" ? "bg-muted" : e.role === "AGENT" ? "bg-primary text-primary-foreground" : "border bg-background",
                       )}
                     >

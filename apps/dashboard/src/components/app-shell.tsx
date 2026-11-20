@@ -7,17 +7,22 @@ import {
   ChartColumn,
   Check,
   ChevronsUpDown,
-  Route,
+  Laptop,
   LayoutDashboard,
   Lightbulb,
   MessagesSquare,
+  Moon,
+  Route,
   Settings,
   ShieldCheck,
+  Sun,
   Users,
   Workflow,
+  type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTheme } from "next-themes";
 import type { ReactNode } from "react";
 import { ErrorState } from "@/components/states";
 import {
@@ -25,6 +30,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -36,54 +43,129 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WorkspaceProvider, useWorkspaces } from "@/lib/workspace";
 
-const NAV = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/employees", label: "Employees", icon: Bot },
-  { href: "/customers", label: "Customers", icon: Users },
-  { href: "/conversations", label: "Conversations", icon: MessagesSquare },
-  { href: "/knowledge", label: "Knowledge", icon: BookOpen },
-  { href: "/workflows", label: "Workflows", icon: Workflow },
-  { href: "/analytics", label: "Analytics", icon: ChartColumn },
-  { href: "/quality", label: "Quality", icon: ShieldCheck },
-  { href: "/improvements", label: "Improvements", icon: Lightbulb },
-  { href: "/model-routing", label: "Model routing", icon: Route },
-  { href: "/settings", label: "Settings", icon: Settings },
+type NavItem = { href: string; label: string; icon: LucideIcon };
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "Overview",
+    items: [
+      { href: "/", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/analytics", label: "Analytics", icon: ChartColumn },
+    ],
+  },
+  {
+    label: "Workforce",
+    items: [
+      { href: "/employees", label: "Employees", icon: Bot },
+      { href: "/conversations", label: "Conversations", icon: MessagesSquare },
+      { href: "/customers", label: "Customers", icon: Users },
+      { href: "/knowledge", label: "Knowledge", icon: BookOpen },
+      { href: "/workflows", label: "Workflows", icon: Workflow },
+    ],
+  },
+  {
+    label: "Optimize",
+    items: [
+      { href: "/quality", label: "Quality", icon: ShieldCheck },
+      { href: "/improvements", label: "Improvements", icon: Lightbulb },
+      { href: "/model-routing", label: "Model routing", icon: Route },
+    ],
+  },
+];
+
+const SETTINGS: NavItem = { href: "/settings", label: "Settings", icon: Settings };
+const NAV = [...NAV_GROUPS.flatMap((group) => group.items), SETTINGS];
+
+const THEMES = [
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
+  { value: "system", label: "System", icon: Laptop },
 ] as const;
 
 const isActive = (pathname: string, href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
 
+function NavLink({ href, label, icon: Icon }: NavItem) {
+  const pathname = usePathname();
+  const { setOpenMobile } = useSidebar();
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton asChild isActive={isActive(pathname, href)} tooltip={label}>
+        <Link href={href} onClick={() => setOpenMobile(false)}>
+          <Icon aria-hidden />
+          <span>{label}</span>
+        </Link>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
+function Brand({ subtitle }: { subtitle: string }) {
+  return (
+    <>
+      <span className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+        <Bot className="size-4" aria-hidden />
+      </span>
+      <span className="grid flex-1 text-left text-sm leading-tight">
+        <span className="truncate font-semibold">AI Workforce OS</span>
+        <span className="truncate text-xs text-muted-foreground">{subtitle}</span>
+      </span>
+    </>
+  );
+}
+
 function WorkspaceSwitcher() {
   const state = useWorkspaces();
-  if (!state.workspace) return state.loading ? <Skeleton className="h-10 w-full" /> : null;
+  const { isMobile } = useSidebar();
+  if (!state.workspace) {
+    if (state.loading) return <Skeleton className="h-12 w-full" />;
+    return (
+      <SidebarMenuButton size="lg" asChild>
+        <Link href="/">
+          <Brand subtitle="No workspace" />
+        </Link>
+      </SidebarMenuButton>
+    );
+  }
   const { workspace, workspaces = [], select } = state;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <SidebarMenuButton className="border bg-background" aria-label={`Workspace: ${workspace.name}. Switch workspace`}>
-          <span className="flex min-w-0 flex-col text-left leading-tight">
-            <span className="text-xs text-muted-foreground">Workspace</span>
-            <span className="truncate font-medium">{workspace.name}</span>
-          </span>
+        <SidebarMenuButton
+          size="lg"
+          className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+          aria-label={`Workspace: ${workspace.name}. Switch workspace`}
+        >
+          <Brand subtitle={workspace.name} />
           <ChevronsUpDown className="ml-auto" aria-hidden />
         </SidebarMenuButton>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
+      <DropdownMenuContent
+        align="start"
+        side={isMobile ? "bottom" : "right"}
+        sideOffset={4}
+        className="w-(--radix-dropdown-menu-trigger-width) min-w-56"
+      >
+        <DropdownMenuLabel className="text-xs text-muted-foreground">Workspaces</DropdownMenuLabel>
         {workspaces.map((w) => (
           <DropdownMenuItem key={w.id} onSelect={() => select(w.id)}>
+            <span className="flex size-6 items-center justify-center rounded-md border text-xs font-medium" aria-hidden>
+              {w.name.charAt(0).toUpperCase()}
+            </span>
             <span className="truncate">{w.name}</span>
             {w.id === workspace.id && <Check className="ml-auto" aria-label="Current" />}
           </DropdownMenuItem>
@@ -97,22 +179,40 @@ function WorkspaceSwitcher() {
   );
 }
 
-function AppSidebar() {
-  const pathname = usePathname();
-  const { setOpenMobile } = useSidebar();
+function ThemeMenu() {
+  const { theme, setTheme } = useTheme();
+  const { isMobile } = useSidebar();
 
   return (
-    <Sidebar>
-      <SidebarHeader className="gap-3">
-        <Link href="/" className="flex items-center gap-2 px-2 pt-1 font-semibold tracking-tight">
-          <span className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Bot className="size-4" aria-hidden />
-          </span>
-          AI Workforce OS
-        </Link>
-        <div className="px-1">
-          <OrganizationSwitcher hidePersonal afterSelectOrganizationUrl="/" afterCreateOrganizationUrl="/" />
-        </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <SidebarMenuButton tooltip="Theme">
+          {/* Picked by the html class, not by `theme`, so the server render already shows the right icon. */}
+          <Sun className="dark:hidden" aria-hidden />
+          <Moon className="hidden dark:block" aria-hidden />
+          <span>Theme</span>
+        </SidebarMenuButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" side={isMobile ? "top" : "right"} sideOffset={4} className="min-w-40">
+        <DropdownMenuRadioGroup value={theme} onValueChange={setTheme}>
+          {THEMES.map(({ value, label, icon: Icon }) => (
+            <DropdownMenuRadioItem key={value} value={value}>
+              <Icon aria-hidden />
+              {label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function AppSidebar() {
+  const { state, isMobile } = useSidebar();
+
+  return (
+    <Sidebar collapsible="icon" variant="inset">
+      <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
             <WorkspaceSwitcher />
@@ -121,29 +221,33 @@ function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {NAV.map(({ href, label, icon: Icon }) => (
-                <SidebarMenuItem key={href}>
-                  <SidebarMenuButton asChild isActive={isActive(pathname, href)}>
-                    <Link href={href} onClick={() => setOpenMobile(false)}>
-                      <Icon aria-hidden />
-                      <span>{label}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {NAV_GROUPS.map((group) => (
+          <SidebarGroup key={group.label} className="py-0.5">
+            {/* -mt-7 matches h-7 so the hidden label takes no space when collapsed. */}
+            <SidebarGroupLabel className="h-7 group-data-[collapsible=icon]:-mt-7">{group.label}</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {group.items.map((item) => (
+                  <NavLink key={item.href} {...item} />
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
       </SidebarContent>
 
       <SidebarFooter>
-        <div className="px-2 py-1">
-          <UserButton showName />
-        </div>
+        <SidebarMenu>
+          <NavLink {...SETTINGS} />
+          <SidebarMenuItem>
+            <ThemeMenu />
+          </SidebarMenuItem>
+          <SidebarMenuItem className="flex h-10 items-center px-1.5 group-data-[collapsible=icon]:px-0">
+            <UserButton showName={state === "expanded" || isMobile} />
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
   );
 }
@@ -167,7 +271,7 @@ function ChooseOrganization() {
   );
 }
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, defaultOpen }: { children: ReactNode; defaultOpen: boolean }) {
   const { isLoaded, orgId } = useAuth();
   const pathname = usePathname();
   const title = NAV.find(({ href }) => isActive(pathname, href))?.label;
@@ -176,19 +280,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <WorkspaceProvider key={orgId ?? ""} orgId={orgId ?? null}>
       <TooltipProvider>
-        <SidebarProvider>
-        <AppSidebar />
-        <SidebarInset>
-          <header className="sticky top-0 z-10 flex h-12 shrink-0 items-center gap-2 border-b bg-background px-4">
-            <SidebarTrigger />
-            <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
-            <span className="text-sm text-muted-foreground">{title}</span>
-          </header>
-          <main className="mx-auto w-full max-w-6xl flex-1 p-4 md:p-6">
-            {isLoaded && !orgId ? <ChooseOrganization /> : <WorkspaceGate>{children}</WorkspaceGate>}
-          </main>
-        </SidebarInset>
-      </SidebarProvider>
+        <SidebarProvider defaultOpen={defaultOpen}>
+          <AppSidebar />
+          {/* min-w-0: lets truncated text shrink instead of widening the page past the viewport. */}
+          <SidebarInset className="min-w-0">
+            <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur md:rounded-t-xl">
+              <SidebarTrigger className="-ml-1" />
+              <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+              <span className="text-sm font-medium">{title}</span>
+              <div className="ml-auto">
+                <OrganizationSwitcher hidePersonal afterSelectOrganizationUrl="/" afterCreateOrganizationUrl="/" />
+              </div>
+            </header>
+            <div className="mx-auto w-full max-w-6xl flex-1 p-4 md:p-6">
+              {isLoaded && !orgId ? <ChooseOrganization /> : <WorkspaceGate>{children}</WorkspaceGate>}
+            </div>
+          </SidebarInset>
+        </SidebarProvider>
       </TooltipProvider>
     </WorkspaceProvider>
   );
