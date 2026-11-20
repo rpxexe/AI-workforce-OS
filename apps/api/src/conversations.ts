@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { runTurn, toMessage, type HandoffNotice } from "@workforce/agent-runtime";
-import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
+import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
 import { toolRegistry, type ToolExecutor } from "@workforce/tools";
@@ -34,9 +34,11 @@ export function conversationRoutes(
   app: FastifyInstance,
   authenticate: Authenticate,
   ai: {
-    provider: () => AIProvider;
+    /** A provider bound to a route (tenant and task): the model router. */
+    provider: (route: Route) => AIProvider;
     embedder: () => EmbeddingProvider;
-    memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+    /** Customer memory for a tenant; extraction runs on the tenant's "memory" model. */
+    memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
     tools: ToolExecutor;
     timeoutMs: number;
     onHandoff?: (notice: HandoffNotice) => void;
@@ -112,7 +114,7 @@ export function conversationRoutes(
     let provider: AIProvider;
     let knowledge: { embedder: EmbeddingProvider; sourceIds: string[] } | undefined;
     try {
-      provider = ai.provider();
+      provider = ai.provider({ organizationId: scope.organizationId, workspaceId: scope.workspaceId, task: "chat" });
       // The embedder is only needed, and only has to be configured, when knowledge is attached.
       if (sourceIds.length > 0) knowledge = { embedder: ai.embedder(), sourceIds };
     } catch (err) {
@@ -120,7 +122,7 @@ export function conversationRoutes(
       throw httpError(503, "The AI provider is not configured correctly on the server.");
     }
 
-    const memory = ai.memory(provider, ai.timeoutMs);
+    const memory = ai.memory(scope);
     if (!conversationId && externalId) customerId = await memory.identify(scope, externalId);
 
     // Stop paying for a reply nobody will read when the browser goes away.

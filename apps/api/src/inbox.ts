@@ -300,7 +300,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
     let provider: AIProvider;
     let knowledge: { embedder: EmbeddingProvider; sourceIds: string[] } | undefined;
     try {
-      provider = ai.provider();
+      provider = ai.provider({ ...within(scope), task: "copilot" });
       if (sourceIds.length > 0) knowledge = { embedder: ai.embedder(), sourceIds };
     } catch (err) {
       req.log.error(err, "AI provider is misconfigured");
@@ -314,7 +314,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
         requestedBy: scope.userId,
         employee: configOf(version),
         knowledge,
-        memory: ai.memory(provider, ai.timeoutMs),
+        memory: ai.memory(within(scope)),
         timeoutMs: ai.timeoutMs,
       });
     } catch (err) {

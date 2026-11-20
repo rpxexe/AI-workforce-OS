@@ -325,6 +325,8 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
     const chat: ChatMessage[] = [...context.messages];
     const toolsUsed: MessageTool[] = [];
     const usage = { inputTokens: 0, outputTokens: 0 };
+    // Who wrote the reply: the router may answer a step with a fallback model, so this comes from each step's result.
+    let handledBy = { provider: provider.name, model: provider.model };
     let reply = "";
     for (let step = 1; step <= MAX_STEPS; step++) {
       const offered = step < MAX_STEPS && specs.length > 0 ? specs : undefined;
@@ -344,6 +346,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
           usage.outputTokens += event.outputTokens;
           calls = event.toolCalls ?? [];
           raw = event.raw;
+          handledBy = { provider: event.provider ?? provider.name, model: event.model ?? provider.model };
           finished = true;
         }
       }
@@ -393,8 +396,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
     if (reply.trim() === "") throw new AIProviderError("unavailable", "The provider returned an empty reply");
 
     yield* save(reply, handoff, {
-      provider: provider.name,
-      model: provider.model,
+      ...handledBy,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       latencyMs: Date.now() - startedAt.getTime(),

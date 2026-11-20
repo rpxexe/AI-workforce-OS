@@ -56,6 +56,7 @@ export async function suggest(input: CopilotInput): Promise<CopilotSuggestion> {
 
   let text = "";
   const usage = { inputTokens: 0, outputTokens: 0 };
+  let handledBy = { provider: provider.name, model: provider.model };
   for await (const event of provider.stream({
     system: `${COPILOT_PROMPT}\n\n${systemPrompt(employee, matches, memory, false, conversation.channel)}`,
     messages: [{ role: "user", content: `The conversation so far:\n\n${transcript}` }],
@@ -65,6 +66,7 @@ export async function suggest(input: CopilotInput): Promise<CopilotSuggestion> {
     else {
       usage.inputTokens = event.inputTokens;
       usage.outputTokens = event.outputTokens;
+      handledBy = { provider: event.provider ?? provider.name, model: event.model ?? provider.model };
     }
   }
   if (!text.trim()) throw new AIProviderError("unavailable", "The provider returned an empty suggestion");
@@ -107,8 +109,7 @@ export async function suggest(input: CopilotInput): Promise<CopilotSuggestion> {
       nextAction: parsed.nextAction.trim(),
       memory: facts,
       citations,
-      provider: provider.name,
-      model: provider.model,
+      ...handledBy,
       ...usage,
       latencyMs: Date.now() - startedAt,
     },

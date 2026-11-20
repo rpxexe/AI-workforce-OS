@@ -40,6 +40,11 @@ export type ProviderEvent =
       outputTokens: number;
       toolCalls?: ToolCall[];
       raw?: { provider: string; data: unknown };
+      /** Who actually answered. Set by the providers and the router; record these, not the router's own name. */
+      provider?: string;
+      model?: string;
+      /** The cost the provider reported for this call, in US dollars, when it reports one (OpenRouter does). */
+      costUsd?: number;
     };
 
 export interface AIProvider {
@@ -62,7 +67,16 @@ export class AIProviderError extends Error {
   }
 }
 
-export type ProviderSettings = { model?: string; maxOutputTokens: number };
+export type ProviderSettings = {
+  model?: string;
+  maxOutputTokens: number;
+  /** An organization's own key (BYOAI); the server's .env key otherwise. */
+  apiKey?: string;
+  /** Only for OpenAI-compatible services; overrides the vendor's address. */
+  baseUrl?: string;
+  /** The network the provider uses; custom base URLs get `safeFetch` (public https only). */
+  fetch?: typeof fetch;
+};
 
 /** Turns text into vectors for semantic search. Fails with `AIProviderError`, like `AIProvider`. */
 export interface EmbeddingProvider {

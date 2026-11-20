@@ -1,5 +1,5 @@
 import { ROLLOUT_INCLUDE, servedVersion } from "@workforce/agent-runtime";
-import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
+import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
 import {
@@ -37,9 +37,11 @@ export type VoiceConfig = {
 };
 
 type Ai = {
-  provider: () => AIProvider;
+  /** A provider bound to a route (tenant and task): the model router. */
+  provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
-  memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+  /** Customer memory for a tenant; extraction runs on the tenant's "memory" model. */
+  memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
 };
@@ -154,7 +156,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       let call = await prisma.call.findUnique({ where: { providerCallId: sid } });
       if (!call) {
         const scope = { organizationId: number.organizationId, workspaceId: number.workspaceId };
-        const customerId = from ? await ai.memory(ai.provider(), ai.timeoutMs).identify(scope, from) : null;
+        const customerId = from ? await ai.memory(scope).identify(scope, from) : null;
         call = await prisma.call.create({
           data: {
             ...scope,
@@ -358,7 +360,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     const telephony = providerOf(v, from.provider);
     const urls = v.urls(telephony);
 
-    const customerId = await ai.memory(ai.provider(), ai.timeoutMs).identify(scope, body.to);
+    const customerId = await ai.memory(scope).identify(scope, body.to);
     const call = await prisma.call.create({
       data: {
         ...within(scope),

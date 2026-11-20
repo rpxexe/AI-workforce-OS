@@ -36,8 +36,8 @@ const toParam = (m: ChatMessage): Anthropic.MessageParam => {
   };
 };
 
-/** Credentials come from `ANTHROPIC_API_KEY` (or the SDK's other sources), never from code. */
-export function anthropicProvider({ model = "claude-opus-5-5", maxOutputTokens }: ProviderSettings): AIProvider {
+/** Credentials: an organization's own key (BYOAI), else `ANTHROPIC_API_KEY` (or the SDK's other sources), never from code. */
+export function anthropicProvider({ model = "claude-opus-5-5", maxOutputTokens, apiKey }: ProviderSettings): AIProvider {
   // Created on first use so a missing key fails the chat request, not the whole server.
   let client: Anthropic | undefined;
 
@@ -46,7 +46,7 @@ export function anthropicProvider({ model = "claude-opus-5-5", maxOutputTokens }
     model,
     async *stream({ system, messages, tools, signal }) {
       try {
-        client ??= new Anthropic();
+        client ??= apiKey ? new Anthropic({ apiKey }) : new Anthropic();
         const stream = client.messages.stream(
           // Caches the conversation so far, so each turn re-reads earlier turns at a fraction of the price.
           {
@@ -89,6 +89,8 @@ export function anthropicProvider({ model = "claude-opus-5-5", maxOutputTokens }
           inputTokens: input_tokens + (cache_creation_input_tokens ?? 0) + (cache_read_input_tokens ?? 0),
           outputTokens: output_tokens,
           ...(toolCalls.length > 0 && { toolCalls, raw: { provider: "anthropic", data: final.content } }),
+          provider: "anthropic",
+          model,
         };
       } catch (err) {
         throw toProviderError(err);

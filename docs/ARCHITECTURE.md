@@ -7,7 +7,7 @@ apps/api          Fastify 5 + WebSocket, port 4000. Runs TypeScript directly on 
 apps/dashboard    Next.js 16 (App Router), Tailwind 4, shadcn/ui (radix-nova), Clerk. Port 3000.
 packages/database Prisma 7 schema, migrations, generated client, exported `prisma`.
 packages/shared   Zod schemas and types used by both API and dashboard.
-packages/ai-provider   `AIProvider` interface, `providerFromEnv()`, OpenRouter (default) and Anthropic.
+packages/ai-provider   `AIProvider` interface, providers (OpenRouter default, Anthropic, OpenAI, Gemini, any OpenAI-compatible), the model catalog and the model router (`createRouter`).
 packages/agent-runtime `runTurn()`: context builder, provider call, timeout, conversation storage.
 packages/knowledge     Parsing, chunking, embedding and vector search (`processDocument`, `retrieve`).
 packages/memory        Customer memory: `MemoryService` (`identify`, `recall`, `remember`), extraction + validation.
@@ -112,6 +112,14 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   `status` active, promoted or rolled_back; `kpi`; `suggestionId`; `activeEmployeeId` (unique, set only while active: one
   active rollout per employee). `EmployeeRelease`: every move of the live pointer (`action` publish, rollback, promote;
   `version`, `previousVersion`, `by`).
+- `AiCredential`: an organization's own provider key (BYOAI): `kind` (openai, anthropic, gemini, openrouter, openai_compatible),
+  `baseUrl` (custom only), `secret` (AES-256-GCM sealed under `AI_CREDENTIALS_KEY`, never returned), `keyHint` (last 4), `models`
+  (context and prices the router cannot look up). Name unique per organization.
+- `AiModelPolicy`: per organization and task (`AI_TASKS`; `default` covers tasks without a row): `primary` and `fallbacks`
+  ({ credentialId | null = platform, model }), `maxCostUsd`, `timeoutMs`, `allowedProviders`, `strategy` (ordered, fastest, cheapest).
+- `AiUsage`: one row per attempt at one model: `task`, `requestId` (shared by a request's attempts; attempt > 1 = fallback),
+  `provider`, `model`, `credentialId`, tokens, `costUsd` (provider-reported, else estimated, else null), `latencyMs`, `success`,
+  `errorKind`, `error`.
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -234,6 +242,13 @@ POST  .../employees/:id/regression-suite        admin; creates the suite if miss
 POST  .../employees/:id/rollouts                admin; { version, percent, kpi }; 201; 409 if one runs or the suggestion is unapproved
 PATCH .../employees/:id/rollouts/:rolloutId     admin; { action: set_percent (percent) | promote | rollback }
 POST  .../employees/:id/rollback                admin; publishes the version live before the current one; 409 during a rollout
+GET   /ai/settings                              member; platform provider and model, credentials (no keys), policies, canStoreKeys
+POST  /ai/credentials                           admin; credentialSchema; 201; 503 without AI_CREDENTIALS_KEY; custom base URLs must be public https
+PUT   /ai/credentials/:id                       admin; blank apiKey keeps the stored key; the provider cannot change
+DELETE /ai/credentials/:id                      admin; 409 while a policy uses it; 204
+PUT   /ai/policies/:task                        admin; modelPolicySchema; credentials must be the organization's (400)
+DELETE /ai/policies/:task                       admin; back to the default policy / the platform; 204
+GET   /ai/usage                                 member; ?days= (default 30); totals, by model, by task, newest 100 calls
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -556,6 +571,36 @@ employee rollback -> publishes rollbackTarget: the previousVersion of the newest
   (`components/employees/employee-releases.tsx`: rollout panel or start, roll back to the previous version, regression suite,
   history) and `/employees/[id]/compare` (two versions, field-by-field line diff, `components/improvements/config-diff.tsx`).
 
+## Model routing and BYOAI (Phase 13)
+
+```
+caller (runTurn's caller, memory, Copilot, graders, improvement, workflow condition)
+  -> ai.provider({ organizationId, workspaceId, task })        a provider bound to a route (apps/api/src/ai.ts)
+  -> router.stream(request)                                     packages/ai-provider/src/router.ts
+       plan: the task's policy, else the "default" policy, else the platform provider alone (planFor)
+             targets = primary + fallbacks, each a concrete provider (the platform's, or one built from a sealed key)
+       filter: allowed providers, tools needed -> model can call tools, estimated tokens (chars / 4) + 1024 <= context,
+               estimated cost <= maxCostUsd (unknown price = skipped when a limit is set); duplicates dropped
+       order:  ordered | fastest (measured average latency; unmeasured first once) | cheapest; models that failed for
+               rate_limit / unavailable / timeout in the last 30 s go last; at most 3 attempts
+       try:    each target once, with the policy timeout per attempt; fall back only before any text reached the caller,
+               and not on a refusal or when the caller cancelled
+       record: one AiUsage row per attempt (not awaited); `done` carries provider, model and costUsd of who answered
+  -> runTurn / Copilot / graders store the `done` event's provider and model, so replies name the model that wrote them
+```
+
+- Tasks: chat (test chat, channels, workflow AI Employee steps, regression replays), voice, memory, copilot, evaluation,
+  improvement, workflow (condition steps). Embeddings are not routed (the vector column fixes the model).
+- No policy behaves exactly as before Phase 13: the platform provider from `.env` (`AI_PROVIDER`, `AI_MODEL`).
+- Keys: write-only. Sealed with AES-256-GCM (key = sha256 of `AI_CREDENTIALS_KEY`), opened per call in the planner, passed to
+  the provider; responses carry `keyHint` only. Custom (OpenAI-compatible) base URLs must be public https at save time, and
+  are called through `safeFetch` (public addresses only, no redirects).
+- Providers: OpenAI (`max_completion_tokens`), Gemini (its OpenAI-compatible endpoint), OpenRouter and custom endpoints share
+  `openai-compatible.ts`; Anthropic uses its SDK with the organization's key. OpenRouter's `usage.cost` is used as the real cost.
+- Prices: Anthropic's current models are built in (`catalog.ts`); other models' prices and context come from the credential's
+  `models` list. `buildApp({ credentialsKey, byoProvider })` lets tests set the secret and fake the providers built from keys.
+- Dashboard: `/ai-models` (tabs Policies, Keys, Usage; `components/ai/`).
+
 ## Agent runtime
 
 ```
@@ -572,8 +617,8 @@ API route (conversations.ts): authorize, pick the employee version, open the SSE
 - Every channel must go through `runTurn`; it is the only code that calls a provider or writes
   conversation rows. The caller authorizes first and passes tenant ids the runtime trusts.
 - A turn that fails, times out (`AI_TIMEOUT_MS`) or is cancelled by the browser saves nothing.
-- Providers live in `packages/ai-provider/src`, registered in `PROVIDERS` in `index.ts` and chosen
-  by `AI_PROVIDER`. `openai-compatible.ts` serves any OpenAI-style endpoint (OpenRouter uses it);
+- Providers live in `packages/ai-provider/src`, registered in `PROVIDERS` in `index.ts`; the platform's is chosen
+  by `AI_PROVIDER`, and the router (above) chooses per request. `openai-compatible.ts` serves any OpenAI-style endpoint (OpenRouter uses it);
   `anthropic.ts` uses the Anthropic SDK. They throw only `AIProviderError` (kind: config, auth,
   billing, rate_limit, refused, unavailable, invalid); the runtime maps each kind to a message safe to show.
 - The stream is server-sent events carrying `ChatStreamEvent` (`packages/shared/src/conversation.ts`).

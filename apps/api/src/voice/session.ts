@@ -4,7 +4,7 @@
 //   phone audio -> STT -> caller turn -> runTurn (LLM, tools) -> text -> Speaker (TTS) -> phone
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { runTurn, type HandoffNotice } from "@workforce/agent-runtime";
-import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
+import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
 import type { STTEvent, STTProvider, STTStream } from "@workforce/stt";
@@ -29,9 +29,11 @@ export type SessionDeps = {
   telephony: TelephonyProvider;
   stt: STTProvider;
   tts: TTSProvider;
-  provider: () => AIProvider;
+  /** A provider bound to a route (tenant and task): the model router. */
+  provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
-  memory: (provider: AIProvider, timeoutMs: number) => MemoryService;
+  /** Customer memory for a tenant; extraction runs on the tenant's "memory" model. */
+  memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
   onHandoff?: (notice: HandoffNotice) => void;
@@ -122,12 +124,13 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
 
   const employee = configOf(version);
   const scope = { organizationId: call.organizationId, workspaceId: call.workspaceId };
-  const provider = deps.provider();
+  // Phone calls have their own task, so an organization can route them to a fast model.
+  const provider = deps.provider({ ...scope, task: "voice" });
   const sourceIds = call.employee.knowledgeSources.map((k) => k.sourceId);
   const knowledge = sourceIds.length > 0 ? { embedder: deps.embedder(), sourceIds } : undefined;
   const specs = toolRegistry.specs(call.employee.tools.map((t) => t.tool));
   const tools = specs.length > 0 ? { executor: deps.tools, specs } : undefined;
-  const memory = deps.memory(provider, deps.timeoutMs);
+  const memory = deps.memory(scope);
 
   const answeredAt = call.answeredAt ?? new Date();
   await prisma.call.update({

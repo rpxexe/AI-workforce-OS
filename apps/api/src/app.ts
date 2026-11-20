@@ -6,6 +6,7 @@ import {
   providerFromEnv,
   type AIProvider,
   type EmbeddingProvider,
+  type Route,
 } from "@workforce/ai-provider";
 import { resendFromEnv, testEmailSender, whatsappProvidersFromEnv, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { prisma } from "@workforce/database";
@@ -20,6 +21,7 @@ import { HANDOFF_TRIGGER_LABELS, placeCallSchema, type ApiError, type HealthResp
 import { createWorkflowEngine, StepError } from "@workforce/workflows";
 import Fastify from "fastify";
 import { ZodError } from "zod";
+import { aiRoutes, credentialsSecretFromEnv, modelRouter, type Platform, type ProviderFactory } from "./ai.ts";
 import { clerkAuthenticate, type Authenticate } from "./auth.ts";
 import { channelRoutes } from "./channels/routes.ts";
 import { channelService } from "./channels/service.ts";
@@ -64,6 +66,10 @@ export async function buildApp(
     /** WhatsApp providers; defaults to every one .env has credentials for. */
     whatsapp?: WhatsAppProvider[];
     aiTimeoutMs?: number;
+    /** Seals organizations' provider keys (BYOAI); defaults to AI_CREDENTIALS_KEY. null: keys cannot be stored. */
+    credentialsKey?: string | null;
+    /** Builds providers from organizations' keys; tests pass fakes. */
+    byoProvider?: ProviderFactory;
     /**
      * Background jobs: "inngest" or "inline" (in this process), or a factory tests use to capture the job
      * definitions. Defaults to Inngest when INNGEST_EVENT_KEY or INNGEST_DEV is set (never for test apps).
@@ -145,6 +151,15 @@ export async function buildApp(
   // Built on first use, so a missing AI key fails a chat request and not the whole server.
   let provider = options.provider;
   let embedder = options.embedder;
+  /** The platform's provider: the default for organizations without a model policy, and a target policies may name. */
+  const platform: Platform = {
+    kind: options.provider?.name ?? (process.env.AI_PROVIDER || "openrouter"),
+    get: (model) => options.provider ?? (model ? providerFromEnv({ ...process.env, AI_MODEL: model }) : (provider ??= providerFromEnv())),
+  };
+  const credentialsKey = options.credentialsKey !== undefined ? options.credentialsKey : credentialsSecretFromEnv();
+  // Every model call in the API goes through the router: the tenant's policy, fallback, usage records.
+  const router = modelRouter(platform, credentialsKey, app.log, options.byoProvider);
+  aiRoutes(app, authenticate, platform, credentialsKey);
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
   knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }));
   // Email: Resend when RESEND_API_KEY is set; otherwise test mode everywhere (logged, not delivered).
@@ -188,12 +203,14 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     mailer.send(email).catch((err: unknown) => app.log.error({ err, conversationId: n.conversationId }, "Handoff email failed"));
   };
   const learn = options.memory ?? memoryService;
+  const timeoutMs = options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000);
   const ai = {
-    provider: () => (provider ??= providerFromEnv()),
+    provider: (route: Route) => router.provider(route),
     embedder: getEmbedder,
-    // With a queue, learning from an exchange is a job (memory/exchange.saved) that loads it by id.
-    memory: (p: AIProvider, timeoutMs: number): MemoryService => {
-      const service = learn(p, timeoutMs);
+    // Extraction runs on the tenant's "memory" model. With a queue, learning from an exchange is a job
+    // (memory/exchange.saved) that loads it by id.
+    memory: ({ organizationId, workspaceId }: { organizationId: string; workspaceId: string }): MemoryService => {
+      const service = learn(router.provider({ organizationId, workspaceId, task: "memory" }), timeoutMs);
       return {
         ...service,
         remember: async (scope) => {
@@ -205,7 +222,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       };
     },
     tools,
-    timeoutMs: options.aiTimeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 60_000),
+    timeoutMs,
     onHandoff,
   };
   conversationRoutes(app, authenticate, ai);
@@ -283,7 +300,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
             orderBy: { createdAt: "desc" },
           }));
         if (!reply || !question) return;
-        await learn(ai.provider(), ai.timeoutMs).remember({ ...scope, customerMessage: question.content, reply: reply.content });
+        await ai.memory(scope).remember({ ...scope, customerMessage: question.content, reply: reply.content });
       },
     },
     "channel/message.received": {

@@ -7,6 +7,7 @@ import {
   ChartColumn,
   Check,
   ChevronsUpDown,
+  Cpu,
   LayoutDashboard,
   Lightbulb,
   MessagesSquare,
@@ -57,6 +58,7 @@ const NAV = [
   { href: "/analytics", label: "Analytics", icon: ChartColumn },
   { href: "/quality", label: "Quality", icon: ShieldCheck },
   { href: "/improvements", label: "Improvements", icon: Lightbulb },
+  { href: "/ai-models", label: "AI models", icon: Cpu },
   { href: "/settings", label: "Settings", icon: Settings },
 ] as const;
 

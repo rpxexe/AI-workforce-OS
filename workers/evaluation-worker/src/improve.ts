@@ -2,7 +2,7 @@
 // change to the employee's instructions -> an ImprovementSuggestion with its evidence. It writes suggestions
 // only: creating the version, testing, approving and rolling out are people's actions (apps/api/src/improvements.ts).
 import { configOf } from "@workforce/agent-runtime";
-import type { AIProvider } from "@workforce/ai-provider";
+import type { AIProvider, Route } from "@workforce/ai-provider";
 import { Prisma, prisma } from "@workforce/database";
 import {
   EVAL_DIMENSION_LABELS,
@@ -127,7 +127,7 @@ async function evidenceOf(pattern: FailurePattern, days: number): Promise<Sugges
   };
 }
 
-export type ImproveDeps = { provider: () => AIProvider; timeoutMs: number; onError?: (err: unknown, pattern: FailurePattern) => void };
+export type ImproveDeps = { provider: (route: Route) => AIProvider; timeoutMs: number; onError?: (err: unknown, pattern: FailurePattern) => void };
 
 /**
  * Finds failure patterns in the workspace and writes one suggestion per pattern the model can propose a change
@@ -148,7 +148,7 @@ export async function analyzeWorkspace(scope: Scope, deps: ImproveDeps, { days =
       if (!check) continue;
       const base = configOf(version);
       let text = "";
-      for await (const event of deps.provider().stream({
+      for await (const event of deps.provider({ ...scope, task: "improvement" }).stream({
         system: IMPROVE_PROMPT,
         messages: [{ role: "user", content: briefing(base, check, evidence) }],
         signal: AbortSignal.timeout(deps.timeoutMs),
