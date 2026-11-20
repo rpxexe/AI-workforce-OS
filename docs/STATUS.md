@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-20, end of Phase 11.
+Last updated: 2026-11-20, end of Phase 12.
 
 ## Phases
 
@@ -18,7 +18,8 @@ Last updated: 2026-11-20, end of Phase 11.
 | 9 | Multichannel: channel abstraction (`@workforce/channels`, normalized inbound/outbound/delivery events), WhatsApp behind one provider interface (Meta Cloud API, Twilio, Telnyx; any of them at once, chosen per number: webhook verification, signatures, text/media/location/buttons, delivery receipts, rate-limit retries, 24-hour window errors, voice notes transcribed, documents read), web chat widget (anonymous or website-verified visitors, streaming), email (inbound webhook, replies in test mode), customers and memory shared across voice/WhatsApp/web chat/email, per-employee channel settings with per-channel tool limits, a message audit log for every channel including voice | Built; 11 tests with fake Meta, Twilio and Telnyx APIs and a fake model (phone call to WhatsApp to web chat with memory and summaries carried over); the widget checked in headless Edge (desktop and phone width). **No real WhatsApp message yet** on any provider, Channels card not tried in a browser |
 | 10 | Human + AI collaboration: handoff triggers (customer request, low confidence, policy risk, repeated failure, high-value customer, configured conditions and workflow steps, tool failure), conversation states (AI active, waiting for human, human active, resolved, reopened) with assignment and an unassigned queue, the AI silent while people have a conversation, agents replying on the customer's channel (test chat, web chat, WhatsApp, email), the AI Copilot (reply, summary, memory, citations, next action; logged apart from messages), handoff analytics and response times, the Conversations inbox and Analytics pages, handoff emails to the escalation contact | Built; 10 tests (`handoff.test.ts`, fake model, fake Graph API). **Inbox, conversation, Analytics pages and the new escalation settings not tried in a browser**; they typecheck, lint and build |
 | 11 | AI quality control: versioned evaluators (deterministic checks, LLM graders, phrase-based policy rules) over eight dimensions with built-in defaults, an asynchronous evaluation worker (sweep of quiet conversations every 5 min, manual "Evaluate now"), results linked to the conversation, employee version, model and workflow version, failures with quoted evidence, the quality overview (score, pass rate, trend, dimensions, employee and version comparison), regression datasets (cases copied from conversations or written by hand) replayed against an employee version without tools | Built; 6 tests (`quality.test.ts`, fake model). **Quality pages and the conversation Quality card not tried in a browser**; they typecheck, lint and build. **LLM graders not run against a real model yet** |
-| 12+ | Not started | Owner pastes the next phase prompt |
+| 12 | Controlled continuous improvement: failure patterns (an evaluator failing on an employee's live version) -> a model-proposed change to instructions, personality or goals with its evidence -> a person creates the proposed version and replays the employee's regression suite on both versions (fixed and broken cases) -> human approval -> percentage rollout (A/B, sticky per customer across channels) with a chosen KPI compared between versions -> promote or roll back; rollback to the previous live version; a release log; version comparison (field-by-field line diff); the Improvements pages and the employee Releases card | Built; 4 tests (`improvement.test.ts`, fake model). **Improvements pages, Releases card and Compare versions not tried in a browser**; they typecheck, lint and build. **The proposal prompt has not run against a real model yet** |
+| 13+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -31,6 +32,12 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 (`resend.test.ts`); **not yet sent through a real Resend account**.
 
 ## Open items
+
+- **Phase 12 in a browser and with a real model.** Get an evaluator failing at least 3 times on a live version (Phase 11
+  steps; the tone or policy evaluators are the easiest to trip), press "Find improvements" on Improvements, open the
+  suggestion, check the evidence and the diff, "Create version and test", wait for both runs, approve, start a 10% rollout,
+  change the share, promote, then "Roll back to vN" on the employee's Releases card. Check Compare versions from the Versions
+  table. Without Inngest the daily analysis does not run (press the button); with Inngest it runs at 06:00 UTC.
 
 - **Phase 11 in a browser and with a real model.** Open Quality (the eight built-in evaluators appear on first visit), have a
   test chat, press "Evaluate now" on the conversation's Quality card, check the results, then wait 10 minutes after a
@@ -92,6 +99,19 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Verified so far
 
+- Phase 12 (`improvement.test.ts`, 4 tests, fake model): proposals keep only instructions, personality and goals, must
+  validate and differ (no change, declines, non-JSON, oversized refused); KPI verdicts (not enough data under 10 a side,
+  improved, no clear difference, worse); rollout buckets are stable, about the share, raising the share keeps everyone already
+  on the candidate, no customer key means the published version. End to end: three test chats fail the tone grader on v1, the
+  analysis (admins only) writes one suggestion with the evidence and quotes and creates no version; the model saw the
+  instructions, the counts and the quotes; analysing again adds nothing. Approval refused before tests (409) and for members
+  (403). "Test" creates v2 (production stays v1), the 3 failing conversations become suite cases, both runs finish: 3 fixed,
+  0 broken. Unapproved v2 cannot be published or rolled out (409). Approve once. Rollout at 50%: one at a time, publishing
+  blocked while it runs, customers inside the share get v2 and outside v1 (through the channels' `liveEmployee`), 100% gives
+  everyone v2. KPI from production evaluations: improved, sample counts (control includes the baseline before the rollout).
+  Promote publishes v2 and logs it; rollback publishes v1 and then has nothing earlier; a rolled-back rollout leaves everyone
+  on v1; stages follow (rolling out, released, rolled back). Other organizations get 404 on every route.
+
 - Phase 11 (`quality.test.ts`, 6 tests, fake model): the grade parser (scores rounded, null = skipped, out-of-range and
   non-JSON = error); phrase rules match whole words in any case, regex characters stay literal, forbid and require;
   tool success, reply latency and escalation checks (an ignored request for a person fails, a handoff picked up in time
@@ -152,7 +172,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
-- 105 API tests (Phase 11 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
+- 109 API tests (Phase 12 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
   greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
   through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
@@ -211,7 +231,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Deliberately not built yet
 
-Working hours (stored, not acted on), analytics beyond handoffs, response times and quality, billing, model routing. In the
+Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing, model routing. In the
 dashboard, Customers (the API has read routes) is a placeholder page. Packages other than `database`, `shared`,
 `ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows` and `channels`, and
 all three workers, are empty stubs.
@@ -257,6 +277,14 @@ two runs side by side (runs are listed with their scores), deleting evaluators (
 evaluation other than "Evaluate now", a run that crashed stays RUNNING, evaluator weights (every scored result counts
 equally), human labels on results, paging (newest 100 failures, 50 runs, 10,000 evaluations per overview period), the
 exact passages a reply was given (graders get the cited pages' current text).
+
+Improvement, skipped: editing a proposed change before its version is created (edit the version afterwards: saving makes a
+new one), suggestions written by people (any saved version can be rolled out from the employee page), changes to anything
+but instructions, personality and goals (knowledge, tools, channels and escalation are never proposed), automatic rollout
+steps or automatic promotion/rollback on the KPI (people decide), more than one candidate per rollout (A/B, not A/B/n),
+a regression gate on manual publishes and rollouts of versions not from suggestions (the suite can be run from its dataset
+page), the daily analysis without Inngest, KPI paging (newest 10,000 evaluations per side), significance beyond a 95% Welch
+test, notifications about new suggestions.
 
 Not installed: Cloudflare R2, a Redis client, Prettier, Turborepo.
 
