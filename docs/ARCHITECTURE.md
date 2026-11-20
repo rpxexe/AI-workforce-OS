@@ -12,9 +12,11 @@ packages/agent-runtime `runTurn()`: context builder, provider call, timeout, con
 packages/knowledge     Parsing, chunking, embedding and vector search (`processDocument`, `retrieve`).
 packages/memory        Customer memory: `MemoryService` (`identify`, `recall`, `remember`), extraction + validation.
 packages/tools         Tool system: registry, executor (permission, validation, timeout, retry, audit), the tools.
-packages/telephony     `TelephonyProvider` and Twilio (REST, TwiML, webhook signatures, Media Streams messages).
-packages/stt           `STTProvider` and Deepgram live transcription (turn detection, reconnects).
-packages/tts           `TTSProvider` and ElevenLabs streaming speech (8 kHz mu-law).
+packages/telephony     `TelephonyProvider`: Twilio (REST, TwiML, signatures, Media Streams), Telnyx (TeXML), SignalWire (Twilio's code on its LaML API).
+packages/stt           `STTProvider`: Deepgram and AssemblyAI (live + files); OpenAI-compatible (Whisper, custom), Google, Azure (files only).
+packages/tts           `TTSProvider` (8 kHz mu-law): ElevenLabs, OpenAI-compatible speech (OpenAI, Kokoro, VoiceStudio, custom; WAV converted), Google, Azure, Cartesia, PlayHT.
+packages/providers     Phase 14: the provider registry (build + test per catalog entry), sealed credentials, fallback across connections,
+                       email senders (SendGrid, SES, SMTP), object storage (S3, R2, GCS, S3-compatible, Azure Blob), AWS SigV4.
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
 packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), `EmailProvider` (Resend; test mode without it), `splitText`.
 workers/evaluation-worker  The evaluation worker: graders, `runEvaluation`, the sweep, regression replays, improvement analysis and `compareKpi` (run as API jobs).
@@ -112,14 +114,25 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   `status` active, promoted or rolled_back; `kpi`; `suggestionId`; `activeEmployeeId` (unique, set only while active: one
   active rollout per employee). `EmployeeRelease`: every move of the live pointer (`action` publish, rollback, promote;
   `version`, `previousVersion`, `by`).
-- `AiCredential`: an organization's own provider key (BYOAI): `kind` (openai, anthropic, gemini, openrouter, openai_compatible),
-  `baseUrl` (custom only), `secret` (AES-256-GCM sealed under `AI_CREDENTIALS_KEY`, never returned), `keyHint` (last 4), `models`
-  (context and prices the router cannot look up). Name unique per organization.
+- `ProviderConnection` (Phase 14; Phase 13's `AiCredential` rows were copied into it as `llm` connections with the same ids):
+  an organization's account with an outside provider. `providerType` (llm, stt, tts, telephony, messaging, email, storage),
+  `providerId` (a `PROVIDER_CATALOG` id), `displayName` (unique per organization), `encryptedCredentials` (AES-256-GCM under
+  `AI_CREDENTIALS_KEY`: `v2` = JSON of every secret field, `v1` = Phase 13's bare key; never returned), `credentialHints` (last 4 of
+  each secret), `configuration` (the catalog's non-secret fields; LLM: `baseUrl`, `models`, `defaultModel`; any: `costPerUnit`),
+  `status` (active, disabled), `isDefault` (one per type, kept by the API), `lastTestedAt/Status/Error`, `rotatedAt`.
+- `ProviderAuditLog`: create, update, rotate, test, set_default, disable, enable, delete per connection, with the actor. No secrets.
+- `AiEmployee.providerOverrides`, `Workflow.providerOverrides` (Phase 14, not versioned): `{ llm?: { connectionId, model }, stt?,
+  tts?: { connectionId, voice? }, email? }`; `connectionId` null = the platform's provider explicitly.
+- `PhoneNumber.connectionId`, `Call.connectionId`: the telephony connection carrying them (null = the platform's account);
+  `Call.workflowId`: the workflow whose Voice Call step placed it. `KnowledgeDocument.storageConnectionId` + `storageKey`: the file
+  lives in that object storage (`content` is then null).
 - `AiModelPolicy`: per organization and task (`AI_TASKS`; `default` covers tasks without a row): `primary` and `fallbacks`
   ({ credentialId | null = platform, model }), `maxCostUsd`, `timeoutMs`, `allowedProviders`, `strategy` (ordered, fastest, cheapest).
-- `AiUsage`: one row per attempt at one model: `task`, `requestId` (shared by a request's attempts; attempt > 1 = fallback),
-  `provider`, `model`, `credentialId`, tokens, `costUsd` (provider-reported, else estimated, else null), `latencyMs`, `success`,
-  `errorKind`, `error`.
+- `AiUsage`: one row per attempt at one provider: `providerType` (Phase 14; llm before), `task`, `operation` (chat,
+  live_transcribe, transcribe, synthesize, send, call), `requestId` (shared by a request's attempts; attempt > 1 = fallback),
+  `provider`, `model` (model, voice or call direction), `credentialId` (the connection; null = platform), `employeeId`,
+  `workflowId`, tokens, `characters` (TTS, transcripts), `seconds` (live audio heard, call length), `costUsd` (provider-reported,
+  else estimated from prices / the connection's `costPerUnit`, else null), `latencyMs`, `success`, `errorKind`, `error`.
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
@@ -249,6 +262,23 @@ DELETE /ai/credentials/:id                      admin; 409 while a policy uses i
 PUT   /ai/policies/:task                        admin; modelPolicySchema; credentials must be the organization's (400)
 DELETE /ai/policies/:task                       admin; back to the default policy / the platform; 204
 GET   /ai/usage                                 member; ?days= (default 30); totals, by model, by task, newest 100 calls
+GET   /providers/registry                        member; PROVIDER_CATALOG (metadata, fields, capabilities, status)
+GET   /providers/settings                        member; connections (hints only; webhookUrls for admins), what .env provides per type, canStoreKeys
+POST  /providers/connections                     admin; { providerType, providerId, displayName, credentials, configuration }; 201; checked against the catalog; typed addresses public https
+PATCH /providers/connections/:id                 admin; { displayName?, configuration? } (secrets only by rotation)
+POST  .../connections/:id/rotate                 admin; { credentials }: every secret again; resets the last test
+POST  .../connections/:id/test                   admin; TestConnectionResult; 10 per organization per minute (429); a press while one runs shares it
+POST  .../connections/:id/default                admin; the organization's default for the type
+POST  .../connections/:id/status                 admin; { status: active | disabled } (disabling clears default)
+DELETE /providers/connections/:id                admin; 409 naming what uses it (policies, overrides, numbers, WhatsApp channels, stored files); 204
+GET   /providers/audit                           admin; newest 100
+GET   /providers/metrics                         member; ?days=; per provider and type: requests, failures, timeouts, fallbacks, latency, cost, characters, seconds
+GET|PUT /workspaces/:workspaceId/employees/:id/providers   member | admin; ProviderOverrides (connections must be the organization's, active, of the type)
+GET|PUT /workspaces/:workspaceId/workflows/:id/providers   member | admin; ProviderOverrides
+POST  /voice/:provider/c/:connection/inbound|status|transfer   as the platform's routes, for an organization's phone connection (its token)
+GET   /voice/:provider/c/:connection/stream     the media stream of a call on that connection
+GET|POST /channels/whatsapp/:provider/c/:connection/webhook   as the platform's, for an organization's WhatsApp connection
+POST  /channels/email/resend/c/:connection/webhook             received mail through an organization's Resend connection
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
 GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
 ```
@@ -595,11 +625,69 @@ caller (runTurn's caller, memory, Copilot, graders, improvement, workflow condit
 - Keys: write-only. Sealed with AES-256-GCM (key = sha256 of `AI_CREDENTIALS_KEY`), opened per call in the planner, passed to
   the provider; responses carry `keyHint` only. Custom (OpenAI-compatible) base URLs must be public https at save time, and
   are called through `safeFetch` (public addresses only, no redirects).
-- Providers: OpenAI (`max_completion_tokens`), Gemini (its OpenAI-compatible endpoint), OpenRouter and custom endpoints share
-  `openai-compatible.ts`; Anthropic uses its SDK with the organization's key. OpenRouter's `usage.cost` is used as the real cost.
+- Providers: OpenAI (`max_completion_tokens`), Gemini (its OpenAI-compatible endpoint), OpenRouter, Groq, Mistral, DeepSeek, xAI,
+  Together, Fireworks, Hugging Face (router.huggingface.co) and custom endpoints share `openai-compatible.ts`; Anthropic uses its
+  SDK with the organization's key. Since Phase 14 the keys are `llm` provider connections (`/ai/credentials` reads and writes
+  them), and the router no longer falls back on `auth` or `config` errors. OpenRouter's `usage.cost` is used as the real cost.
 - Prices: Anthropic's current models are built in (`catalog.ts`); other models' prices and context come from the credential's
   `models` list. `buildApp({ credentialsKey, byoProvider })` lets tests set the secret and fake the providers built from keys.
-- Dashboard: `/ai-models` (tabs Policies, Keys, Usage; `components/ai/`).
+- Dashboard: `/model-routing` ("Model routing": tabs Policies, Usage; `components/ai/`). Keys are language-model connections in
+  Settings > AI Providers since Phase 14; `/ai-models` redirects to `/model-routing`.
+
+## Provider settings (Phase 14)
+
+```
+PROVIDER_CATALOG (packages/shared/src/providers.ts)   metadata: id, type, name, status, capabilities, credential and config fields,
+                                                       models, docs URL, notes. The dashboard renders forms from it.
+REGISTRY (packages/providers/src/registry.ts)          per supported entry: build(conn) -> the adapter, test(conn) -> a cheap call
+ProviderConnection (sealed secrets + settings)         per organization; opened only on the server (providers/service.ts `conn`)
+
+request -> resolution, per type (apps/api/src/providers/service.ts; LLM in ai.ts planFor):
+             workflow override -> employee override -> organization default -> platform (.env)
+           the first level that exists serves; the levels after it that the organization set up are its fallbacks
+           (LLM: overrides, then the task policy / default policy, else the default connection's defaultModel, else platform)
+        -> fallback (packages/providers/src/fallback.ts; router.ts for LLM): each target once (deduplicated), at most 3,
+           never after output reached the caller (text streamed, audio played), never on auth/config/refusal or a cancel;
+           email only after a "try later" refusal; storage, telephony and messaging never (a file or number lives in one place)
+        -> one AiUsage row per attempt (providerType, operation, employee, workflow, characters/seconds, cost)
+```
+
+- Where each type is resolved: LLM in every `ai.provider(route)` (routes now carry `employeeId`/`workflowId`); STT and TTS per
+  call (`speechFor` in voice/routes.ts: checked before a number answers or an outbound call dials; a call needs a provider with
+  the `live` capability) and per WhatsApp voice note; email per send (`Mailer.send(email, scope)`: tool, workflow step, handoff
+  email, email channel replies); storage = the organization's default (no overrides) for new knowledge uploads; telephony = the
+  number's connection (assigned at "add number": the one named, else the default, else the platform's accounts); WhatsApp = the
+  channel's `config.connectionId`.
+- Webhooks: an organization's phone and WhatsApp accounts post to `/voice/<provider>/c/<connection>/...` and
+  `/channels/whatsapp/<provider>/c/<connection>/webhook` (shown on the connection to admins), verified with that connection's
+  token (Twilio/SignalWire HMAC, Meta app secret, Telnyx Ed25519 on WhatsApp and the URL token on calls). A number or channel answers only on the connection it belongs
+  to, so another organization's validly signed webhook cannot reach it. The platform's `.env` paths are unchanged.
+- Test Connection: auth status (ok / failed / unknown), config status (ok / invalid), capabilities, latency, the provider's error
+  with every secret removed, models or voices when listed. Calls that cost nothing where the provider has one (list models or
+  voices, account lookups, Azure's token endpoint); Google STT and custom STT/TTS transcribe a tenth of a second of silence or
+  speak one word.
+- Network: vendor adapters call their fixed hosts; addresses an admin typed (custom LLM/STT/TTS base URLs, Kokoro, VoiceStudio,
+  S3-compatible endpoints) are checked public https at save time and called through `safeFetch`, whose connection resolves through
+  `publicLookup` (the address checked is the address connected to: no DNS rebinding) and never follows redirects. SMTP hosts are
+  resolved, checked, and connected to by the checked IP with the host name for TLS.
+- Secrets: sealed per connection, opened per request on the server, never returned (hints only), removed from test results and
+  usage errors (`redact` with the known values, `scrubSecrets` for unknown ones), and kept out of the log by Fastify's `redact`
+  paths. `AI_CREDENTIALS_KEY_PREVIOUS` lets the server secret rotate: rows open with either and are sealed again with the new one.
+- Dashboard: `/settings` (sections General (workspaces, organization, profile), Provider overview (defaults per type), AI Providers (LLM/STT/TTS), Voice & Telephony, Messaging, Email, Storage,
+  Employee tools, API Keys, Credentials & audit, Developer; `components/providers/`), the employee page's Providers card and the workflow
+  page's Providers sheet (overrides), a phone-account choice when adding a number, an account choice on the WhatsApp channel.
+
+### Adding a provider
+
+1. Write the adapter behind the type's interface (`AIProvider` via a `VENDORS` entry if OpenAI-compatible, `STTProvider`,
+   `TTSProvider`, `TelephonyProvider`, `WhatsAppProvider`, `EmailSender`, `ObjectStorage`) with an injectable `fetch`, throwing
+   `ProviderError` (kind from `kindOfStatus`) and never putting a secret in a message.
+2. Add a `PROVIDER_CATALOG` entry: id, type, name, capabilities, credential fields (secret) and config fields, docs URL, notes.
+   `status: "supported"` only with a working adapter; otherwise `coming_soon` and no registry entry.
+3. Add a registry entry: `build(conn)` from `conn.credentials`/`conn.configuration` (typed addresses use `conn.userFetch`) and
+   `test(conn, signal)` with the cheapest call that proves the key.
+4. Test it with a fake `fetch` (see `speech-adapters.test.ts`, `storage-email-adapters.test.ts`); `provider-settings.test.ts`
+   checks that every supported catalog entry has a registry entry. Nothing in the dashboard changes: forms come from the catalog.
 
 ## Agent runtime
 

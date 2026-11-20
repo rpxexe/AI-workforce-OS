@@ -3,7 +3,20 @@
 import { z } from "zod";
 
 /** Providers an organization can bring a key for. `openai_compatible` is any service speaking OpenAI's chat-completions API. */
-export const AI_PROVIDER_KINDS = ["openai", "anthropic", "gemini", "openrouter", "openai_compatible"] as const;
+export const AI_PROVIDER_KINDS = [
+  "openai",
+  "anthropic",
+  "gemini",
+  "openrouter",
+  "groq",
+  "mistral",
+  "deepseek",
+  "xai",
+  "together",
+  "fireworks",
+  "huggingface",
+  "openai_compatible",
+] as const;
 export type AiProviderKind = (typeof AI_PROVIDER_KINDS)[number];
 
 export const AI_PROVIDER_LABELS: Record<AiProviderKind, string> = {
@@ -11,6 +24,13 @@ export const AI_PROVIDER_LABELS: Record<AiProviderKind, string> = {
   anthropic: "Anthropic",
   gemini: "Google Gemini",
   openrouter: "OpenRouter",
+  groq: "Groq",
+  mistral: "Mistral",
+  deepseek: "DeepSeek",
+  xai: "xAI",
+  together: "Together AI",
+  fireworks: "Fireworks AI",
+  huggingface: "Hugging Face",
   openai_compatible: "Custom (OpenAI-compatible)",
 };
 

@@ -27,8 +27,10 @@ export type VoiceLimits = {
 
 export type SessionDeps = {
   telephony: TelephonyProvider;
-  stt: STTProvider;
-  tts: TTSProvider;
+  /** The telephony connection the stream's URL names (null: the platform's account); it must be the call's. */
+  connectionId: string | null;
+  /** Speech for this call, resolved per call: workflow, employee, organization default, platform (Phase 14). */
+  speech: (scope: { organizationId: string; workspaceId: string; employeeId: string; workflowId: string | null }) => Promise<{ stt: STTProvider | null; tts: TTSProvider | null }>;
   /** A provider bound to a route (tenant and task): the model router. */
   provider: (route: Route) => AIProvider;
   embedder: () => EmbeddingProvider;
@@ -116,6 +118,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
   });
   if (!call) throw new Error(`Call ${callId} not found`);
   if (call.providerCallId && call.providerCallId !== event.providerCallId) throw new Error("Stream belongs to another call");
+  if ((call.connectionId ?? null) !== deps.connectionId) throw new Error("Stream came in on another phone connection");
   // The version that was live when the call came in.
   const version = await prisma.aiEmployeeVersion.findUnique({
     where: { employeeId_number: { employeeId: call.employeeId, number: call.employeeVersion } },
@@ -125,7 +128,11 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
   const employee = configOf(version);
   const scope = { organizationId: call.organizationId, workspaceId: call.workspaceId };
   // Phone calls have their own task, so an organization can route them to a fast model.
-  const provider = deps.provider({ ...scope, task: "voice" });
+  const overrides = { employeeId: call.employeeId, workflowId: call.workflowId };
+  const provider = deps.provider({ ...scope, ...overrides, task: "voice" });
+  const { stt: listener, tts } = await deps.speech({ ...scope, ...overrides });
+  // Closing the stream makes the provider play its fallback line and hang up.
+  if (!listener?.open || !tts) throw new Error("No live speech recognition or speech synthesis is configured for this call");
   const sourceIds = call.employee.knowledgeSources.map((k) => k.sourceId);
   const knowledge = sourceIds.length > 0 ? { embedder: deps.embedder(), sourceIds } : undefined;
   const specs = toolRegistry.specs(call.employee.tools.map((t) => t.tool));
@@ -155,7 +162,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
   };
   const speakers = new Set<Speaker>();
   const newSpeaker = () => {
-    const speaker = new Speaker(deps.tts, employee.language, out, (err) => log.warn({ err, callId }, "Speech synthesis failed"));
+    const speaker = new Speaker(tts, employee.language, out, (err) => log.warn({ err, callId }, "Speech synthesis failed"));
     speakers.add(speaker);
     void speaker.played.then(() => speakers.delete(speaker));
     return speaker;
@@ -229,7 +236,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
     // Set first: the provider may close our stream before its API call returns, and finish() must not end the call.
     transferred = true;
     try {
-      await telephony.transferCall(providerCallId, transferTo, `${deps.publicUrl}/voice/${telephony.name}/transfer?transferId=${attempt.id}`);
+      await telephony.transferCall(providerCallId, transferTo, `${deps.publicUrl}/voice/${telephony.name}${deps.connectionId ? `/c/${deps.connectionId}` : ""}/transfer?transferId=${attempt.id}`);
     } catch (err) {
       transferred = false;
       log.error({ err, callId, transferId: attempt.id }, "Transferring the call failed");
@@ -349,7 +356,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
 
   let stt: STTStream | undefined;
   try {
-    stt = deps.stt.open({ language: employee.language, onEvent: onSpeech });
+    stt = listener.open({ language: employee.language, onEvent: onSpeech });
   } catch (err) {
     log.error({ err, callId }, "Speech recognition could not start");
     void speakLine(LINES.cannotHear).then(hangUp);

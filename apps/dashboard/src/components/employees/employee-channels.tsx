@@ -8,6 +8,8 @@ import {
   type EmployeeChannels as ChannelsResponse,
   type EmployeeTool,
   type MessagingChannel,
+  type ProviderConnectionInfo,
+  type ProviderSettings,
   type ToolInfo,
   type ToolName,
   type WhatsAppProviderName,
@@ -35,6 +37,9 @@ const ENV_NEEDED: Record<WhatsAppProviderName, string> = {
   telnyx: "TELNYX_API_KEY and TELNYX_PUBLIC_KEY",
 };
 
+/** The WhatsApp account select's value for "no connectionId": the platform's account. */
+const PLATFORM_ACCOUNT = "platform";
+
 const KINDS = ["web_chat", "whatsapp", "email"] as const satisfies readonly MessagingChannel[];
 
 /** The form's fields, all as strings and booleans; turned into the channel's config on save. */
@@ -49,6 +54,7 @@ type Draft = {
   phoneNumberId: string;
   number: string;
   displayNumber: string;
+  connectionId: string;
   address: string;
 };
 
@@ -66,6 +72,7 @@ const draftFrom = (c: EmployeeChannelInfo | undefined): Draft => {
     phoneNumberId: text("phoneNumberId"),
     number: text("number"),
     displayNumber: text("displayNumber"),
+    connectionId: text("connectionId") || PLATFORM_ACCOUNT,
     address: text("address"),
   };
 };
@@ -74,9 +81,12 @@ const configOf = (kind: MessagingChannel, d: Draft) =>
   kind === "web_chat"
     ? { greeting: d.greeting.trim(), allowedOrigins: d.origins.split(/[\s,]+/).filter(Boolean), requireIdentity: d.requireIdentity }
     : kind === "whatsapp"
-      ? d.provider === "meta"
-        ? { provider: d.provider, phoneNumberId: d.phoneNumberId.trim(), ...(d.displayNumber.trim() && { displayNumber: d.displayNumber.trim() }) }
-        : { provider: d.provider, number: d.number.trim() }
+      ? {
+          ...(d.provider === "meta"
+            ? { provider: d.provider, phoneNumberId: d.phoneNumberId.trim(), ...(d.displayNumber.trim() && { displayNumber: d.displayNumber.trim() }) }
+            : { provider: d.provider, number: d.number.trim() }),
+          ...(d.connectionId !== PLATFORM_ACCOUNT && { connectionId: d.connectionId }),
+        }
       : { address: d.address.trim() };
 
 /** Where customers reach this employee in writing: the website widget, WhatsApp and email. */
@@ -96,6 +106,8 @@ export function EmployeeChannels({
   const channels = useApiQuery<ChannelsResponse>(path);
   const granted = useApiQuery<EmployeeTool[]>(`/workspaces/${workspaceId}/employees/${employeeId}/tools`);
   const catalog = useApiQuery<ToolInfo[]>(`/workspaces/${workspaceId}/tools`);
+  // Optional: without it the account select offers only the platform's account.
+  const providers = useApiQuery<ProviderSettings>("/providers/settings");
   const [version, setVersion] = useState(0);
 
   const loadError = channels.error ?? granted.error ?? catalog.error;
@@ -138,6 +150,7 @@ export function EmployeeChannels({
                 granted={grantedTools}
                 titles={titles}
                 whatsappProviders={data.whatsappProviders}
+                messagingConnections={(providers.data?.connections ?? []).filter((c) => c.providerType === "messaging")}
                 email={{ provider: data.emailProvider, webhookUrl: data.emailWebhookUrl }}
                 onSaved={saved}
               />
@@ -166,7 +179,7 @@ function Field({ id, label, hint, error, children }: { id: string; label: string
   );
 }
 
-function CopyBlock({ label, value }: { label: string; value: string }) {
+export function CopyBlock({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
   const copy = () =>
     void navigator.clipboard.writeText(value).then(() => {
@@ -195,6 +208,7 @@ function ChannelForm({
   granted,
   titles,
   whatsappProviders,
+  messagingConnections,
   email,
   onSaved,
 }: {
@@ -205,6 +219,7 @@ function ChannelForm({
   granted: ToolName[];
   titles: Record<ToolName, string>;
   whatsappProviders: WhatsAppProviderName[];
+  messagingConnections: ProviderConnectionInfo[];
   email: EmailSetup;
   onSaved: () => void;
 }) {
@@ -255,6 +270,10 @@ function ChannelForm({
     });
 
   const id = (name: string) => `${kind}-${name}`;
+  // Connections whose provider carries this WhatsApp provider's numbers (meta -> meta_whatsapp, ...).
+  const accounts = messagingConnections.filter(
+    (c) => c.providerId === `${draft.provider}_whatsapp` && (c.status === "active" || c.id === draft.connectionId),
+  );
   const invalid = (name: string) => ({
     "aria-invalid": errors[name] !== undefined,
     "aria-describedby": errors[name] ? `${id(name)}-error` : undefined,
@@ -270,7 +289,7 @@ function ChannelForm({
         {kind === "email" && "Emails sent to this address are answered by email. Replies to the employee's emails continue the same conversation."}
       </p>
 
-      {kind === "whatsapp" && !whatsappProviders.includes(draft.provider) && (
+      {kind === "whatsapp" && draft.connectionId === PLATFORM_ACCOUNT && !whatsappProviders.includes(draft.provider) && (
         <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
           {WHATSAPP_PROVIDER_LABELS[draft.provider]} is not set up on the server yet. Add {ENV_NEEDED[draft.provider]} to its .env. You can save the number
           now.
@@ -311,7 +330,11 @@ function ChannelForm({
         {kind === "whatsapp" && (
           <>
             <Field id={id("provider")} label="Provider" hint="Who carries this WhatsApp number.">
-              <Select value={draft.provider} onValueChange={(v) => update({ provider: v as WhatsAppProviderName })} disabled={disabled}>
+              <Select
+                value={draft.provider}
+                onValueChange={(v) => update({ provider: v as WhatsAppProviderName, connectionId: PLATFORM_ACCOUNT })}
+                disabled={disabled}
+              >
                 <SelectTrigger id={id("provider")} className="w-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -321,6 +344,25 @@ function ChannelForm({
                       {WHATSAPP_PROVIDER_LABELS[p]}
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field id={id("account")} label="Account" hint="Your own connection from Settings, or the platform's account." error={errors.connectionId}>
+              <Select value={draft.connectionId} onValueChange={(connectionId) => update({ connectionId })} disabled={disabled}>
+                <SelectTrigger id={id("account")} className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={PLATFORM_ACCOUNT}>Platform account</SelectItem>
+                  {accounts.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.displayName}
+                      {c.status === "disabled" ? " (disabled)" : ""}
+                    </SelectItem>
+                  ))}
+                  {draft.connectionId !== PLATFORM_ACCOUNT && !accounts.some((c) => c.id === draft.connectionId) && (
+                    <SelectItem value={draft.connectionId}>Saved account</SelectItem>
+                  )}
                 </SelectContent>
               </Select>
             </Field>

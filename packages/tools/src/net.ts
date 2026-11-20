@@ -1,7 +1,8 @@
 // Network access for tools. The model never gets a socket: tools call `safeFetch`, which only
 // reaches public addresses, so a tool cannot be pointed at the server itself or the private network.
 import { lookup } from "node:dns/promises";
-import { BlockList, isIP } from "node:net";
+import { BlockList, isIP, type LookupFunction } from "node:net";
+import { Agent } from "undici";
 import { ToolError } from "./types.ts";
 
 const PRIVATE = new BlockList();
@@ -30,11 +31,32 @@ for (const [net, prefix] of [
 // BlockList checks IPv4-mapped IPv6 addresses (::ffff:10.0.0.1) against the IPv4 rules itself.
 export const isPrivateAddress = (address: string) => PRIVATE.check(address, isIP(address) === 6 ? "ipv6" : "ipv4");
 
+/** The resolver every safe connection uses; tests replace it to play a DNS-rebinding host. */
+export const resolver = { lookup: (host: string) => lookup(host, { all: true }) };
+
+/**
+ * Resolves for the socket itself and refuses private answers. The address checked is the address connected to, so a host
+ * that answers public first and private on the connection (DNS rebinding) cannot reach the private network.
+ */
+export const publicLookup: LookupFunction = (hostname, options, callback) => {
+  resolver.lookup(hostname).then(
+    (addresses) => {
+      if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address)))
+        return callback(new ToolError(`${hostname} is a private address`), "", 4);
+      if (options.all) return (callback as unknown as (err: null, all: typeof addresses) => void)(null, addresses);
+      const first = addresses.find((a) => !options.family || a.family === options.family) ?? addresses[0]!;
+      callback(null, first.address, first.family);
+    },
+    (err: Error) => callback(Object.assign(err, { code: "ENOTFOUND" }), "", 4),
+  );
+};
+
+const pinned = new Agent({ connect: { lookup: publicLookup } });
+
 /**
  * `fetch` for public https endpoints only. Redirects are not followed, so an allowed host
- * cannot bounce the request somewhere else.
+ * cannot bounce the request somewhere else, and the connection resolves through `publicLookup`.
  */
-// shortcut: the host is resolved and checked, then fetch resolves it again, so a DNS rebinding host could still reach a private address; pin the checked address with a custom lookup if tools get hosts the admin does not control
 export const safeFetch: typeof fetch = async (target, init) => {
   const url = new URL(target instanceof Request ? target.url : target);
   if (url.protocol !== "https:") throw new ToolError("Only https:// addresses are allowed");
@@ -42,11 +64,12 @@ export const safeFetch: typeof fetch = async (target, init) => {
   const host = url.hostname.replace(/^\[|\]$/g, "");
   let addresses: { address: string }[];
   try {
-    addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
+    addresses = isIP(host) ? [{ address: host }] : await resolver.lookup(host);
   } catch {
     throw new ToolError(`${url.hostname} could not be found`);
   }
   if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address)))
     throw new ToolError(`${url.hostname} is a private address`);
-  return fetch(target, { ...init, redirect: "manual" });
+  // The check above gives a clear error; the pinned agent is what makes it hold for the connection.
+  return fetch(target, { ...init, redirect: "manual", dispatcher: pinned } as RequestInit);
 };

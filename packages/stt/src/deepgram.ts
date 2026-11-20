@@ -21,10 +21,12 @@ export function deepgramProvider({
   apiKey,
   model = "nova-3",
   url = "wss://api.deepgram.com/v1/listen",
+  fetch: fetchImpl = fetch,
 }: {
   apiKey: string;
   model?: string;
   url?: string;
+  fetch?: typeof fetch;
 }): STTProvider {
   return {
     name: "deepgram",
@@ -124,7 +126,7 @@ export function deepgramProvider({
 
     async transcribe(audio, { mimeType, language, signal }) {
       const query = new URLSearchParams({ model, language, smart_format: "true", punctuate: "true" });
-      const res = await fetch(`${url.replace(/^ws/, "http")}?${query}`, {
+      const res = await fetchImpl(`${url.replace(/^ws/, "http")}?${query}`, {
         method: "POST",
         headers: { authorization: `Token ${apiKey}`, "content-type": mimeType },
         body: new Uint8Array(audio),

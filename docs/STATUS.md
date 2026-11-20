@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-20, end of Phase 13.
+Last updated: 2026-11-20, end of Phase 14.
 
 ## Phases
 
@@ -20,7 +20,8 @@ Last updated: 2026-11-20, end of Phase 13.
 | 11 | AI quality control: versioned evaluators (deterministic checks, LLM graders, phrase-based policy rules) over eight dimensions with built-in defaults, an asynchronous evaluation worker (sweep of quiet conversations every 5 min, manual "Evaluate now"), results linked to the conversation, employee version, model and workflow version, failures with quoted evidence, the quality overview (score, pass rate, trend, dimensions, employee and version comparison), regression datasets (cases copied from conversations or written by hand) replayed against an employee version without tools | Built; 6 tests (`quality.test.ts`, fake model). **Quality pages and the conversation Quality card not tried in a browser**; they typecheck, lint and build. **LLM graders not run against a real model yet** |
 | 12 | Controlled continuous improvement: failure patterns (an evaluator failing on an employee's live version) -> a model-proposed change to instructions, personality or goals with its evidence -> a person creates the proposed version and replays the employee's regression suite on both versions (fixed and broken cases) -> human approval -> percentage rollout (A/B, sticky per customer across channels) with a chosen KPI compared between versions -> promote or roll back; rollback to the previous live version; a release log; version comparison (field-by-field line diff); the Improvements pages and the employee Releases card | Built; 4 tests (`improvement.test.ts`, fake model). **Improvements pages, Releases card and Compare versions not tried in a browser**; they typecheck, lint and build. **The proposal prompt has not run against a real model yet** |
 | 13 | Model routing and BYOAI: provider abstraction (OpenAI, Anthropic, Gemini, OpenRouter, custom OpenAI-compatible), organization keys sealed at rest and never returned, a model policy per task (primary, up to 3 fallbacks, cost limit, timeout, allowed providers, order by list / latency / cost), a router that filters by capability, context and cost and falls back without loops, usage records per attempt (provider, model, tokens, cost, latency, success), replies storing the model that actually answered, the AI models page | Built; 11 tests (`routing.test.ts`: the router with fake providers, and the API with the database and faked providers built from keys). **AI models page not tried in a browser**; it typechecks, lints and builds. **No real OpenAI, Gemini or custom endpoint called yet**; Anthropic with an organization's key untested against the real API |
-| 14+ | Not started | Owner pastes the next phase prompt |
+| 14 | Universal provider and integration settings: a provider registry (catalog + adapters + test per provider) over 7 types; organization connections (`ProviderConnection`, Phase 13 keys migrated with their ids) sealed and never returned; 7 more LLMs (Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Hugging Face); STT AssemblyAI (live + files), Whisper, Google, Azure, custom (files); TTS OpenAI, Google, Azure, Cartesia, PlayHT, Kokoro, VoiceStudio, custom; telephony SignalWire plus organizations' own Twilio/Telnyx accounts; WhatsApp on organizations' own Meta/Twilio/Telnyx accounts; email SendGrid, SES, SMTP plus organizations' Resend; storage R2, S3, GCS, Azure Blob, S3-compatible (knowledge uploads); resolution workflow > employee > organization default > platform for LLM/STT/TTS/email; fallback with Phase 13's loop rules for LLM/STT/TTS/email, none on auth/config errors; Test Connection (rate limited, deduplicated); rotation, audit log, disable/default/delete with in-use checks; per-connection webhooks; SSRF pinning; usage and provider metrics per type; the Settings page, employee and workflow Providers overrides | Built; 165 API tests (19 new for Phase 14, 13 speech adapters, 9 email/storage adapters). Plivo, Vonage, SIP and live Google/Azure recognition are listed as coming soon. **No new provider called against its real API yet**; Settings page not tried in a browser |
+| 15+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -34,9 +35,25 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Open items
 
-- **Phase 13 for real.** Set `AI_CREDENTIALS_KEY` (32+ random characters) in `.env`, restart, open AI models, add a key (e.g.
-  OpenAI), set the Conversations policy to that model with the platform as fallback, test-chat an employee, and check the reply's
-  model and the Usage tab. Then edit the key to a wrong one and see the fallback answer and the failed attempt.
+- **Phase 14 for real.** With `AI_CREDENTIALS_KEY` set, open Settings and for each category connect a real account, press Test
+  Connection, set it as default, then: test-chat an employee (LLM; check the reply's model and Developer > metrics), give the
+  employee a Providers override and chat again, place a call (STT/TTS through the organization's connections), send a workflow
+  Message step (email), upload a knowledge file (storage: check the bucket). Phone and WhatsApp on an organization's own account:
+  enter the connection's webhook URLs (Settings, Voice & Telephony / Messaging) in the provider's console, add a number choosing
+  that account, call it. **Nothing new has been called against a real API**: every adapter follows the vendor's docs and is
+  tested against fakes. Unconfirmed from the docs: AssemblyAI's v3 `pcm_mulaw` at 8 kHz and its English-only default model
+  (non-English calls will transcribe poorly; pick Deepgram for them); Google STT's Opus sample rate for WhatsApp notes (read
+  from the OpusHead); PlayHT's `mulaw` output and language names; Cartesia's `Cartesia-Version` 2025-04-16; SES v2
+  `Content.Simple.Headers` for In-Reply-To; GCS interoperability with ListObjectsV2; SignalWire's LaML Media Streams and its
+  signature header (Twilio's algorithm with the Signing Key); VoiceStudio's `/v1/audio/voices` shape and whether its
+  `/v1/audio/speech` streams (it is asked for WAV and converted). VoiceStudio runs on your machine: expose it over https
+  (remote access with `OMNIVOICE_API_KEY`, behind a TLS tunnel), never plain localhost.
+- **Phase 14 dashboard in a browser**: the Settings sections, connect/configure/test/rotate/default/disable/delete, the employee
+  Providers card, the workflow Providers sheet, the phone-account and WhatsApp-account choices.
+
+- **Phase 13 for real.** Set `AI_CREDENTIALS_KEY` (32+ random characters) in `.env`, restart, add a key in Settings > AI Providers > LLM (e.g.
+  OpenAI), on Model routing set the Conversations policy to that model with the platform as fallback, test-chat an employee, and check the reply's
+  model and the Usage tab. Then make the key hit a rate limit and see the fallback answer and the failed attempt (since Phase 14 a wrong key fails the turn instead of falling back).
   Unconfirmed from the docs: Gemini's OpenAI-compatible endpoint returning usage in streams (`stream_options.include_usage`);
   older OpenAI models accepting `max_completion_tokens` (we always send it to OpenAI).
 
@@ -105,6 +122,29 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   configured provider). It follows the SDK docs and typechecks; run `AI_PROVIDER=anthropic LIVE_AI=1 pnpm test` once a key is set.
 
 ## Verified so far
+
+- Phase 14 (`provider-settings.test.ts`, 19 tests; `speech-adapters.test.ts`, 13; `storage-email-adapters.test.ts`, 9; all fakes,
+  no real provider). Registry: every supported catalog entry has an adapter and a test, coming-soon entries none, at least two per
+  category, live STT only Deepgram and AssemblyAI. Sealing: fresh IV, server secret only, the previous secret while rotating,
+  Phase 13's v1 keys open. Redaction of known and unknown secrets. Fallback: each target once (a duplicate is not retried), at most
+  3, no fallback on auth or config, one request id; TTS only before audio; live STT moves to the next provider when a stream fails
+  before hearing anything, transcribe-only providers never take calls; email only after a rate-limit refusal. Test Connection:
+  models listed, an echoed key removed from the error, a missing TeXML app = config invalid, timeouts reported, coming soon
+  refused. SSRF: loopback, private, metadata, IPv4-mapped IPv6, http, and a DNS-rebinding host (public at the check, loopback at
+  the connection) refused. API: admins only for writes, secrets sealed and never in any response (settings, audit, tests),
+  catalog field checks with form paths, unique names, coming soon and unknown providers refused, private/http typed addresses and
+  an SMTP localhost refused, 503 without the server secret; Test Connection stored and audited, two simultaneous presses = one
+  call, the 11th test in a minute 429, other organizations 404; rotation (hints, rotatedAt, test reset, configure cannot change
+  secrets); LLM resolution platform -> default connection -> employee -> workflow, a task policy between overrides and the
+  default, disabled connections skipped, overrides must name the organization's own active connections, test chat answered by
+  the employee's key with usage naming the employee; a bad key fails the turn instead of falling back; speech resolution
+  (default, employee override with its voice, rate-limited override falls back to the default), usage characters; Whisper alone
+  cannot answer calls, a live default fills in; metrics per type and provider, isolated; deletion refused while a workflow, a
+  policy or a phone number uses a connection, then audited; isolation of connections and overrides; a Twilio connection's
+  webhook checked with its own token, its number refused to another organization's validly signed webhook, unknown connections
+  404; the Phase 13 migration copies keys with their ids, names, hints, base URLs and models, policies still route to them, and
+  v1 keys are sealed again as v2. All Phase 13 tests pass unchanged except that `routing.test.ts` reads the key from
+  `ProviderConnection` (the table moved).
 
 - Phase 13 (`routing.test.ts`, 11 tests). Router with fake providers: a failure before any text falls back, both attempts are
   recorded under one request id, `done` names the model that answered; no fallback after text reached the caller or on a
@@ -194,7 +234,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
-- 120 API tests (Phase 13 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 109 at the end of Phase 12. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
+- 161 API tests (Phase 14 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 120 at the end of Phase 13. Earlier: 109 at the end of Phase 12. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
   greeting, run waits for the call, the AI condition reads the transcript, the calendar books the lead's time
   through the tool executor with an audit row, the confirmation uses the booking); the no path; graph validation
@@ -255,7 +295,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing. In the
 dashboard, Customers (the API has read routes) is a placeholder page. Packages other than `database`, `shared`,
-`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows` and `channels`, and
+`ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows`, `channels` and `providers`, and
 all three workers, are empty stubs.
 
 Also skipped, small: scanned PDFs (no OCR), a queue for document processing (it runs inside the
@@ -307,6 +347,14 @@ steps or automatic promotion/rollback on the KPI (people decide), more than one 
 a regression gate on manual publishes and rollouts of versions not from suggestions (the suite can be run from its dataset
 page), the daily analysis without Inngest, KPI paging (newest 10,000 evaluations per side), significance beyond a 95% Welch
 test, notifications about new suggestions.
+
+Provider settings, skipped: Plivo, Vonage, SIP and live Google/Azure recognition (coming soon, listed), AssemblyAI languages other
+than English on calls, platform API keys for our own API (the API Keys section says so), webhook signing for our outgoing
+webhooks, a KMS (one server secret, rotatable), shared test rate limits across API processes, per-workspace connections and
+overrides (organization and employee/workflow only), storage overrides and moving existing files between storages, fallback for
+telephony, WhatsApp and storage (by design), built-in prices for speech, calls and email (`costPerUnit` per connection), embeddings
+on organizations' connections (the vector column fixes the model), Telnyx voice webhook signatures (the URL token remains),
+inbound email on providers other than Resend (the JSON hook remains).
 
 Model routing, skipped: routing embeddings (the 1536-dimension column fixes the model), a "test this key" button (a key is
 proven by its first call; failures show on the Usage tab), per-workspace or per-employee policies (organization and task only),

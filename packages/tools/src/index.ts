@@ -8,7 +8,7 @@ import { httpRequestTool } from "./tools/http-request.ts";
 import { webhookTool } from "./tools/webhook.ts";
 
 export { createToolExecutor, type ToolExecutor, type ToolOutcome, type ToolScope } from "./executor.ts";
-export { isPrivateAddress, safeFetch } from "./net.ts";
+export { isPrivateAddress, publicLookup, resolver, safeFetch } from "./net.ts";
 export { createToolRegistry, type ToolRegistry } from "./registry.ts";
 export { localTime, zonedTime } from "./tools/calendar.ts";
 export { defineTool, ToolError, type AnyTool, type Mailer, type RetryPolicy, type ToolContext, type ToolDefinition } from "./types.ts";

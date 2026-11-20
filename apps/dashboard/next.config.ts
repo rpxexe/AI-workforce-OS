@@ -10,6 +10,10 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
   // Workspace packages ship TypeScript source, so Next.js must compile them.
   transpilePackages: ["@workforce/shared"],
+  // Phase 14 renamed "AI models" to "Model routing"; keys moved to Settings > AI Providers.
+  async redirects() {
+    return [{ source: "/ai-models", destination: "/model-routing", permanent: false }];
+  },
   turbopack: {
     rules: {
       "*.css": {

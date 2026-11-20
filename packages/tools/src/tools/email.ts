@@ -24,7 +24,10 @@ export const emailTool = defineTool({
   async execute(input, ctx) {
     if (!ctx.mailer) return { status: "sent" as const, messageId: ctx.executionId, testMode: true };
     // The execution id is the idempotency key, so a retried call cannot send twice.
-    const { messageId } = await ctx.mailer.send({ to: input.to, subject: input.subject, text: input.body, idempotencyKey: ctx.executionId });
-    return { status: "sent" as const, messageId, testMode: false };
+    const { messageId, testMode = false } = await ctx.mailer.send(
+      { to: input.to, subject: input.subject, text: input.body, idempotencyKey: ctx.executionId },
+      { organizationId: ctx.organizationId, workspaceId: ctx.workspaceId, employeeId: ctx.employeeId },
+    );
+    return { status: "sent" as const, messageId, testMode };
   },
 });

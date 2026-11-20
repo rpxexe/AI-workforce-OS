@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { EmbeddingProvider } from "@workforce/ai-provider";
 import { Prisma, prisma } from "@workforce/database";
 import { retrieve } from "@workforce/knowledge";
@@ -18,6 +19,7 @@ import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
 import { employeeParams, within } from "./employees.ts";
+import type { ProviderService } from "./providers/service.ts";
 
 const id = z.string().min(1);
 const workspaceParams = z.object({ workspaceId: id });
@@ -61,9 +63,20 @@ export function knowledgeRoutes(
   getEmbedder: () => EmbeddingProvider,
   /** Queues processing of a document (the knowledge/document.uploaded job). */
   queueProcessing: (documentId: string) => Promise<void>,
+  /** Phase 14: the organization's default object storage, where new uploads go instead of Postgres when there is one. */
+  files?: Pick<ProviderService, "storage" | "storageById">,
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const base = "/workspaces/:workspaceId/knowledge";
+  /** Removes a deleted document's file from object storage; a failure leaves an orphan object, logged, never a failed delete. */
+  const removeStored = (req: FastifyRequest, organizationId: string, doc: { storageConnectionId: string | null; storageKey: string | null }) => {
+    if (!files || !doc.storageConnectionId || !doc.storageKey) return;
+    const key = doc.storageKey;
+    files
+      .storageById(organizationId, doc.storageConnectionId)
+      .then((storage) => storage.delete(key))
+      .catch((err: unknown) => req.log.warn({ err, key }, "Removing a stored file failed"));
+  };
 
   /** 503 with a plain message when the embedding provider is misconfigured; details go to the log. */
   const embedder = (log: FastifyBaseLogger) => {
@@ -122,8 +135,10 @@ export function knowledgeRoutes(
   app.delete(`${base}/sources/:sourceId`, async (req, reply) => {
     const { workspaceId, sourceId } = sourceParams.parse(req.params);
     const scope = await inWorkspace(admin(req), workspaceId);
+    const stored = await prisma.knowledgeDocument.findMany({ where: { sourceId, ...within(scope), storageKey: { not: null } }, select: { storageConnectionId: true, storageKey: true } });
     const { count } = await prisma.knowledgeSource.deleteMany({ where: { id: sourceId, ...within(scope) } });
     if (count === 0) throw httpError(404, "Knowledge source not found");
+    for (const doc of stored) removeStored(req, scope.organizationId, doc);
     return reply.code(204).send();
   });
 
@@ -145,6 +160,19 @@ export function knowledgeRoutes(
       if (!source) throw httpError(404, "Knowledge source not found");
       embedder(req.log); // refuse the upload now rather than fail the document later
 
+      // With object storage the file goes there first; a row is only written for a file that was stored.
+      const storage = files ? await files.storage(scope.organizationId) : null;
+      let stored: { storageConnectionId: string; storageKey: string } | null = null;
+      if (storage) {
+        const storageKey = `knowledge/${scope.workspaceId}/${randomUUID()}/${name.replace(/[^\w.-]+/g, "_")}`;
+        try {
+          await storage.storage.put(storageKey, req.body, "application/octet-stream");
+        } catch (err) {
+          req.log.error({ err }, "Storing an upload failed");
+          throw httpError(502, `The file could not be stored in ${storage.storage.name}: ${err instanceof Error ? err.message : "unknown error"}`);
+        }
+        stored = { storageConnectionId: storage.connectionId, storageKey };
+      }
       const document = await prisma.knowledgeDocument.create({
         data: {
           ...within(scope),
@@ -152,7 +180,7 @@ export function knowledgeRoutes(
           name,
           kind,
           sizeBytes: req.body.length,
-          content: new Uint8Array(req.body),
+          ...(stored ?? { content: new Uint8Array(req.body) }),
           createdBy: scope.userId,
         },
         select: documentSelect,
@@ -165,8 +193,10 @@ export function knowledgeRoutes(
   app.delete(`${base}/documents/:documentId`, async (req, reply) => {
     const { workspaceId, documentId } = documentParams.parse(req.params);
     const scope = await inWorkspace(admin(req), workspaceId);
+    const doc = await prisma.knowledgeDocument.findFirst({ where: { id: documentId, ...within(scope) }, select: { storageConnectionId: true, storageKey: true } });
     const { count } = await prisma.knowledgeDocument.deleteMany({ where: { id: documentId, ...within(scope) } });
-    if (count === 0) throw httpError(404, "Document not found");
+    if (count === 0 || !doc) throw httpError(404, "Document not found");
+    removeStored(req, scope.organizationId, doc);
     return reply.code(204).send();
   });
 

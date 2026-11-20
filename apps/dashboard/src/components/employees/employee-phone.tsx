@@ -1,6 +1,6 @@
 "use client";
 
-import type { CallDetail, CallSummary, PhoneNumberInfo } from "@workforce/shared";
+import type { CallDetail, CallSummary, PhoneNumberInfo, ProviderSettings } from "@workforce/shared";
 import { PhoneIncoming, PhoneOutgoing } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
@@ -8,11 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApi, useApiQuery } from "@/lib/api";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
 const seconds = (s: number | null) => (s === null ? "" : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`);
+/** The phone-account select's value for "no connectionId": the organization's default, else the platform's accounts. */
+const ORG_DEFAULT = "default";
 const when = (iso: string) => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 /** The employee's phone numbers, outbound calls, and recent calls with their transcripts. */
@@ -32,6 +35,10 @@ export function EmployeePhone({
   const base = `/workspaces/${workspaceId}`;
   const numbers = useApiQuery<PhoneNumberInfo[]>(`${base}/phone-numbers`);
   const calls = useApiQuery<CallSummary[]>(`${base}/calls?employeeId=${employeeId}`);
+  // Only admins add numbers, so only they need the organization's phone accounts.
+  const providers = useApiQuery<ProviderSettings>(canEdit ? "/providers/settings" : null);
+  const phoneAccounts = (providers.data?.connections ?? []).filter((c) => c.providerType === "telephony" && c.status === "active");
+  const [account, setAccount] = useState(ORG_DEFAULT);
   const [newNumber, setNewNumber] = useState("");
   const [to, setTo] = useState("");
   const [busy, setBusy] = useState<"add" | "call" | string>();
@@ -60,7 +67,7 @@ export function EmployeePhone({
   const add = (event: FormEvent) => {
     event.preventDefault();
     void run("add", async () => {
-      await api(`${base}/phone-numbers`, { method: "POST", body: { number: newNumber.trim(), employeeId } });
+      await api(`${base}/phone-numbers`, { method: "POST", body: { number: newNumber.trim(), employeeId, ...(account !== ORG_DEFAULT && { connectionId: account }) } });
       setNewNumber("");
       numbers.reload();
     });
@@ -76,7 +83,7 @@ export function EmployeePhone({
   const remove = (n: PhoneNumberInfo) =>
     setConfirm({
       title: `Stop answering ${n.number}?`,
-      description: "Callers will hear that the number is not in service. The number stays in your Twilio account.",
+      description: "Callers will hear that the number is not in service. The number stays in your phone provider account.",
       confirmLabel: "Remove number",
       onConfirm: () =>
         void run(n.id, async () => {
@@ -99,7 +106,7 @@ export function EmployeePhone({
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">Phone numbers</h3>
         {mine.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No number yet. Add one from your Twilio account.</p>
+          <p className="text-sm text-muted-foreground">No number yet. Add one from your phone provider account.</p>
         ) : (
           <ul className="flex flex-col gap-2">
             {mine.map((n) => (
@@ -123,7 +130,7 @@ export function EmployeePhone({
           <form onSubmit={add} className="flex flex-wrap items-end gap-2">
             <div className="flex min-w-48 flex-1 flex-col gap-1.5 sm:max-w-xs">
               <Label htmlFor="phone-number" className="text-xs">
-                Add a Twilio number
+                Add a number
               </Label>
               <Input
                 id="phone-number"
@@ -134,6 +141,26 @@ export function EmployeePhone({
                 className="font-mono"
               />
             </div>
+            {phoneAccounts.length > 0 && (
+              <div className="flex min-w-48 flex-1 flex-col gap-1.5 sm:max-w-xs">
+                <Label htmlFor="phone-account" className="text-xs">
+                  Phone account
+                </Label>
+                <Select value={account} onValueChange={setAccount}>
+                  <SelectTrigger id="phone-account" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ORG_DEFAULT}>Organization default</SelectItem>
+                    {phoneAccounts.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <Button type="submit" size="sm" variant="outline" disabled={busy !== undefined || newNumber.trim() === ""}>
               {busy === "add" ? "Adding" : "Add number"}
             </Button>

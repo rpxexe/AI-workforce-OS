@@ -127,7 +127,7 @@ const telnyx: TelephonyProvider = {
     return { providerNumberId: "tn-1" };
   },
 };
-const voice: VoiceConfig = { telephony: [telephony, telnyx], stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
+const voice: Omit<VoiceConfig, "providers"> = { telephony: [telephony, telnyx], stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
 
 // ---- Helpers ----
 

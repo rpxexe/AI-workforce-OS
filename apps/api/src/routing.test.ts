@@ -16,6 +16,7 @@ import {
 } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { defaultEmployeeConfig, type AiCredential, type AiSettings, type AiUsageSummary, type ConversationDetail, type EmployeeDetail, type Workspace } from "@workforce/shared";
+import { openCredentials } from "@workforce/providers";
 import { openKey, sealKey } from "./ai.ts";
 import { buildApp } from "./app.ts";
 import { adminOf, deleteOrgs, headerAuth, memberOf, newOrg } from "./testing.ts";
@@ -297,12 +298,13 @@ test("BYOAI: keys are admin-only, validated, sealed at rest and never returned",
   assert.equal(credential.keyHint, "…WXYZ");
   assert.equal((await call("POST", "/ai/credentials", adminOf(orgA), key)).statusCode, 409, "names are unique");
 
-  const row = await prisma.aiCredential.findUniqueOrThrow({ where: { id: credential.id } });
-  assert.ok(!row.secret.includes("sk-ant-secret"));
-  assert.equal(openKey(row.secret, SECRET), "sk-ant-secret-WXYZ");
+  // Phase 14: keys are "llm" provider connections, sealed as JSON.
+  const row = await prisma.providerConnection.findUniqueOrThrow({ where: { id: credential.id } });
+  assert.ok(!row.encryptedCredentials.includes("sk-ant-secret"));
+  assert.equal(openCredentials(row.encryptedCredentials, { current: SECRET }).credentials.apiKey, "sk-ant-secret-WXYZ");
 
   const settings = await call("GET", "/ai/settings", memberOf(orgA));
-  assert.ok(!settings.payload.includes("sk-ant-secret") && !settings.payload.includes(row.secret));
+  assert.ok(!settings.payload.includes("sk-ant-secret") && !settings.payload.includes(row.encryptedCredentials));
   assert.equal(settings.json<AiSettings>().credentials.length, 1);
   assert.deepEqual(settings.json<AiSettings>().platform, { provider: "fake", model: "fake-1" });
 

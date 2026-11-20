@@ -22,6 +22,14 @@ const OPENROUTER = {
   defaultEmbeddingModel: "openai/text-embedding-3-small",
 };
 
+const openAIStyle = (name: string, baseUrl: string, keyVar = `${name.toUpperCase()}_API_KEY`): Vendor => ({
+  name,
+  baseUrl,
+  keyVar,
+  baseUrlVar: `${name.toUpperCase()}_BASE_URL`,
+  defaultModel: "",
+});
+
 /** Services speaking the OpenAI chat-completions protocol. The env variables hold the platform's own keys. */
 const VENDORS: Record<string, Vendor> = {
   openrouter: OPENROUTER,
@@ -41,8 +49,19 @@ const VENDORS: Record<string, Vendor> = {
     baseUrlVar: "GEMINI_BASE_URL",
     defaultModel: "",
   },
+  // Phase 14: more OpenAI-compatible services. The platform can use them too (AI_PROVIDER=groq and GROQ_API_KEY, ...).
+  groq: openAIStyle("groq", "https://api.groq.com/openai/v1"),
+  mistral: openAIStyle("mistral", "https://api.mistral.ai/v1"),
+  deepseek: openAIStyle("deepseek", "https://api.deepseek.com/v1"),
+  xai: openAIStyle("xai", "https://api.x.ai/v1"),
+  together: openAIStyle("together", "https://api.together.xyz/v1"),
+  fireworks: openAIStyle("fireworks", "https://api.fireworks.ai/inference/v1"),
+  huggingface: openAIStyle("huggingface", "https://router.huggingface.co/v1", "HF_TOKEN"),
   openai_compatible: { name: "openai_compatible", baseUrl: "", keyVar: "", baseUrlVar: "", defaultModel: "" },
 };
+
+/** The vendors' base URLs, for listing an account's models (Test Connection). */
+export const VENDOR_BASE_URLS: Record<string, string> = Object.fromEntries(Object.entries(VENDORS).map(([kind, v]) => [kind, v.baseUrl]));
 
 const PROVIDERS: Record<string, (settings: ProviderSettings, env: Env) => AIProvider> = {
   ...Object.fromEntries(Object.entries(VENDORS).map(([kind, vendor]) => [kind, openAICompatibleProvider(vendor)])),

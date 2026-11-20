@@ -17,18 +17,23 @@ import type { STTProvider } from "@workforce/stt";
 import { dialResultOf, ENDED_STATUSES, HANG_UP, TelephonyError, type TelephonyProvider } from "@workforce/telephony";
 import type { ToolExecutor } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "../auth.ts";
 import { employeeParams, within } from "../employees.ts";
+import type { WebSocket } from "ws";
+import type { ProviderService } from "../providers/service.ts";
 import { runCallSession, streamToken, type VoiceLimits } from "./session.ts";
 
 /** Everything voice needs from outside. Missing pieces make voice routes answer 503, naming them. */
 export type VoiceConfig = {
-  /** Every configured phone provider. Each number belongs to one; its webhooks live under /voice/<name>/. */
+  /** The platform's phone providers (.env). Each number belongs to one, or to an organization's connection. */
   telephony: TelephonyProvider[];
+  /** The platform's speech providers (.env): the last level of resolution. */
   stt: STTProvider | null;
   tts: TTSProvider | null;
+  /** Phase 14: organizations' connections (telephony accounts, speech) and per-call resolution. */
+  providers: ProviderService;
   /** https URL the provider reaches this API at (an ngrok tunnel in development). */
   publicUrl: string | null;
   /** Signs media stream tokens; a provider secret by default. */
@@ -47,7 +52,7 @@ type Ai = {
 };
 
 const workspaceParams = z.object({ workspaceId: z.string().min(1) });
-const providerParams = z.object({ provider: z.string().min(1) });
+const providerParams = z.object({ provider: z.string().min(1), connection: z.string().min(1).optional() });
 const numberParams = workspaceParams.extend({ numberId: z.string().min(1) });
 const callParams = workspaceParams.extend({ callId: z.string().min(1) });
 const statusQuery = z.object({ callId: z.string().min(1).optional() });
@@ -87,36 +92,41 @@ const TRANSFER_UNANSWERED = "Sorry, no one from our team could take your call ri
 export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, voice: VoiceConfig, ai: Ai) {
   const { member, admin, inWorkspace } = guards(authenticate);
 
-  /** The configured voice pieces, or 503 naming what is missing. */
+  /** The address and signing secret voice needs whoever's account carries the call, or 503 naming what is missing. */
   const ready = () => {
-    const missing = [
-      voice.telephony.length === 0 && "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN (or TELNYX_API_KEY / TELNYX_APP_ID)",
-      !voice.stt && "DEEPGRAM_API_KEY",
-      !voice.tts && "ELEVENLABS_API_KEY",
-      !voice.publicUrl && "PUBLIC_URL",
-    ].filter(Boolean);
-    if (voice.telephony.length === 0 || !voice.stt || !voice.tts || !voice.publicUrl || !voice.secret)
-      throw httpError(503, `Voice is not configured. Missing in .env: ${missing.join(", ")}`);
+    if (!voice.publicUrl || !voice.secret)
+      throw httpError(
+        503,
+        `Voice is not configured. Missing in .env: ${[
+          voice.telephony.length === 0 && "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN (or TELNYX_API_KEY / TELNYX_APP_ID, or a phone connection in Settings)",
+          !voice.publicUrl && "PUBLIC_URL",
+          !voice.secret && "AI_CREDENTIALS_KEY",
+        ]
+          .filter(Boolean)
+          .join(", ")}`,
+      );
     const publicUrl = voice.publicUrl.replace(/\/+$/, "");
     return {
-      providers: voice.telephony,
-      stt: voice.stt,
-      tts: voice.tts,
       publicUrl,
       secret: voice.secret,
-      /** The webhook and stream addresses of one provider. */
-      urls: (telephony: TelephonyProvider) => ({
-        streamUrl: `${publicUrl.replace(/^http/, "ws")}/voice/${telephony.name}/stream`,
-        statusUrl: `${publicUrl}/voice/${telephony.name}/status`,
-        inboundUrl: `${publicUrl}/voice/${telephony.name}/inbound`,
-      }),
+      /** The webhook and stream addresses of a provider: the platform's account, or an organization's connection. */
+      urls: (telephony: TelephonyProvider, connectionId: string | null) => {
+        const path = `/voice/${telephony.name}${connectionId ? `/c/${connectionId}` : ""}`;
+        return {
+          streamUrl: `${publicUrl.replace(/^http/, "ws")}${path}/stream`,
+          statusUrl: `${publicUrl}${path}/status`,
+          inboundUrl: `${publicUrl}${path}/inbound`,
+          transferUrl: `${publicUrl}${path}/transfer`,
+        };
+      },
     };
   };
-  /** The configured provider a number or webhook belongs to. */
-  const providerOf = (v: ReturnType<typeof ready>, name: string) => {
-    const telephony = v.providers.find((p) => p.name === name);
-    if (!telephony) throw httpError(503, `The ${name} phone provider is not configured`);
-    return telephony;
+  /** The provider a number or webhook belongs to: an organization's connection, or the platform's account. */
+  const providerOf = (name: string, connectionId: string | null) => voice.providers.telephony(name, connectionId);
+  /** Speech for a call: its workflow's, its employee's, the organization's default, or the platform's. */
+  const speechFor = async (scope: { organizationId: string; workspaceId: string; employeeId: string; workflowId: string | null }) => {
+    const [stt, tts] = await Promise.all([voice.providers.stt(scope), voice.providers.tts(scope)]);
+    return { stt, tts };
   };
 
   /** The version that answers a call with this customer (published, or a rollout's candidate), or null if the employee cannot take calls. */
@@ -132,25 +142,35 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     hooks.addContentTypeParser(["application/x-www-form-urlencoded", "application/json"], { parseAs: "string" }, (_req, body, done) =>
       done(null, body),
     );
-    const verified = (req: FastifyRequest) => {
+    const verified = async (req: FastifyRequest) => {
       const v = ready();
-      const telephony = providerOf(v, providerParams.parse(req.params).provider);
+      const { provider, connection = null } = providerParams.parse(req.params);
+      const telephony = await providerOf(provider, connection);
       const rawBody = typeof req.body === "string" ? req.body : "";
       const params = Object.fromEntries(new URLSearchParams(rawBody));
       // Signed over the exact URL the provider called.
       if (!telephony.verifyWebhook({ url: v.publicUrl + req.url, params, rawBody, headers: req.headers }))
         throw httpError(403, "Invalid webhook signature");
-      return { v, telephony, params };
+      return { v, telephony, params, connectionId: connection };
+    };
+    /** Each webhook answers for the platform's account (/voice/<provider>/...) and for connections (/voice/<provider>/c/<id>/...). */
+    const both = (path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>) => {
+      hooks.post(`/voice/:provider${path}`, handler);
+      hooks.post(`/voice/:provider/c/:connection${path}`, handler);
     };
 
-    hooks.post("/voice/:provider/inbound", async (req, reply) => {
-      const { v, telephony, params } = verified(req);
+    both("/inbound", async (req, reply) => {
+      const { v, telephony, params, connectionId } = await verified(req);
       reply.type("text/xml");
       const { CallSid: sid = "", From: from = "", To: to = "" } = params;
       const number = await prisma.phoneNumber.findUnique({ where: { number: to } });
-      if (!number || number.provider !== telephony.name) return telephony.sayAndHangUp("This number is not in service.");
+      // The number must be on the account that called: another organization's connection cannot ring it.
+      if (!number || number.provider !== telephony.name || (number.connectionId ?? null) !== connectionId)
+        return telephony.sayAndHangUp("This number is not in service.");
       const version = await liveVersion(number.employeeId, from);
       if (!version) return telephony.sayAndHangUp("Sorry, no one is available to take your call right now. Please try again later.");
+      const speech = await speechFor({ organizationId: number.organizationId, workspaceId: number.workspaceId, employeeId: number.employeeId, workflowId: null });
+      if (!speech.stt?.open || !speech.tts) return telephony.sayAndHangUp("Sorry, this line is not set up to take calls yet. Please try again later.");
 
       // The provider retries webhooks; one call row per call.
       let call = await prisma.call.findUnique({ where: { providerCallId: sid } });
@@ -168,6 +188,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
             from,
             to,
             provider: telephony.name,
+            connectionId,
             providerCallId: sid,
             greeting: fill(number.greeting, version.name),
             participants: {
@@ -179,19 +200,35 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
           },
         });
       }
-      return telephony.connectToStream(v.urls(telephony).streamUrl, { callId: call.id, token: streamToken(v.secret, call.id) });
+      return telephony.connectToStream(v.urls(telephony, connectionId).streamUrl, { callId: call.id, token: streamToken(v.secret, call.id) });
     });
 
-    hooks.post("/voice/:provider/status", async (req, reply) => {
-      const { telephony, params } = verified(req);
+    both("/status", async (req, reply) => {
+      const { telephony, params, connectionId } = await verified(req);
       const { providerCallId, status, durationSec } = telephony.statusOf(params);
-      let call = providerCallId ? await prisma.call.findUnique({ where: { providerCallId } }) : null;
+      let call = providerCallId ? await prisma.call.findFirst({ where: { providerCallId, provider: telephony.name, connectionId } }) : null;
       // An outbound call whose provider did not return its id when placed: the first callback names it.
       const { callId } = statusQuery.parse(req.query);
       if (!call && callId && providerCallId) {
-        const placed = await prisma.call.findFirst({ where: { id: callId, provider: telephony.name, providerCallId: null } });
+        const placed = await prisma.call.findFirst({ where: { id: callId, provider: telephony.name, connectionId, providerCallId: null } });
         if (placed) call = await prisma.call.update({ where: { id: placed.id }, data: { providerCallId } });
       }
+      // The billed length, once: call minutes are usage of the telephony provider (Phase 14).
+      if (call && durationSec !== null && call.durationSec === null)
+        voice.providers.recorder({ organizationId: call.organizationId, workspaceId: call.workspaceId, employeeId: call.employeeId, workflowId: call.workflowId }, "telephony", "voice")({
+          requestId: call.id,
+          attempt: 1,
+          provider: telephony.name,
+          model: call.direction.toLowerCase(),
+          connectionId,
+          operation: "call",
+          latencyMs: 0,
+          success: status !== "FAILED",
+          errorKind: null,
+          error: null,
+          seconds: durationSec,
+          costUsd: null,
+        });
       if (call && status && !ENDED_STATUSES.includes(call.status)) {
         const ended = ENDED_STATUSES.includes(status);
         await prisma.call.update({
@@ -213,8 +250,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     // How a live transfer to a person ended (<Dial action>). Answered: the conversation is with people and the
     // call ends when they hang up. Not answered: the caller hears that someone will call back, and the
     // conversation stays in the inbox queue.
-    hooks.post("/voice/:provider/transfer", async (req, reply) => {
-      const { telephony, params } = verified(req);
+    both("/transfer", async (req, reply) => {
+      const { telephony, params } = await verified(req);
       reply.type("text/xml");
       const { transferId } = z.object({ transferId: z.string().min(1) }).parse(req.query);
       const { status, talkSec } = dialResultOf(params);
@@ -239,18 +276,25 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     });
   });
 
-  app.get("/voice/:provider/stream", { websocket: true }, (socket, req) => {
-    let v: ReturnType<typeof ready>;
-    let telephony: TelephonyProvider;
-    try {
-      v = ready();
-      telephony = providerOf(v, providerParams.parse(req.params).provider);
-    } catch {
+  const stream = (socket: WebSocket, req: FastifyRequest) => {
+    // Media arriving before the provider is known is buffered, then replayed to the session.
+    const early: Buffer[] = [];
+    const hold = (data: Buffer) => early.push(data);
+    socket.on("message", hold);
+    void (async () => {
+      const v = ready();
+      const { provider, connection = null } = providerParams.parse(req.params);
+      const telephony = await providerOf(provider, connection);
+      socket.off("message", hold);
+      runCallSession(socket, { ...ai, telephony, connectionId: connection, speech: speechFor, publicUrl: v.publicUrl, secret: v.secret, limits: voice.limits, log: req.log });
+      for (const data of early) socket.emit("message", data);
+    })().catch((err: unknown) => {
+      req.log.warn({ err }, "Call stream refused");
       socket.close();
-      return;
-    }
-    runCallSession(socket, { ...ai, telephony, stt: v.stt, tts: v.tts, publicUrl: v.publicUrl, secret: v.secret, limits: voice.limits, log: req.log });
-  });
+    });
+  };
+  app.get("/voice/:provider/stream", { websocket: true }, stream);
+  app.get("/voice/:provider/c/:connection/stream", { websocket: true }, stream);
 
   // ---- Dashboard ----
 
@@ -279,15 +323,22 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     if (await prisma.phoneNumber.findUnique({ where: { number: body.number } }))
       throw httpError(409, "This number is already assigned to an employee");
     const v = ready();
-    // The first configured provider whose account owns the number takes it.
-    // shortcut: no provider choice in the request; add one with the provider settings page
-    let owner: { telephony: TelephonyProvider; providerNumberId: string } | undefined;
+    // The connection named, else the organization's default phone connection, else the first platform account owning the number.
+    const chosen = body.connectionId
+      ? await prisma.providerConnection.findFirst({ where: { id: body.connectionId, organizationId: scope.organizationId, providerType: "telephony", status: "active" } })
+      : await voice.providers.defaultOf(scope.organizationId, "telephony");
+    if (body.connectionId && !chosen) throw httpError(400, "Unknown phone connection");
+    const candidates: { telephony: TelephonyProvider; connectionId: string | null }[] = chosen
+      ? [{ telephony: await providerOf(chosen.providerId, chosen.id), connectionId: chosen.id }]
+      : voice.telephony.map((telephony) => ({ telephony, connectionId: null }));
+    if (candidates.length === 0) throw httpError(503, "No phone provider: connect one in Settings, or configure one in the server's .env");
+    let owner: { telephony: TelephonyProvider; connectionId: string | null; providerNumberId: string } | undefined;
     const refusals: string[] = [];
-    for (const telephony of v.providers) {
-      const urls = v.urls(telephony);
+    for (const { telephony, connectionId } of candidates) {
+      const urls = v.urls(telephony, connectionId);
       try {
         const { providerNumberId } = await telephony.configureNumber(body.number, { voiceUrl: urls.inboundUrl, statusCallbackUrl: urls.statusUrl });
-        owner = { telephony, providerNumberId };
+        owner = { telephony, connectionId, providerNumberId };
         break;
       } catch (err) {
         if (!(err instanceof TelephonyError)) throw err;
@@ -301,6 +352,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         employeeId: body.employeeId,
         number: body.number,
         provider: owner.telephony.name,
+        connectionId: owner.connectionId,
         providerNumberId: owner.providerNumberId,
         greeting: body.greeting ?? DEFAULT_INBOUND_GREETING,
         createdBy: scope.userId,
@@ -317,8 +369,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     const number = await prisma.phoneNumber.findFirst({ where: { id: numberId, ...within(scope) } });
     if (!number) throw httpError(404, "Phone number not found");
     const v = ready();
-    const telephony = providerOf(v, number.provider);
-    const urls = v.urls(telephony);
+    const telephony = await providerOf(number.provider, number.connectionId);
+    const urls = v.urls(telephony, number.connectionId);
     await telephony.configureNumber(number.number, { voiceUrl: urls.inboundUrl, statusCallbackUrl: urls.statusUrl }).catch((err: unknown) => {
       throw telephonyError(err);
     });
@@ -339,7 +391,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
    * tenant ids; `createdBy` is null for calls placed by a workflow. A workflow step passes an
    * `idempotencyKey`, and placing again with the same key returns the first call instead of dialing.
    */
-  const placeCall = async (scope: Tenant & { createdBy: string | null; idempotencyKey?: string }, id: string, body: PlaceCall) => {
+  const placeCall = async (scope: Tenant & { createdBy: string | null; idempotencyKey?: string; workflowId?: string }, id: string, body: PlaceCall) => {
     if (scope.idempotencyKey) {
       const earlier = await prisma.call.findFirst({ where: { idempotencyKey: scope.idempotencyKey, ...within(scope) } });
       if (earlier?.providerCallId) return earlier;
@@ -357,8 +409,11 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     });
     if (!from) throw httpError(400, "Give this employee a phone number before it makes calls");
     const v = ready();
-    const telephony = providerOf(v, from.provider);
-    const urls = v.urls(telephony);
+    const telephony = await providerOf(from.provider, from.connectionId);
+    const urls = v.urls(telephony, from.connectionId);
+    const speech = await speechFor({ ...within(scope), employeeId: id, workflowId: scope.workflowId ?? null });
+    if (!speech.stt?.open || !speech.tts)
+      throw httpError(503, "No live speech recognition or speech synthesis is configured: connect them in Settings, or in the server's .env");
 
     const customerId = await ai.memory(scope).identify(scope, body.to);
     const call = await prisma.call.create({
@@ -372,6 +427,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         from: from.number,
         to: body.to,
         provider: telephony.name,
+        connectionId: from.connectionId,
+        workflowId: scope.workflowId ?? null,
         greeting: fill(body.greeting ?? DEFAULT_OUTBOUND_GREETING, version.name),
         createdBy: scope.createdBy,
         idempotencyKey: scope.idempotencyKey,

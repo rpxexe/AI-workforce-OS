@@ -284,12 +284,49 @@ problem re-discovered.
   Refusals are not shopped around; a caller that cancelled is not retried. A tool step is a new call, so it is routed again.
 - **A cost limit skips models with no known price.** An unknown price cannot be checked; the error lists every model ruled out
   and why. OpenRouter's reported cost is recorded after the fact but cannot be known before the call.
-- **Keys are sealed with one server secret** (`AI_CREDENTIALS_KEY`), not a KMS: no new infrastructure. Rotating it means
-  re-entering keys. Without it, keys cannot be stored and everything runs on the platform.
+- **Keys are sealed with one server secret** (`AI_CREDENTIALS_KEY`), not a KMS: no new infrastructure. Rotating it meant
+  re-entering keys; since Phase 14, `AI_CREDENTIALS_KEY_PREVIOUS` opens old rows while they are sealed again. Without it, keys cannot be stored and everything runs on the platform.
 - **Usage rows are written per attempt and not awaited**, so a failed write never fails a reply; a row lost to a database hiccup
   is logged.
 - **Latency and cooldown are remembered in the process**, not in the database: they steer ordering only, and a restart just
   measures again.
+
+- **One connection table for every provider type** (Phase 14). Phase 13's `AiCredential` became `ProviderConnection` rows of type
+  `llm` with the same ids (the migration copies them; the sealed key moves unchanged as format `v1`), so policies, usage rows and
+  `/ai/credentials` keep working. New rows seal a JSON object of all secret fields (`v2`); a `v1` row is sealed again as `v2` the
+  first time it is opened.
+- **The catalog is data in `@workforce/shared`, the registry is code in `@workforce/providers`.** The dashboard renders forms and
+  validates with the same catalog and `checkFields` the API uses; adapters and test calls stay on the server. "Supported" means a
+  catalog entry with a registry entry (a test enforces it); everything else is `coming_soon` and cannot be connected.
+- **Coming soon: Plivo, Vonage, SIP, and live recognition on Google and Azure** (owner's choice). Plivo and Vonage stream audio in
+  their own formats (Vonage: 16 kHz linear PCM over its own protocol), SIP needs a media server, Google's live API is gRPC and
+  Azure's is its SDK. Google and Azure transcribe recorded voice notes. VoiceStudio is supported through its OpenAI-compatible
+  `/v1/audio/speech` (owner's request): it runs on the owner's machine, so it must be exposed at a public https address.
+- **Audio from OpenAI-compatible speech servers is asked for as WAV and converted** (`wavToMulaw`: header parsed as it streams,
+  mono, box-filtered resample to 8 kHz, G.711 mu-law). WAV says its own rate and depth, which "pcm" from unknown servers (Kokoro,
+  VoiceStudio, custom) does not.
+- **Resolution: workflow > employee > organization default > platform; later levels are fallbacks, the platform only when chosen**
+  (an override naming it, or nothing configured at all), as Phase 13 decided for models. Overrides live on the employee and the
+  workflow, not on versions, like tools and knowledge. A disabled or deleted connection named by an override is skipped (disabling
+  is how an admin stops its use). For language models the task policy sits between the overrides and the default connection.
+- **No fallback on authentication or configuration errors**, for every type including Phase 13's router: a wrong key or setting is
+  the admin's to fix, and routing around it would hide it and send data to a provider nobody picked for that request.
+- **What does not fall back**: telephony and WhatsApp (a number belongs to one account), storage (a file must be read where it was
+  written), email after anything but a "try later" refusal (a network error or 5xx may have sent it).
+- **Telephony and WhatsApp per organization through connection paths** (`/voice/<provider>/c/<id>/...`), not a lookup by number
+  first: the signature can only be checked once the account is known, and a number only answers on its own connection.
+  Stream tokens are signed with a platform secret (`AI_CREDENTIALS_KEY` when no platform phone account exists).
+- **Calls check for live speech before ringing**: an inbound call is turned away politely, an outbound call refused (503), when the
+  employee resolves to no provider with the `live` capability (Whisper alone can transcribe voice notes but not answer calls).
+- **Test Connection uses the cheapest call that proves the key** and is limited to 10 per organization per minute; a second press
+  while a test runs shares its answer. Limits live in the process (several API processes each keep their own).
+- **DNS rebinding is closed by pinning, not by a second check**: `safeFetch` passes an undici `Agent` whose `lookup` refuses private
+  answers, so the address checked is the address connected to. SMTP connects to the checked IP and verifies TLS against the name.
+- **Uploads go to the organization's default storage when it has one**, else Postgres as before. A document remembers the
+  connection it was written to, so changing the default never loses files, and a connection holding files cannot be deleted.
+- **Speech, email and call usage share `AiUsage`** (with `providerType`, `operation`, `characters`, `seconds`) rather than new
+  tables: one place for metrics, one pattern for "one row per attempt". Costs for them are estimated only when the admin enters
+  `costPerUnit` on the connection: vendor prices change and no built-in table would stay right.
 
 ## Traps already hit
 
@@ -352,6 +389,11 @@ problem re-discovered.
   with `prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script` into a new migration folder,
   then `prisma migrate deploy` (Phase 12).
 - **`schema.prisma` has CRLF line endings**; edit scripts that match multi-line text must normalise them first.
+- **Importing `@workforce/providers` (or `@workforce/tools`) loads `@workforce/database`**, which throws without `DATABASE_URL`;
+  tests that need no database set a dummy one before importing (Phase 14).
+- **Prisma `groupBy` with a shared `by` variable does not typecheck**; the provider metrics use one SQL query with `FILTER` instead.
+- **A Fastify `httpError` drops custom fields**; the error handler now passes `issues` through on 400s so catalog field checks map
+  to form fields like Zod's do.
 
 ## Checking the signed-in UI without a login
 

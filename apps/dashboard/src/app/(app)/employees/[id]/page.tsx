@@ -27,6 +27,7 @@ import { EmployeePhone } from "@/components/employees/employee-phone";
 import { EmployeeReleases } from "@/components/employees/employee-releases";
 import { EmployeeTools } from "@/components/employees/employee-tools";
 import { DAY_LABELS, EmployeeAvatar, StatusBadge, formatDate } from "@/components/employees/meta";
+import { ProviderOverridesForm } from "@/components/providers/provider-overrides";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -333,6 +334,10 @@ export default withWorkspace(function EmployeePage({ workspace }) {
 
         <Section title="Tools" description="Actions this employee can take in other systems.">
           <EmployeeTools workspaceId={workspace.id} employeeId={id} canEdit={isAdmin && !archived} />
+        </Section>
+
+        <Section title="Providers" description="The AI model, speech and email accounts this employee uses instead of the organization's defaults.">
+          <ProviderOverridesForm path={`${path}/providers`} canEdit={isAdmin && !archived} />
         </Section>
 
         <Section title="Phone" description="Calls this employee answers and makes. Callers reach the published version.">

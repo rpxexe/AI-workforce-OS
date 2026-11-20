@@ -1,8 +1,14 @@
-// Text-to-speech providers. ElevenLabs is the only one so far.
+// Text-to-speech providers.
 import { elevenLabsProvider } from "./elevenlabs.ts";
 
 export * from "./types.ts";
 export { elevenLabsProvider } from "./elevenlabs.ts";
+export { openAISpeechProvider } from "./openai-speech.ts";
+export { googleTTSProvider } from "./google-tts.ts";
+export { azureTTSProvider } from "./azure-tts.ts";
+export { cartesiaProvider } from "./cartesia.ts";
+export { playHTProvider } from "./playht.ts";
+export { muLawEncode, stripWavHeader, wavToMulaw } from "./wav.ts";
 
 /** From `ELEVENLABS_API_KEY` (optional `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL`); null when not configured. */
 export function ttsFromEnv(env: Record<string, string | undefined> = process.env) {

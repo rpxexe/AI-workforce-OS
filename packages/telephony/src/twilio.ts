@@ -33,27 +33,38 @@ export function twilioSignature(authToken: string, url: string, params: Record<s
   return createHmac("sha1", authToken).update(payload).digest("base64");
 }
 
-type Credentials = { accountSid: string; authToken: string };
+type Credentials = {
+  accountSid: string;
+  authToken: string;
+  /** Signs webhooks when it is not the auth token (SignalWire's signing key). */
+  signingKey?: string;
+  /** "signalwire" for SignalWire's Twilio-compatible LaML API. */
+  name?: string;
+};
 
 /** Twilio over its REST API and Media Streams. Plain fetch: no SDK. */
-export function twilioProvider({ accountSid, authToken }: Credentials, api = "https://api.twilio.com"): TelephonyProvider {
+export function twilioProvider(
+  { accountSid, authToken, signingKey, name = "twilio" }: Credentials,
+  api = "https://api.twilio.com",
+  http: typeof fetch = fetch,
+): TelephonyProvider {
   const auth = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString("base64")}`;
   const base = `${api}/2010-04-01/Accounts/${accountSid}`;
 
   const request = async <T>(path: string, form?: URLSearchParams): Promise<T> => {
     let res: Response;
     try {
-      res = await fetch(`${base}${path}`, {
+      res = await http(`${base}${path}`, {
         method: form ? "POST" : "GET",
         headers: { authorization: auth, ...(form && { "content-type": "application/x-www-form-urlencoded" }) },
         body: form,
         signal: AbortSignal.timeout(10_000),
       });
     } catch (err) {
-      throw new TelephonyError("Twilio could not be reached", { cause: err });
+      throw new TelephonyError(`${name === "twilio" ? "Twilio" : "SignalWire"} could not be reached`, { cause: err });
     }
     const body = (await res.json().catch(() => ({}))) as T & { message?: string; code?: number };
-    if (!res.ok) throw new TelephonyError(`Twilio answered ${res.status}: ${body.message ?? "unknown error"}`);
+    if (!res.ok) throw new TelephonyError(`${name === "twilio" ? "Twilio" : "SignalWire"} answered ${res.status}: ${body.message ?? "unknown error"}`, { cause: { status: res.status } });
     return body;
   };
 
@@ -65,12 +76,13 @@ export function twilioProvider({ accountSid, authToken }: Credentials, api = "ht
   const fallback = "<Say>Sorry, something went wrong on our side. Please call again.</Say><Hangup/>";
 
   return {
-    name: "twilio",
+    name,
 
     verifyWebhook({ url, params, headers }) {
-      const signature = headers["x-twilio-signature"];
+      // SignalWire sends its own header name with Twilio's algorithm.
+      const signature = headers["x-twilio-signature"] ?? headers["x-signalwire-signature"];
       if (typeof signature !== "string") return false;
-      const expected = Buffer.from(twilioSignature(authToken, url, params));
+      const expected = Buffer.from(twilioSignature(signingKey ?? authToken, url, params));
       const given = Buffer.from(signature);
       return expected.length === given.length && timingSafeEqual(expected, given);
     },

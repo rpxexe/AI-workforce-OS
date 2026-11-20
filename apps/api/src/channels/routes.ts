@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { ChannelError, toInboundEmail, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
+import { ChannelError, resendEmail, toInboundEmail, type EmailProvider, type WhatsAppProvider } from "@workforce/channels";
 import { Prisma, prisma } from "@workforce/database";
 import {
   ADMIN_ROLE,
@@ -18,7 +18,8 @@ import {
   type ToolName,
   type WhatsAppProviderName,
 } from "@workforce/shared";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { ProviderService } from "../providers/service.ts";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "../auth.ts";
 import { employeeParams, within } from "../employees.ts";
@@ -27,7 +28,8 @@ import { whatsappProviderOf, type ChannelRow, type ChannelService } from "./serv
 const channelParams = employeeParams.extend({ kind: z.enum(MESSAGING_CHANNELS) });
 const workspaceParams = z.object({ workspaceId: z.string().min(1) });
 const emailHookParams = z.object({ channelId: z.string().min(1), token: z.string().min(1) });
-const providerParams = z.object({ provider: z.enum(WHATSAPP_PROVIDERS) });
+const providerParams = z.object({ provider: z.enum(WHATSAPP_PROVIDERS), connection: z.string().min(1).optional() });
+const connectionParams = z.object({ connection: z.string().min(1) });
 /** What each WhatsApp provider needs in .env. */
 const MISSING: Record<WhatsAppProviderName, string> = {
   meta: "META_WHATSAPP_ACCESS_TOKEN, META_APP_SECRET, META_WHATSAPP_VERIFY_TOKEN",
@@ -40,6 +42,9 @@ const same = (a: string, b: string) => {
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
 };
+
+/** The organization's messaging connection carrying a WhatsApp channel's number; null = the platform's account. */
+const connectionOf = (c: ChannelRow) => (c.config as { connectionId?: string }).connectionId ?? null;
 
 /** Where the outside world reaches this API: PUBLIC_URL, or the address the dashboard used. */
 const baseUrl = (publicUrl: string | null, req: FastifyRequest) => (publicUrl ?? `${req.protocol}://${req.host}`).replace(/\/+$/, "");
@@ -57,7 +62,7 @@ const toInfo = (c: ChannelRow, admin: boolean, base: string): EmployeeChannelInf
       kind === "web_chat"
         ? `${base}/widget.js`
         : kind === "whatsapp"
-          ? `${base}/channels/whatsapp/${whatsappProviderOf(c)}/webhook`
+          ? `${base}/channels/whatsapp/${whatsappProviderOf(c)}${connectionOf(c) ? `/c/${connectionOf(c)}` : ""}/webhook`
           : admin
             ? `${base}/hooks/email/${c.id}/${c.secret}`
             : null,
@@ -89,7 +94,7 @@ export const toRecord = (m: Prisma.ChannelMessageGetPayload<object>): ChannelMes
 export function channelRoutes(
   app: FastifyInstance,
   authenticate: Authenticate,
-  deps: { service: ChannelService; whatsapp: WhatsAppProvider[]; resend: EmailProvider | null; publicUrl: string | null },
+  deps: { service: ChannelService; whatsapp: WhatsAppProvider[]; resend: EmailProvider | null; publicUrl: string | null; providers: ProviderService },
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const { service, whatsapp } = deps;
@@ -100,25 +105,32 @@ export function channelRoutes(
     // Kept raw: providers sign the exact body (Twilio signs the form fields, parsed from it).
     hooks.addContentTypeParser(["application/json", "application/x-www-form-urlencoded"], { parseAs: "string" }, (_req, body, done) => done(null, body));
 
-    /** The configured provider named in the URL, or 503 naming what to add to .env. */
-    const providerFor = (req: FastifyRequest) => {
-      const { provider: name } = providerParams.parse(req.params);
+    /** The provider named in the URL: an organization's connection (/c/<id>), else the platform's account (503 naming what to add to .env). */
+    const providerFor = async (req: FastifyRequest) => {
+      const { provider: name, connection = null } = providerParams.parse(req.params);
+      if (connection) {
+        const provider = await deps.providers.whatsapp(name, connection, `${baseUrl(deps.publicUrl, req)}/channels/whatsapp/${name}/c/${connection}/webhook`);
+        if (!provider) throw httpError(404, "Unknown WhatsApp connection");
+        return { provider, connection };
+      }
       const provider = whatsapp.find((p) => p.name === name);
       if (!provider) throw httpError(503, `WhatsApp through ${name} is not configured. Missing in .env: ${MISSING[name]}`);
-      return provider;
+      return { provider, connection };
     };
 
     // Meta's subscription handshake. Twilio and Telnyx have none.
-    hooks.get("/channels/whatsapp/:provider/webhook", async (req, reply) => {
-      const provider = providerFor(req);
+    const handshake = async (req: FastifyRequest, reply: FastifyReply) => {
+      const { provider } = await providerFor(req);
       if (!provider.verifySubscription) throw httpError(404, "Not found");
       const challenge = provider.verifySubscription(req.query as Record<string, unknown>);
       if (challenge === null) throw httpError(403, "Verify token does not match");
       return reply.type("text/plain").send(challenge);
-    });
+    };
+    hooks.get("/channels/whatsapp/:provider/webhook", handshake);
+    hooks.get("/channels/whatsapp/:provider/c/:connection/webhook", handshake);
 
-    hooks.post("/channels/whatsapp/:provider/webhook", async (req, reply) => {
-      const provider = providerFor(req);
+    const receive = async (req: FastifyRequest, reply: FastifyReply) => {
+      const { provider, connection } = await providerFor(req);
       const parsed = provider.parseWebhook({
         // Signed over the exact public URL the provider called (Twilio).
         url: baseUrl(deps.publicUrl, req) + req.url,
@@ -133,24 +145,36 @@ export function channelRoutes(
           parsed.messages.map(async (inbound) => {
             const channel = await prisma.employeeChannel.findUnique({ where: { kind_address: { kind: "whatsapp", address: inbound.address } } });
             if (!channel) return req.log.warn({ provider: provider.name, address: inbound.address }, "No employee answers this WhatsApp number");
-            if (whatsappProviderOf(channel) !== provider.name)
-              return req.log.warn({ provider: provider.name, address: inbound.address }, "This WhatsApp number is set up for another provider");
+            // The number must be on the account that sent the webhook: another organization's connection cannot reach it.
+            if (whatsappProviderOf(channel) !== provider.name || connectionOf(channel) !== connection)
+              return req.log.warn({ provider: provider.name, address: inbound.address }, "This WhatsApp number is set up for another provider or account");
             await service.receive(channel, inbound);
           }),
         );
       })().catch((err: unknown) => req.log.error({ err }, "Handling a WhatsApp webhook failed"));
       return reply.code(200).type(provider.ack.contentType).send(provider.ack.body);
-    });
+    };
+    hooks.post("/channels/whatsapp/:provider/webhook", receive);
+    hooks.post("/channels/whatsapp/:provider/c/:connection/webhook", receive);
   });
 
   // Resend: received mail (fetched in full) and delivery events, Svix-signed.
   void app.register(async (hooks) => {
     hooks.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => done(null, body));
-    hooks.post("/channels/email/resend/webhook", async (req, reply) => {
-      if (!deps.resend) throw httpError(503, "Resend is not configured. Missing in .env: RESEND_API_KEY, RESEND_WEBHOOK_SECRET");
+    const resendWebhook = async (req: FastifyRequest, reply: FastifyReply) => {
+      // An organization's Resend connection (/c/<id>, its own signing secret), or the platform's account.
+      const { connection } = (req.params as { connection?: string }).connection ? connectionParams.parse(req.params) : { connection: null };
+      let resend = deps.resend;
+      if (connection) {
+        const row = await prisma.providerConnection.findFirst({ where: { id: connection, providerType: "email", providerId: "resend", status: "active" } });
+        if (!row) throw httpError(404, "Unknown email connection");
+        const { credentials, fetch: http } = deps.providers.conn(row);
+        resend = resendEmail({ apiKey: credentials.apiKey ?? "", webhookSecret: credentials.webhookSecret || undefined, fetch: http });
+      }
+      if (!resend) throw httpError(503, "Resend is not configured. Missing in .env: RESEND_API_KEY, RESEND_WEBHOOK_SECRET");
       let parsed: Awaited<ReturnType<EmailProvider["readWebhook"]>>;
       try {
-        parsed = await deps.resend.readWebhook({ url: baseUrl(deps.publicUrl, req) + req.url, rawBody: typeof req.body === "string" ? req.body : "", headers: req.headers });
+        parsed = await resend.readWebhook({ url: baseUrl(deps.publicUrl, req) + req.url, rawBody: typeof req.body === "string" ? req.body : "", headers: req.headers });
       } catch (err) {
         // The received email could not be fetched: an error makes Resend send the webhook again.
         if (err instanceof ChannelError) throw httpError(502, err.message);
@@ -161,10 +185,14 @@ export function channelRoutes(
       // Recording is quick; answering is a background job.
       for (const inbound of parsed.messages) {
         const channel = await prisma.employeeChannel.findUnique({ where: { kind_address: { kind: "email", address: inbound.address } } });
-        if (channel) await service.receive(channel, inbound);
+        // An organization's connection only delivers mail for its own employees.
+        if (channel && (!connection || channel.organizationId === (await prisma.providerConnection.findUnique({ where: { id: connection }, select: { organizationId: true } }))?.organizationId))
+          await service.receive(channel, inbound);
       }
       return reply.code(200).send();
-    });
+    };
+    hooks.post("/channels/email/resend/webhook", resendWebhook);
+    hooks.post("/channels/email/resend/c/:connection/webhook", resendWebhook);
   });
 
   // An inbound-email service (or a forwarding script) posts each email here, in our JSON shape.

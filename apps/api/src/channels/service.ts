@@ -112,16 +112,20 @@ const RANK: Partial<Record<ChannelMessageStatus, number>> = { PENDING: 0, SENT: 
 
 export function channelService(deps: {
   ai: Ai;
-  stt: STTProvider | null;
-  whatsapp: WhatsAppProvider[];
-  email: ChannelSender;
+  /** Speech recognition for an employee's voice notes (Phase 14: employee, organization default, platform). */
+  stt: (scope: { organizationId: string; workspaceId: string; employeeId: string }) => Promise<STTProvider | null>;
+  /** The provider carrying a WhatsApp channel's number: its connection (`config.connectionId`) or the platform's account. */
+  whatsapp: (channel: ChannelRow) => Promise<WhatsAppProvider | null>;
+  /** The sender of an employee's email replies (Phase 14 resolution; test mode when nothing is configured). */
+  email: (scope: { organizationId: string; workspaceId: string; employeeId: string }) => Promise<ChannelSender>;
   log: FastifyBaseLogger;
   /** Queues the answering of a recorded message (a background job). Jobs with the same `queueKey` run one at a time, in order. */
   enqueue: (job: { messageId: string; queueKey: string }) => Promise<void>;
 }) {
   const { ai, log } = deps;
-  /** The provider carrying a WhatsApp channel's number, if the server has its credentials. */
-  const whatsappOf = (channel: ChannelRow) => deps.whatsapp.find((p) => p.name === whatsappProviderOf(channel));
+  /** The provider carrying a WhatsApp channel's number, if its credentials are known. */
+  const whatsappOf = (channel: ChannelRow) => deps.whatsapp(channel).catch(() => null);
+  const employeeScope = (channel: ChannelRow) => ({ organizationId: channel.organizationId, workspaceId: channel.workspaceId, employeeId: channel.employeeId });
 
   /** The conversation a new message on `channel` belongs to: the customer's recent one, or none (start a new one). */
   const findConversation = async (channel: ChannelRow, customerId: string, thread: Pick<InboundMessage, "inReplyTo" | "threadTag"> = {}) => {
@@ -161,7 +165,7 @@ export function channelService(deps: {
   /** Everything `runTurn` needs to answer `customerId` on `channel`, except the message. Throws if the AI provider is not configured. */
   const turnInput = (channel: ChannelRow, live: LiveEmployee, customerId: string, conversationId: string | undefined) => {
     const tenant = { organizationId: channel.organizationId, workspaceId: channel.workspaceId };
-    const provider = ai.provider({ ...tenant, task: "chat" });
+    const provider = ai.provider({ ...tenant, employeeId: channel.employeeId, task: "chat" });
     // The channel may allow fewer tools than are granted; the executor refuses any other.
     const allowed = channel.allowedTools as string[] | null;
     const specs = toolRegistry.specs(live.tools.filter((t) => !allowed || allowed.includes(t)));
@@ -189,7 +193,8 @@ export function channelService(deps: {
 
   /** Turns the files in a message into text the employee can read: voice notes transcribed, documents extracted, the rest described. */
   const readMedia = async (channel: ChannelRow, inbound: InboundMessage, language: string) => {
-    const provider = whatsappOf(channel);
+    const provider = await whatsappOf(channel);
+    const stt = inbound.media.some((m) => m.kind === "audio") ? await deps.stt(employeeScope(channel)) : null;
     const parts: string[] = [];
     const media: ChannelMedia[] = [];
     for (const m of inbound.media) {
@@ -199,13 +204,13 @@ export function channelService(deps: {
       try {
         if (!provider) throw new Error(`The ${whatsappProviderOf(channel)} WhatsApp provider is not configured`);
         if (m.kind === "audio") {
-          if (!deps.stt?.transcribe) {
-            record.note = "Not transcribed: speech recognition (DEEPGRAM_API_KEY) is not configured";
+          if (!stt?.transcribe) {
+            record.note = "Not transcribed: no speech recognition is configured (Settings, or DEEPGRAM_API_KEY)";
             parts.push(`[The customer sent a voice message${caption}, which you cannot listen to.]`);
           } else {
             const file = await provider.downloadMedia(m, channel.address, MAX_UPLOAD_BYTES);
             record.sizeBytes = file.data.length;
-            const transcript = await deps.stt.transcribe(file.data, { mimeType: file.mimeType, language });
+            const transcript = await stt.transcribe(file.data, { mimeType: file.mimeType, language });
             record.note = transcript ? `Transcript: ${transcript}` : "No words were heard";
             parts.push(transcript ? `[Voice message${caption}, transcribed]: ${transcript}` : "[The customer sent a voice message with no audible words.]");
           }
@@ -232,8 +237,8 @@ export function channelService(deps: {
     return { text: media.length > 0 ? parts.join("\n") : inbound.text, media };
   };
 
-  const senderFor = (channel: ChannelRow): ChannelSender | null =>
-    channel.kind === "whatsapp" ? (whatsappOf(channel) ?? null) : channel.kind === "email" ? deps.email : null;
+  const senderFor = async (channel: ChannelRow): Promise<ChannelSender | null> =>
+    channel.kind === "whatsapp" ? await whatsappOf(channel) : channel.kind === "email" ? await deps.email(employeeScope(channel)) : null;
 
   /** Sends a reply (split to the channel's limit) and records each part with its delivery state. Stops at the first failure, which it returns. */
   const send = async (
@@ -242,7 +247,7 @@ export function channelService(deps: {
     text: string,
     context: { customerId: string; conversationId?: string; startedAt: number; subject?: string; inReplyTo?: string; fromName?: string },
   ) => {
-    const sender = senderFor(channel);
+    const sender = await senderFor(channel);
     for (const part of splitText(text, CHANNEL_CAPABILITIES[channel.kind as ChannelKind]?.maxChars ?? null)) {
       const row = await recordMessage(log, {
         organizationId: channel.organizationId,
@@ -300,9 +305,9 @@ export function channelService(deps: {
     const customerId = await ai.memory(scope).identify(scope, inbound.from);
     await updateMessage(log, rowId, { customerId });
     if (channel.kind === "whatsapp")
-      whatsappOf(channel)
-        ?.markRead?.(channel.address, inbound.providerMessageId)
-        .catch((err: unknown) => log.warn({ err }, "Marking a WhatsApp message read failed"));
+      void whatsappOf(channel).then((provider) =>
+        provider?.markRead?.(channel.address, inbound.providerMessageId).catch((err: unknown) => log.warn({ err }, "Marking a WhatsApp message read failed")),
+      );
 
     const subject = inbound.subject !== undefined ? (/^re:/i.test(inbound.subject) ? inbound.subject : `Re: ${inbound.subject}`.trim()) : undefined;
     const reply = { customerId, startedAt, subject, inReplyTo: inbound.channel === "email" ? inbound.providerMessageId : undefined, fromName: live.version.name };

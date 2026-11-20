@@ -135,7 +135,8 @@ before(async () => {
     logger: false,
     voice: {
       telephony: [telephony],
-      stt: {} as STTProvider,
+      // Phase 14 checks for live recognition before dialing.
+      stt: { name: "fake", open: () => ({ send() {}, close() {} }) } as STTProvider,
       tts: {} as TTSProvider,
       publicUrl: "https://voice.example.com",
       secret: "test-secret",

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { TOOL_NAMES, type ToolName } from "./tool.ts";
 import { e164 } from "./voice.ts";
 
+const connectionId = z.string().min(1).optional();
+
 export const CHANNEL_KINDS = ["web_chat", "whatsapp", "email", "voice"] as const;
 export type ChannelKind = (typeof CHANNEL_KINDS)[number];
 
@@ -42,6 +44,7 @@ export const channelConfigSchemas = {
     requireIdentity: z.boolean().default(false),
   }),
   // Settings saved before providers existed have no `provider`: they are Meta's.
+  // `connectionId` (Phase 14): the organization's messaging connection carrying the number; absent = the platform's account.
   whatsapp: z.preprocess(
     (v) => (v && typeof v === "object" && !("provider" in v) ? { ...v, provider: "meta" } : v),
     z.discriminatedUnion("provider", [
@@ -50,10 +53,11 @@ export const channelConfigSchemas = {
         /** Meta's "Phone number ID" for the business number (not the number itself). */
         phoneNumberId: z.string().trim().regex(/^\d{5,30}$/, "Copy the Phone number ID from Meta (digits only)"),
         displayNumber: e164.optional(),
+        connectionId,
       }),
       /** Twilio and Telnyx route by the WhatsApp number itself. */
-      z.object({ provider: z.literal("twilio"), number: e164 }),
-      z.object({ provider: z.literal("telnyx"), number: e164 }),
+      z.object({ provider: z.literal("twilio"), number: e164, connectionId }),
+      z.object({ provider: z.literal("telnyx"), number: e164, connectionId }),
     ]),
   ),
   email: z.object({ address: z.string().trim().toLowerCase().pipe(z.email("Enter an email address")) }),

@@ -7,7 +7,14 @@ import { costOf, type ModelInfo } from "./catalog.ts";
 import { AIProviderError, type AIProvider, type AIProviderErrorKind, type CompletionRequest, type ProviderEvent } from "./types.ts";
 
 /** Who is asking and for what; chosen by the caller, never by the request body. */
-export type Route = { organizationId: string; workspaceId?: string; task: string };
+export type Route = {
+  organizationId: string;
+  workspaceId?: string;
+  task: string;
+  /** Phase 14: whose provider overrides apply (the workflow's first, then the employee's). */
+  employeeId?: string | null;
+  workflowId?: string | null;
+};
 
 /** One model the request may go to: a concrete provider (never another router), so fallback cannot recurse. */
 export type RouteTarget = {
@@ -54,8 +61,11 @@ export type RouterDeps = {
   cooldownMs?: number;
 };
 
-/** Failures another model may not have. A refusal is the model's judgement of the request: not shopped around. */
-const FALLBACK_KINDS: ReadonlySet<AIProviderErrorKind | "timeout"> = new Set(["config", "auth", "billing", "rate_limit", "unavailable", "invalid", "timeout"]);
+/**
+ * Failures another model may not have. A refusal is the model's judgement of the request: not shopped around. Since Phase
+ * 14, authentication and configuration errors are not either: a wrong key is the admin's to fix, not to route around.
+ */
+const FALLBACK_KINDS: ReadonlySet<AIProviderErrorKind | "timeout"> = new Set(["billing", "rate_limit", "unavailable", "invalid", "timeout"]);
 /** Failures that say the model is struggling right now. */
 const COOLDOWN_KINDS: ReadonlySet<string> = new Set(["rate_limit", "unavailable", "timeout"]);
 /** Tokens a reply is assumed to need when checking context and cost before the call. */
