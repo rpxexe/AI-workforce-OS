@@ -56,7 +56,10 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   them by (email, phone, visitor id), unique per workspace. `lastSeenAt`.
 - `CustomerProfile`: one per customer; name, email, phone, company, copied from identity memories.
 - `CustomerMemory`: one fact per `key` per customer (`category`: identity, preference, fact, lead,
-  follow_up; `value`; `conversationId` where it was last learned). Learning a key again replaces it.
+  follow_up; `value`; `confidence` 0..1 from the extractor, 1 after a person edits, null for old rows; `conversationId` where it
+  was last learned). Learning a key again replaces it.
+- `CustomerAuditLog`: one row per admin action on a customer's memory (`memory_edit`, `memory_delete`, `memory_clear`,
+  `export`), `actorId`, `detail` with keys and counts, never values. `customerId` has no relation, so rows outlive the data.
 - `ToolPermission`: a tool granted to an employee (`employeeId` + `tool`), its admin `config`, and the
   tool's `permissions` at grant time. Not versioned.
 - `ToolExecution`: the audit log, one row per tool call the model made: `status` (SUCCEEDED, FAILED,
@@ -279,8 +282,12 @@ POST  /voice/:provider/c/:connection/inbound|status|transfer   as the platform's
 GET   /voice/:provider/c/:connection/stream     the media stream of a call on that connection
 GET|POST /channels/whatsapp/:provider/c/:connection/webhook   as the platform's, for an organization's WhatsApp connection
 POST  /channels/email/resend/c/:connection/webhook             received mail through an organization's Resend connection
-GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile
-GET   .../customers/:customerId                 member; profile, memories, conversations with summaries
+GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile; ?q= searches name/email/phone/company/externalId
+GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
+PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
+DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited
+DELETE .../customers/:customerId/memories       admin; clears facts, profile and summaries (conversations stay); audited
+GET   .../customers/:customerId/export          admin; JSON attachment: profile, memories, conversation summaries; audited
 ```
 
 ## Knowledge and retrieval

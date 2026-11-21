@@ -8,7 +8,7 @@ import { prisma } from "@workforce/database";
 import type { MemoryCategory } from "@workforce/shared";
 import { extractionRequest, parseExtraction, type Fact } from "./extract.ts";
 
-export { EXTRACTION_PROMPT, extractionRequest, parseExtraction, type Fact } from "./extract.ts";
+export { EXTRACTION_PROMPT, extractionRequest, parseExtraction, validFact, type Fact } from "./extract.ts";
 
 /** Already authorized by the caller: the service trusts these ids and filters every query on them. */
 export type CustomerScope = { organizationId: string; workspaceId: string };
@@ -41,7 +41,8 @@ export interface MemoryService {
 // shortcut: recall sends every fact (newest 50); rank by relevance when customers collect hundreds
 const RECALL_FACTS = 50;
 const RECALL_CONVERSATIONS = 5;
-const PROFILE_KEYS = ["name", "email", "phone", "company"] as const;
+/** Identity keys mirrored on the customer profile. */
+export const PROFILE_KEYS = ["name", "email", "phone", "company"] as const;
 
 const customerIn = (scope: CustomerScope & { customerId: string }) => ({
   id: scope.customerId,
@@ -72,7 +73,10 @@ export function factWrites(customerId: string, facts: Fact[], conversationId: st
   return [
     prisma.customerMemory.createMany({ data: facts.map((f) => ({ customerId, conversationId, ...f })), skipDuplicates: true }),
     ...facts.map((f) =>
-      prisma.customerMemory.updateMany({ where: { customerId, key: f.key }, data: { category: f.category, value: f.value, conversationId } }),
+      prisma.customerMemory.updateMany({
+        where: { customerId, key: f.key },
+        data: { category: f.category, value: f.value, confidence: f.confidence ?? null, conversationId },
+      }),
     ),
     prisma.customerProfile.createMany({ data: [{ customerId, ...profile }], skipDuplicates: true }),
     prisma.customerProfile.update({ where: { customerId }, data: profile }),

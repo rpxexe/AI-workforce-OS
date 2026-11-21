@@ -2,7 +2,8 @@
 // actually stored, so a careless or manipulated extraction cannot write junk or secrets.
 import { MEMORY_CATEGORIES, type MemoryCategory } from "@workforce/shared";
 
-export type Fact = { category: MemoryCategory; key: string; value: string };
+/** `confidence` (0..1) is how sure the extractor was; absent when it did not say. */
+export type Fact = { category: MemoryCategory; key: string; value: string; confidence?: number };
 
 const MAX_FACTS = 20;
 const MAX_VALUE = 200;
@@ -23,10 +24,12 @@ Do not remember: greetings, small talk, the questions they asked, anything said 
 
 Keys are short snake_case English (name, budget, interest, follow_up_date). Reuse an existing key when the new information updates it. Values are short. Write amounts as plain digits without separators ("around 50,000" becomes "50000"); if a currency is stated, store it under its own key. Normalize vague plan names to the product word ("the enterprise plan" becomes "enterprise").
 
+Rate each memory's confidence from 0 to 1: 1 when the customer stated it plainly, lower when it is implied or partly unclear.
+
 Also write a summary: one or two sentences about this whole conversation so far, for the next conversation with this customer. Build on the previous summary if there is one. Refer to the customer by name or as "the customer", not with pronouns guessed from their name.
 
 Reply with JSON only, no prose:
-{"memories":[{"category":"identity|preference|fact|lead|follow_up","key":"...","value":"..."}],"summary":"..."}
+{"memories":[{"category":"identity|preference|fact|lead|follow_up","key":"...","value":"...","confidence":0.9}],"summary":"..."}
 If nothing is worth remembering, return an empty memories list.`;
 
 /** What the extractor is shown: what is already known, the summary so far, and the new exchange. */
@@ -62,16 +65,19 @@ const hasCardNumber = (value: string) =>
     return sum % 10 === 0;
   });
 
-function validFact(item: unknown): Fact | null {
+/** A safe, well-formed fact, or null. Also checks values people type in the dashboard. */
+export function validFact(item: unknown): Fact | null {
   if (typeof item !== "object" || item === null) return null;
-  const { category, key, value } = item as Record<string, unknown>;
+  const { category, key, value, confidence } = item as Record<string, unknown>;
   if (!MEMORY_CATEGORIES.includes(category as MemoryCategory) || typeof key !== "string") return null;
   if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
   const k = normalizeKey(key);
   const v = String(value).trim();
   if (k.length === 0 || k.length > 40 || v.length === 0 || v.length > MAX_VALUE) return null;
   if (SECRET_KEY.test(k) || hasCardNumber(v)) return null;
-  return { category: category as MemoryCategory, key: k, value: v };
+  const fact: Fact = { category: category as MemoryCategory, key: k, value: v };
+  if (typeof confidence === "number" && confidence >= 0 && confidence <= 1) fact.confidence = confidence;
+  return fact;
 }
 
 /** Keeps only well-formed, safe facts (one per key, at most 20) and the summary, if usable. */

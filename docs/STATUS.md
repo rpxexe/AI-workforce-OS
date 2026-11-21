@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-20, end of Phase 14.
+Last updated: 2026-11-21, Phase 5 finished (Customers page and memory controls) after Phase 14.
 
 ## Phases
 
@@ -11,7 +11,7 @@ Last updated: 2026-11-20, end of Phase 14.
 | 2 | AI Employee CRUD with versioning | Built; verified with Clerk stubbed |
 | 3 | Agent runtime, AI provider abstraction (OpenRouter default, Anthropic), conversations, test chat | Built; a real OpenRouter reply confirmed through the API, chat page not yet tried in a browser |
 | 4 | Knowledge base and RAG: sources, PDF/DOCX/TXT/CSV upload, pgvector search, retrieval in the runtime, source tracing | Built; confirmed end to end through the API with real OpenRouter models, dashboard pages not yet tried in a browser |
-| 5 | Persistent customer memory: customers, profiles, extracted and validated memories, conversation summaries, recall in the runtime | Built; confirmed through the API with real OpenRouter models, test chat customer field not yet tried in a browser |
+| 5 | Persistent customer memory: customers, profiles, extracted and validated memories (with the extractor's confidence), conversation summaries, recall in the runtime; admin edit / delete / clear / JSON export of a customer's memory, audited (`CustomerAuditLog`); the Customers list (search) and customer page | Built; confirmed through the API with real OpenRouter models. Memory controls: 8 tests (`customers.test.ts`). **Customers pages and the test chat customer field not tried in a browser**; they typecheck, lint and build. The confidence line in the extraction prompt has not run against a real model |
 | 6 | Tool system: registry, permissions (grants), validation, executor with timeouts and retries, audit log; calendar, email (test mode), HTTP request, webhook | Built; the meeting-booking flow confirmed with a real OpenRouter model, Tools card not yet tried in a browser |
 | 7 | Real-time voice: Twilio inbound and outbound calls, Deepgram STT, ElevenLabs TTS, the same agent runtime, barge-in, transcripts, call state | Built and passing with a simulated Twilio stream; **a real phone call has not happened yet** (needs the Twilio, Deepgram and ElevenLabs keys in `.env`). Do not start Phase 8 before it does |
 | 8 | Visual AI journey builder: React Flow editor, workflow versions, validation (incl. step references), publish/pause, delete (dependency check, confirmation) / restore / duplicate, background engine (Postgres job queue), runs with step records, retry, idempotency keys for steps with outside effects, 12 node types, the lead follow-up example | Built; the example runs end to end in the tests with a faked phone line and model; editor and runs pages checked in headless Edge (desktop and phone width). Started before the real phone call, because the owner pasted the phase |
@@ -122,6 +122,14 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   configured provider). It follows the SDK docs and typechecks; run `AI_PROVIDER=anthropic LIVE_AI=1 pnpm test` once a key is set.
 
 ## Verified so far
+
+- Phase 5 memory controls (`customers.test.ts`, 8 tests, no model): extraction keeps a confidence only between 0 and 1. The list
+  searches name, email, phone and channel id, case-insensitive; detail carries memory id, confidence, source conversation and each
+  conversation's channel and status. Edit: members 403, empty or card-number values 400, the profile follows an identity key,
+  confidence becomes 1, one `memory_edit` row naming the key (never the value). Delete: profile field cleared, a second delete 404.
+  Clear: facts, profile and summaries gone, conversations kept, counts in the audit row. Export: admins only, attachment header,
+  profile + memories + summaries, audited. Another organization's admin gets 404 on all five routes, through their workspace and
+  through ours, and nothing changes; a memory id under another customer of the same organization is 404; signed-out 401.
 
 - Phase 14 (`provider-settings.test.ts`, 19 tests; `speech-adapters.test.ts`, 13; `storage-email-adapters.test.ts`, 9; all fakes,
   no real provider). Registry: every supported catalog entry has an adapter and a test, coming-soon entries none, at least two per
@@ -293,8 +301,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 
 ## Deliberately not built yet
 
-Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing. In the
-dashboard, Customers (the API has read routes) is a placeholder page. Packages other than `database`, `shared`,
+Working hours (stored, not acted on), analytics beyond handoffs, response times, quality and improvement KPIs, billing. Packages other than `database`, `shared`,
 `ai-provider`, `agent-runtime`, `knowledge`, `memory`, `tools`, `stt`, `tts`, `telephony`, `workflows`, `channels` and `providers`, and
 all three workers, are empty stubs.
 
@@ -304,7 +311,7 @@ knowledge sources, voice: per-organization Twilio accounts (one platform account
 call recording, the employee ending a call itself, transfer to a human, DTMF, voicemail detection on
 outbound calls, fixed call lines (greeting aside) in languages other than English, a separate call
 worker process (calls run inside the API), a real calendar provider (the calendar is built in), webhook signing, an audit log page (API only), human approval before a tool
-runs, availability lookup and cancelling or moving meetings, editing or deleting customer memories (no admin routes yet), relevance ranking of
+runs, availability lookup and cancelling or moving meetings, a page for the customer audit log (rows only), editing a memory's key or category, adding memories by hand, customer list paging (newest 200 matches), relevance ranking of
 memories (all of a customer's facts are recalled, newest 50), merging one person's identities across
 channels, a queue for memory extraction (it runs in the API process after the reply), embedding providers other than OpenRouter, providers other than OpenRouter and Anthropic, summarizing long conversations (the runtime
 sends the last 40 messages), deleting or renaming conversations, workspace rename/delete, hard delete of employees, list pagination (capped

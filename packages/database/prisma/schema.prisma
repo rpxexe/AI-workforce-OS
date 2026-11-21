@@ -34,6 +34,7 @@ model Organization {
   employeeReleases   EmployeeRelease[]
   providerConnections ProviderConnection[]
   providerAudit      ProviderAuditLog[]
+  customerAudit      CustomerAuditLog[]
   aiModelPolicies    AiModelPolicy[]
   aiUsage            AiUsage[]
 }
@@ -340,6 +341,7 @@ model CustomerMemory {
   category       String // identity | preference | fact | lead | follow_up
   key            String // snake_case, e.g. budget
   value          String
+  confidence     Float? // 0..1 as the extractor rated it; 1 once a person edits it; null for older rows
   conversationId String? // where it was last learned
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -357,6 +359,22 @@ model CustomerConversation {
   updatedAt      DateTime     @updatedAt
 
   @@index([customerId, updatedAt])
+}
+
+// Audit log of what people did to a customer's memory: edit, delete, clear, export. Rows are only
+// inserted. `customerId` has no relation so the trail outlives anything it describes.
+model CustomerAuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  customerId     String
+  action         String // memory_edit | memory_delete | memory_clear | export
+  actorId        String // Clerk user id
+  detail         Json         @default("{}")
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, workspaceId, customerId, createdAt])
 }
 
 // A tool an employee may use, with the settings an admin chose. Not versioned: granting or

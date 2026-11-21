@@ -327,6 +327,11 @@ problem re-discovered.
 - **Speech, email and call usage share `AiUsage`** (with `providerType`, `operation`, `characters`, `seconds`) rather than new
   tables: one place for metrics, one pattern for "one row per attempt". Costs for them are estimated only when the admin enters
   `costPerUnit` on the connection: vendor prices change and no built-in table would stay right.
+- **Memory confidence is the extractor's own rating**, stored when it gives one between 0 and 1 and ignored otherwise; a person's
+  edit sets it to 1. Nothing acts on it yet (recall sends every fact); it is shown so admins can spot shaky facts.
+- **Clearing a customer's memory also blanks conversation summaries**, because summaries are recalled into prompts just like facts.
+  Conversations and messages stay: they are the business's record, not memory. Audit rows name keys and counts, never values, so a
+  delete does not leave the deleted value behind in the log.
 
 ## Traps already hit
 
