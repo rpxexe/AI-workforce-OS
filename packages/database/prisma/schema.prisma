@@ -37,6 +37,10 @@ model Organization {
   customerAudit      CustomerAuditLog[]
   aiModelPolicies    AiModelPolicy[]
   aiUsage            AiUsage[]
+  billingAccount     BillingAccount?
+  usageEvents        UsageEvent[]
+  usageCharges       UsageCharge[]
+  billingInvoices    BillingInvoice[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -205,6 +209,8 @@ model ConversationMessage {
   createdAt DateTime @default(now())
 
   @@index([conversationId, createdAt])
+  // Phase 16: the usage meter reads new messages across organizations by time.
+  @@index([createdAt])
 }
 
 // A named collection of company documents in a workspace. Employees answer from the sources
@@ -1191,4 +1197,79 @@ model AiUsage {
 
   @@index([organizationId, createdAt])
   @@index([organizationId, providerType, createdAt])
+}
+
+// ---- Phase 16: usage ledger and billing ----
+
+/** One per organization, created on first use: its plan and its Stripe subscription (mirrored from Stripe's webhooks). */
+model BillingAccount {
+  organizationId       String       @id
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan                 String       @default("free") // PLAN_IDS
+  status               String       @default("active") // Stripe subscription status; "active" for the free plan
+  stripeCustomerId     String?      @unique
+  stripeSubscriptionId String?      @unique
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean      @default(false)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+}
+
+/**
+ * The usage ledger: one immutable row per billable fact, written by the meter from the row it came from.
+ * `id` is "<sourceType>:<sourceId>", so metering the same source again never adds a second row.
+ */
+model UsageEvent {
+  id             String       @id
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String?
+  kind           String // USAGE_KINDS
+  quantity       Float
+  sourceType     String // ai_usage | conversation | conversation_message | call | tool_execution | workflow_execution
+  sourceId       String
+  costUsd        Float? // provider rows: what the provider charged, when known
+  amountUsd      Float? // provider rows: what the organization is billed (cost x (1 + markup) on the platform's providers, 0 on its own keys); null when unknown
+  detail         Json?
+  occurredAt     DateTime
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, occurredAt])
+  @@index([organizationId, kind, occurredAt])
+}
+
+/** The usage charged for one billing period, added to that period's Stripe invoice once. */
+model UsageCharge {
+  id                  String       @id @default(cuid())
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  periodStart         DateTime
+  periodEnd           DateTime
+  amountUsd           Float
+  events              Int
+  stripeInvoiceId     String?
+  stripeInvoiceItemId String?
+  createdAt           DateTime     @default(now())
+
+  @@unique([organizationId, periodStart])
+}
+
+/** Stripe invoices, mirrored from webhooks so the dashboard reads them tenant-scoped from our database. */
+model BillingInvoice {
+  id               String       @id // Stripe invoice id
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  number           String?
+  status           String
+  amountDue        Int // smallest currency unit
+  amountPaid       Int
+  currency         String
+  hostedInvoiceUrl String?
+  periodStart      DateTime?
+  periodEnd        DateTime?
+  createdAt        DateTime
+  updatedAt        DateTime     @updatedAt
+
+  @@index([organizationId, createdAt])
 }

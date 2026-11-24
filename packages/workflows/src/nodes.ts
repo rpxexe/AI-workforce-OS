@@ -10,7 +10,7 @@ import { configOf, ROLLOUT_INCLUDE, runTurn, servedVersion, startHandoff, type H
 import { AIProviderError, type AIProvider, type EmbeddingProvider, type Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
-import { normalizeCustomerId, type Branch, type NodeConfig, type NodeType } from "@workforce/shared";
+import { normalizeCustomerId, type Branch, type NodeConfig, type NodeType, type UsageLimiter } from "@workforce/shared";
 import { ENDED_STATUSES } from "@workforce/telephony";
 import { toolRegistry, ToolError, type Mailer, type ToolExecutor } from "@workforce/tools";
 import { z } from "zod";
@@ -48,6 +48,8 @@ export type EngineDeps = {
   onError: (err: unknown, context: string) => void;
   /** Tells people about a handoff an AI Employee step's turn started. */
   onHandoff?: (notice: HandoffNotice) => void;
+  /** Plan limits (Phase 16), passed to the AI Employee step's turn. */
+  planLimits?: UsageLimiter;
 };
 
 /** A failure the step expects. Its message is shown on the run. */
@@ -183,6 +185,7 @@ export const handlers: Handlers = {
       userMessage: config.message,
       timeoutMs: deps.timeoutMs,
       onHandoff: deps.onHandoff,
+      planLimits: deps.planLimits,
     })) {
       if (event.type === "error") throw new StepError(event.message);
       if (event.type === "done")

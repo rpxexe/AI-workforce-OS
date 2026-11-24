@@ -9,6 +9,7 @@ export const AVATARS = ["bot", "headset", "briefcase", "sparkles", "shield", "ca
 
 export const LANGUAGES = {
   en: "English",
+  "en-IN": "English (India)",
   es: "Spanish",
   fr: "French",
   de: "German",
@@ -16,6 +17,8 @@ export const LANGUAGES = {
   it: "Italian",
   nl: "Dutch",
   hi: "Hindi",
+  // Callers and writers who switch between Hindi and English: speech recognition listens for both.
+  "hi-en": "Hindi + English (Hinglish)",
   ar: "Arabic",
   ja: "Japanese",
   zh: "Chinese",

@@ -1,4 +1,4 @@
-import { kindOfStatus, ProviderError } from "@workforce/shared";
+import { isoOf, kindOfStatus, ProviderError } from "@workforce/shared";
 import type { TTSProvider } from "./types.ts";
 
 /** Cartesia Sonic over HTTP, streamed as raw 8 kHz mu-law. */
@@ -27,7 +27,7 @@ export function cartesiaProvider({
           transcript: text,
           voice: { mode: "id", id: voice },
           output_format: { container: "raw", encoding: "pcm_mulaw", sample_rate: 8000 },
-          language,
+          language: isoOf(language),
         }),
         signal,
       });

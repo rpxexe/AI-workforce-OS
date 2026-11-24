@@ -8,6 +8,7 @@ import {
   type EmployeeDetail,
   type EmployeeSummary,
   type EmployeeVersion,
+  type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -50,8 +51,13 @@ export const within = (s: { organizationId: string; workspaceId: string }) => ({
  * AI Employee CRUD. Every query is scoped to the organization in the session and to a workspace
  * of that organization; an employee anywhere else answers 404, the same as one that does not exist.
  */
-export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate) {
+export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate, planLimits?: UsageLimiter) {
   const { member, admin, inWorkspace } = guards(authenticate);
+  /** 402 when the organization's plan allows no more AI employees (archived ones do not count). */
+  const roomForOneMore = async (organizationId: string) => {
+    const refused = await planLimits?.(organizationId, ["employees"]);
+    if (refused) throw httpError(402, refused);
+  };
   const base = "/workspaces/:workspaceId/employees";
 
   /** Resolves the caller, the workspace and (for item routes) the employee id in one step. */
@@ -76,6 +82,7 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate)
   };
 
   const create = async (scope: Scope, config: EmployeeConfig) => {
+    await roomForOneMore(scope.organizationId);
     const employee = await prisma.aiEmployee.create({
       data: {
         ...within(scope),
@@ -169,9 +176,10 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate)
     const { status } = setStatusSchema.parse(req.body);
     const employee = await prisma.aiEmployee.findFirst({
       where: { id, ...within(scope) },
-      select: { publishedVersionId: true },
+      select: { publishedVersionId: true, status: true },
     });
     if (!employee) throw httpError(404, "Employee not found");
+    if (employee.status === "ARCHIVED" && status !== "ARCHIVED") await roomForOneMore(scope.organizationId);
     const published = employee.publishedVersionId !== null;
     if (status === "ACTIVE" && !published) throw httpError(409, "Publish a version before activating this employee");
     // An employee with nothing published has no live state to pause: restoring it returns it to draft.

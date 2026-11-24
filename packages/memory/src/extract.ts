@@ -1,6 +1,6 @@
 // Memory extraction and validation. The model proposes facts; `parseExtraction` decides what is
 // actually stored, so a careless or manipulated extraction cannot write junk or secrets.
-import { MEMORY_CATEGORIES, type MemoryCategory } from "@workforce/shared";
+import { governmentIds, MEMORY_CATEGORIES, type MemoryCategory } from "@workforce/shared";
 
 /** `confidence` (0..1) is how sure the extractor was; absent when it did not say. */
 export type Fact = { category: MemoryCategory; key: string; value: string; confidence?: number };
@@ -9,7 +9,8 @@ const MAX_FACTS = 20;
 const MAX_VALUE = 200;
 const MAX_SUMMARY = 500;
 // Secrets never belong in memory, whatever the extractor says.
-const SECRET_KEY = /password|passcode|otp|one_time|cvv|cvc|pin_?code|^pin$|card_number|iban|ssn|social_security|secret|token/;
+// pin_code stays blocked (it may be a card PIN); postal codes go under postal_code, as the prompt says.
+const SECRET_KEY = /password|passcode|otp|one_time|cvv|cvc|pin_?code|^pin$|card_number|iban|ssn|social_security|secret|token|aadhaa?r|^pan$|pan_(number|card|no)|passport|voter_id|bank_account|account_number/;
 
 export const EXTRACTION_PROMPT = `You maintain long-term memory about a customer of a business, for the business's AI employee. Read the latest exchange and return only information worth knowing in future conversations with this customer.
 
@@ -23,6 +24,8 @@ Remember:
 Do not remember: greetings, small talk, the questions they asked, anything said only by the assistant, moods, one-off states ("I'm busy right now"), guesses, or anything the customer did not clearly state or confirm. Never remember passwords, one-time codes, card or bank numbers, or government ID numbers.
 
 Keys are short snake_case English (name, budget, interest, follow_up_date). Reuse an existing key when the new information updates it. Values are short. Write amounts as plain digits without separators ("around 50,000" becomes "50000"); if a currency is stated, store it under its own key. Normalize vague plan names to the product word ("the enterprise plan" becomes "enterprise").
+
+Conversations may be in English, Hindi or Hinglish. Keys stay in English; values may stay in the customer's language and script. Amounts in lakh or crore become plain digits ("5 lakh" becomes "500000", "1.2 crore" becomes "12000000"). Store phone numbers with their country code when it was stated ("+91 98765 43210" becomes "+919876543210"), dates as YYYY-MM-DD, and a postal PIN code under the key postal_code. Write names as the customer gave them, without honorifics such as ji, Mr or Shri. Never remember Aadhaar, PAN, passport or voter ID numbers.
 
 Rate each memory's confidence from 0 to 1: 1 when the customer stated it plainly, lower when it is implied or partly unclear.
 
@@ -74,7 +77,7 @@ export function validFact(item: unknown): Fact | null {
   const k = normalizeKey(key);
   const v = String(value).trim();
   if (k.length === 0 || k.length > 40 || v.length === 0 || v.length > MAX_VALUE) return null;
-  if (SECRET_KEY.test(k) || hasCardNumber(v)) return null;
+  if (SECRET_KEY.test(k) || hasCardNumber(v) || governmentIds(v).length > 0) return null;
   const fact: Fact = { category: category as MemoryCategory, key: k, value: v };
   if (typeof confidence === "number" && confidence >= 0 && confidence <= 1) fact.confidence = confidence;
   return fact;

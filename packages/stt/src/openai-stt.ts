@@ -1,4 +1,4 @@
-import { kindOfStatus, ProviderError } from "@workforce/shared";
+import { isMixedLanguage, isoOf, kindOfStatus, ProviderError } from "@workforce/shared";
 import type { STTProvider } from "./types.ts";
 
 // The API picks the decoder from the file name, so it has to match the audio.
@@ -39,7 +39,8 @@ export function openAITranscriber({
       const form = new FormData();
       form.append("file", new Blob([new Uint8Array(audio)], { type: mime }), `audio.${EXTENSIONS[mime] ?? "ogg"}`);
       form.append("model", model);
-      form.append("language", language);
+      // Whisper takes one ISO code; for Hinglish it is left to detect the language.
+      if (!isMixedLanguage(language)) form.append("language", isoOf(language));
       const res = await fetchImpl(`${baseUrl}/audio/transcriptions`, {
         method: "POST",
         headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},

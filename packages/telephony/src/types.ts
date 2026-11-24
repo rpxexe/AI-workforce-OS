@@ -39,8 +39,17 @@ export type Webhook = {
   headers: Record<string, string | string[] | undefined>;
 };
 
+/** What was said on a delegated call, read from the provider's final webhook. */
+export type DelegatedReport = { summary: string; turns: { speaker: "CUSTOMER" | "EMPLOYEE"; text: string; offsetMs: number }[] };
+
 export interface TelephonyProvider {
   readonly name: string;
+  /**
+   * The provider's own AI agent talks on the call (OmniDimension): no media stream, no speech providers, outbound
+   * only, and the transcript arrives with the final status webhook (`reportOf`).
+   */
+  readonly delegated?: boolean;
+  reportOf?(params: Record<string, string>): DelegatedReport | null;
   /** Whether a webhook really came from the provider. */
   verifyWebhook(webhook: Webhook): boolean;
   /** Webhook answer that connects the call to our media stream; `parameters` come back on its start event. */
@@ -56,6 +65,9 @@ export interface TelephonyProvider {
     parameters: Record<string, string>;
     statusCallbackUrl: string;
     timeLimitSec: number;
+    /** Delegated providers: the provider's id of the `from` number, and what the provider's agent is told. */
+    fromNumberId?: string;
+    context?: Record<string, string>;
   }): Promise<{ providerCallId: string | null }>; // null: learned from the first status callback
   endCall(providerCallId: string): Promise<void>;
   /**

@@ -12,7 +12,7 @@ packages/agent-runtime `runTurn()`: context builder, provider call, timeout, con
 packages/knowledge     Parsing, chunking, embedding and vector search (`processDocument`, `retrieve`).
 packages/memory        Customer memory: `MemoryService` (`identify`, `recall`, `remember`), extraction + validation.
 packages/tools         Tool system: registry, executor (permission, validation, timeout, retry, audit), the tools.
-packages/telephony     `TelephonyProvider`: Twilio (REST, TwiML, signatures, Media Streams), Telnyx (TeXML), SignalWire (Twilio's code on its LaML API).
+packages/telephony     `TelephonyProvider`: Twilio (REST, TwiML, signatures, Media Streams), Telnyx (TeXML), SignalWire (Twilio's code on its LaML API), OmniDimension (delegated: its own agent talks).
 packages/stt           `STTProvider`: Deepgram and AssemblyAI (live + files); OpenAI-compatible (Whisper, custom), Google, Azure (files only).
 packages/tts           `TTSProvider` (8 kHz mu-law): ElevenLabs, OpenAI-compatible speech (OpenAI, Kokoro, VoiceStudio, custom; WAV converted), Google, Azure, Cartesia, PlayHT.
 packages/providers     Phase 14: the provider registry (build + test per catalog entry), sealed credentials, fallback across connections,
@@ -139,6 +139,11 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
 - `CustomerConversation`: links a conversation to its customer (one per conversation) and holds a
   running `summary` of it, which later conversations see as "previous interactions".
 
+- Phase 16: `BillingAccount` (one per organization: `plan`, Stripe `status`, customer and subscription ids, current period,
+  `cancelAtPeriodEnd`), `UsageEvent` (the ledger: `id` = `<sourceType>:<sourceId>`, `kind` (`USAGE_KINDS`), `quantity`, `costUsd`,
+  `amountUsd`, `detail`, `occurredAt`; never updated), `UsageCharge` (the usage billed for one period, unique per organization and
+  period start, with the Stripe invoice item), `BillingInvoice` (Stripe invoices mirrored by id).
+
 Deleting an organization cascades to everything under it. Clerk owns users, members and roles;
 we store only Clerk user ids (`createdBy`).
 
@@ -231,6 +236,13 @@ PATCH .../conversations/:conversationId         member; { action: take_over | as
 POST  .../conversations/:conversationId/messages  member; { text, suggestionId? }; takes over, sends on the channel (502 if that fails), then stores
 POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
 GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30)
+GET   /workspaces/:workspaceId/insights        member; ?days= (default 30); InsightsOverview (Phase 15; the conversation detail carries `insight`)
+GET   /analytics/report                         member; ?from&to (to exclusive, <= 366 days)&workspaceId?; AnalyticsReport (Phase 16)
+GET   /billing                                  member; BillingOverview: plan, status, period, limits with use, usage, invoices, plans
+GET   /billing/usage                            member; ?from&to; UsageSummary (ledger totals, cost, billed, newest 100 entries with sources)
+POST  /billing/checkout                         admin; { plan }; no subscription: { url } (Stripe Checkout); else changes the price ({ url: null }); free = cancel at period end
+POST  /billing/portal                           admin; { url } of Stripe's customer portal; 409 without a customer
+POST  /billing/stripe/webhook                   public; Stripe-Signature checked (5 minutes); idempotent handlers
 GET   /workspaces/:workspaceId/evaluators       member; creates the 8 built-in ones on first call; with 30-day pass counts
 POST  /workspaces/:workspaceId/evaluators       admin; body evaluatorSchema (name, description, dimension, kind, config, passScore); 201
 GET   .../evaluators/:id                        member; current version, all versions, its newest 50 results
@@ -390,6 +402,13 @@ stream (apps/api/src/voice/session.ts), one per call:
 - Providers (`packages/telephony`): Twilio and Telnyx (TeXML, Twilio-compatible markup) behind
   `TelephonyProvider`. Both can be configured at once; `PhoneNumber.provider` and `Call.provider`
   say which one a number and a call use. A number is matched to a provider when it is assigned.
+- **OmniDimension** (Settings connection only: API key + agent id) is a *delegated* provider (`TelephonyProvider.delegated`):
+  its own agent (speech, model, voice) runs the call, so there is no media stream and no speech providers are needed. Outbound
+  only: `placeCall` dispatches to the agent with the number's OmniDimension id, `call_context` (employee name, greeting),
+  `metadata.callId` and a per-call post-call webhook to `/voice/omnidimension/c/<connection>/status?callId=&sig=` (HMAC of the
+  call id with the API key; OmniDimension documents no signature). The JSON webhook sets the status and duration and, once
+  (claimed on `Call.conversationId`), saves the interactions as the call's conversation, transcript and message log, the summary
+  on `CustomerConversation`, and runs memory extraction over the whole call. No transfer, no hang-up, no inbound.
 - Config: `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN` and/or `TELNYX_API_KEY` + `TELNYX_APP_ID`
   (optional `TELNYX_ACCOUNT_SID`), `PUBLIC_URL`, `DEEPGRAM_API_KEY`,
   `ELEVENLABS_API_KEY` (optional `DEEPGRAM_MODEL`, `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL`). Without
@@ -696,6 +715,66 @@ request -> resolution, per type (apps/api/src/providers/service.ts; LLM in ai.ts
 4. Test it with a fake `fetch` (see `speech-adapters.test.ts`, `storage-email-adapters.test.ts`); `provider-settings.test.ts`
    checks that every supported catalog entry has a registry entry. Nothing in the dashboard changes: forms come from the catalog.
 
+## Usage, limits and billing (Phase 16)
+
+```
+facts already recorded             meter (apps/api/src/billing/meter.ts): INSERT ... SELECT ... ON CONFLICT ("id") DO NOTHING
+  AiUsage (LLM, STT, TTS, email,      -> provider       quantity tokens / seconds / characters / sends; costUsd = provider cost, else
+           telephony attempts)                          BILLING_PRICE_* on the platform's providers; amountUsd = cost x (1 + BILLING_MARKUP)
+                                                        on the platform's providers, 0 on own keys and telephony attempts, null if unknown
+  Conversation (not "evaluation")    -> conversation
+  ConversationMessage ASSISTANT      -> message
+  Call with durationSec, ended 10+ min ago -> voice_minutes  ceil(seconds / 60); priced per minute on the platform's lines
+  ToolExecution SUCCEEDED / FAILED   -> tool_call
+  WorkflowExecution                  -> workflow_run
+when: a limit check (15 min back), billing reads (period start, at most 3 days back), invoice.created (the period),
+      the usage-meter schedule every 5 minutes over every organization (3 days back; a timer without Inngest)
+limits (billing/service.ts check, a UsageLimiter): plan = BillingAccount.plan while the subscription is active/trialing/past_due,
+      else Free; period = the subscription's, else the UTC calendar month; employees and storage counted live, the rest from the
+      ledger. Enforced only when billing is on (Stripe configured); a failed check is logged and allowed.
+  runTurn: conversations (new), messages, aiUsageUsd -> error event kind "limit", nothing saved (every channel)
+  ToolExecutor: toolCalls -> DENIED      employees: create/duplicate/unarchive -> 402      knowledge upload: storageMb -> 402
+  calls: voiceMinutes -> inbound "cannot take calls" and hang up, outbound 402
+Stripe (billing/stripe.ts, the only Stripe code): Checkout (subscription, client_reference_id + metadata = organization) ->
+  webhook: checkout.session.completed / customer.subscription.* -> GET the subscription -> plan by price id, status, period
+  invoice.created (subscription_cycle, draft) -> UsageCharge (once per period) -> invoice item (Idempotency-Key usage-<charge>)
+  invoice.* -> BillingInvoice upsert
+```
+
+- Plans live in `PLANS` (`packages/shared/src/billing.ts`): name, monthly price shown, limits. The Stripe Price per paid plan
+  comes from `STRIPE_PRICE_<PLAN>`; a subscription on an unknown price counts as Free (logged).
+- Test apps never use the `.env` Stripe keys; `buildApp({ billing: { stripe, enforced, meter } })` passes a fake Stripe `fetch`.
+- Tenant analytics (`apps/api/src/reports.ts`): organization from the session, an optional workspace that must be its own,
+  regression replays left out; latency percentiles and the daily series in SQL.
+- Dashboard: `/billing` (tabs Plan, Usage, Invoices, Limits) and `/reports` (date range, workspace filter), in the sidebar.
+
+## Conversation intelligence (Phase 15)
+
+```
+customer messages -> packages/agent-runtime/src/
+  language.ts   detectLanguage: Indian scripts by Unicode block; Roman-script Hindi (Hinglish) by its common words; codeSwitched
+                when a message mixes scripts or Hindi and English words; languageProfile: per message, switches, primary
+  entities.ts   extractEntities(text, { region, timezone, now }): Indian digits -> 0-9, then spans claimed in order (email, UPI,
+                GSTIN, Aadhaar/PAN masked, IFSC, order ids, phones, dates, times, amounts, addresses + PIN, names, payment methods);
+                parseAmount (lakh, crore, k); regionOf(employee) = "IN" for Asia/Kolkata or en-IN / hi-en
+  insights.ts   analyzeConversation: phrase lists (English, Devanagari, Hinglish) for sentiment (with negation), intent,
+                resolution ("ho gaya", "got it") and escalation ("consumer court"); + status and Handoff rows
+read: GET conversation detail -> insight; GET /workspaces/:id/insights -> per conversation, then counted (newest 2,000)
+runTurn: buildContext -> systemPrompt(..., customerMessage): reply in the customer's latest language and script; Indian
+         formats only when regionOf(employee) is IN; never infer a customer's background
+```
+
+- Nothing is stored and no model is called: insights are recomputed on every read, so improving a phrase list applies to old
+  conversations too. Relative dates use the message's own time in the employee's time zone.
+- Region is operational context from the employee's settings (time zone, language variant), never from a customer's number or
+  language. Languages are reported as languages, not nationalities.
+- Speech: employee languages `en-IN` and `hi-en` (Hinglish). `isoOf` / `isMixedLanguage` / `localeOf` (shared) map them per
+  provider: Deepgram `multi` for Hinglish, en-IN as is; AssemblyAI files `language_detection`; Whisper no language for Hinglish;
+  ElevenLabs no `language_code` for Hinglish; Google/Azure `hi-IN`; Cartesia ISO. Fixed call lines exist in English, Hindi and
+  Hinglish (`LINES_BY_LANGUAGE` in voice/session.ts). `forSpeech` says ₹ amounts in lakh/crore and reads +numbers digit by digit.
+- Dashboard: the conversation page's Conversation insights card (`components/inbox/conversation-insight.tsx`) and the Analytics
+  page's Conversation intelligence section.
+
 ## Agent runtime
 
 ```
@@ -773,6 +852,7 @@ workflow-sweep               cron, every minute             engine.dueRuns -> wo
 evaluation/requested         { evaluationId }               runEvaluation (claims PENDING; records FAILED itself)
 evaluation/dataset.run       { runId }                      runCase per case (skips graded cases), then finishRun
 evaluation-sweep             cron, every 5 minutes          queueDueEvaluations -> evaluation/requested for each
+usage-meter                  cron, every 5 minutes          meter every organization, 3 days back (Phase 16; in process: after the evaluation sweep)
 improvement/analyze          { organizationId, workspaceId } analyzeWorkspace: patterns -> suggestions (never a version)
 improvement-analysis         cron, daily 06:00              workspacesWithFailures -> improvement/analyze for each (Inngest only)
 ```

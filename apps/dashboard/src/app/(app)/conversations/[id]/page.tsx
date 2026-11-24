@@ -11,6 +11,7 @@ import { ArrowLeft, Bot, CornerDownLeft, Hand, RotateCcw, SendHorizontal, Sparkl
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ConversationInsightCard } from "@/components/inbox/conversation-insight";
 import { CHANNEL_LABELS, ConversationStatusBadge, formatDuration, timeAgo } from "@/components/inbox/meta";
 import { ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -372,6 +373,7 @@ export default withWorkspace(function ConversationPage({ workspace }) {
         />
       </div>
 
+      <ConversationInsightCard insight={data.insight} />
       <ConversationQuality workspaceId={workspace.id} conversationId={data.id} title={data.title} />
     </div>
   );

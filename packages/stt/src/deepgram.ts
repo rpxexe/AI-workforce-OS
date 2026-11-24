@@ -1,5 +1,9 @@
 import WebSocket from "ws";
+import { isMixedLanguage } from "@workforce/shared";
 import type { STTEvent, STTProvider } from "./types.ts";
+
+// Hinglish callers switch language mid-sentence: Nova-3's "multi" follows Hindi and English together.
+const listenFor = (language: string) => (isMixedLanguage(language) ? "multi" : language);
 
 type Message = {
   type?: string;
@@ -33,7 +37,7 @@ export function deepgramProvider({
     open({ language, onEvent }) {
       const query = new URLSearchParams({
         model,
-        language,
+        language: listenFor(language),
         encoding: "mulaw",
         sample_rate: "8000",
         channels: "1",
@@ -125,7 +129,7 @@ export function deepgramProvider({
     },
 
     async transcribe(audio, { mimeType, language, signal }) {
-      const query = new URLSearchParams({ model, language, smart_format: "true", punctuate: "true" });
+      const query = new URLSearchParams({ model, language: listenFor(language), smart_format: "true", punctuate: "true" });
       const res = await fetchImpl(`${url.replace(/^ws/, "http")}?${query}`, {
         method: "POST",
         headers: { authorization: `Token ${apiKey}`, "content-type": mimeType },

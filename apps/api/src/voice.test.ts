@@ -10,7 +10,7 @@ import { prisma } from "@workforce/database";
 import { EXTRACTION_PROMPT } from "@workforce/memory";
 import { defaultEmployeeConfig, type CallDetail, type CallSummary, type EmployeeDetail, type Workspace } from "@workforce/shared";
 import type { STTEvent, STTProvider } from "@workforce/stt";
-import { TelephonyError, telnyxProvider, twilioProvider, twilioSignature, type TelephonyProvider } from "@workforce/telephony";
+import { omnidimensionProvider, TelephonyError, telnyxProvider, twilioProvider, twilioSignature, type TelephonyProvider } from "@workforce/telephony";
 import { localTime } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
 import type WebSocket from "ws";
@@ -25,6 +25,7 @@ const NUMBER = "+15550001111";
 const CALLER = "+15557654321";
 const TELNYX_NUMBER = "+15550009999"; // owned by the Telnyx account only
 const UNOWNED = "+15550008888"; // owned by neither account
+const OMNI_NUMBER = "+15550007001"; // owned by the OmniDimension account only
 const TZ = "Asia/Kolkata";
 const orgA = newOrg();
 const orgB = newOrg();
@@ -105,7 +106,7 @@ const telephony: TelephonyProvider = {
     transfers.push({ sid, to, actionUrl });
   },
   async configureNumber(number) {
-    if (number === TELNYX_NUMBER || number === UNOWNED) throw new TelephonyError(`${number} is not a number in this Twilio account`);
+    if (number === TELNYX_NUMBER || number === UNOWNED || number === OMNI_NUMBER) throw new TelephonyError(`${number} is not a number in this Twilio account`);
     return { providerNumberId: "PN0123456789abcdef0123456789abcdef" };
   },
 };
@@ -127,7 +128,23 @@ const telnyx: TelephonyProvider = {
     return { providerNumberId: "tn-1" };
   },
 };
-const voice: Omit<VoiceConfig, "providers"> = { telephony: [telephony, telnyx], stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
+// OmniDimension's real requests, webhook check and report parsing; its REST API is faked.
+type Dispatch = {
+  agent_id: number;
+  to_number: string;
+  from_number_id: number;
+  metadata: unknown;
+  call_context: Record<string, string>;
+  __post_call_actions: { webhook: { url: string } };
+};
+let omniRequests: { url: string; body: Dispatch | null }[] = [];
+const omnidimension = omnidimensionProvider({ apiKey: "omni-test-key", agentId: 42 }, "https://omni.test/api/v1", (async (url: string, init?: RequestInit) => {
+  omniRequests.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+  if (url.includes("/phone_number/list")) return Response.json({ success: true, phone_numbers: [{ id: 23, phone_number: OMNI_NUMBER }] });
+  if (url.endsWith("/calls/dispatch")) return Response.json({ success: true, status: "dispatched", requestId: 3166940 });
+  return Response.json({ error: "not_found" }, { status: 404 });
+}) as unknown as typeof fetch);
+const voice: Omit<VoiceConfig, "providers"> = { telephony: [telephony, telnyx, omnidimension], stt, tts, publicUrl: PUBLIC, secret: TOKEN, limits: { idleMs: 60_000, maxCallMs: 600_000 } };
 
 // ---- Helpers ----
 
@@ -539,6 +556,65 @@ test("Telnyx: a number is matched to the account that owns it, webhooks need the
   await telnyxHook(`/voice/telnyx/status?callId=${out.id}`, { CallSid: "v3:out-1", CallStatus: "no-answer", CallDuration: "0" });
   row = await prisma.call.findUniqueOrThrow({ where: { id: out.id } });
   assert.deepEqual([row.status, row.durationSec], ["NO_ANSWER", 0]);
+});
+
+test("OmniDimension: its agent places the call; the signed post-call webhook brings status, transcript and summary", async () => {
+  const added = await call("POST", `/workspaces/${ws}/phone-numbers`, { number: OMNI_NUMBER, employeeId: ava });
+  assert.equal(added.statusCode, 201, added.payload);
+  const number = await prisma.phoneNumber.findUniqueOrThrow({ where: { number: OMNI_NUMBER } });
+  assert.deepEqual([number.provider, number.providerNumberId], ["omnidimension", "23"]);
+
+  omniRequests = [];
+  const res = await call("POST", `/workspaces/${ws}/employees/${ava}/calls`, { to: CALLER, phoneNumberId: number.id });
+  assert.equal(res.statusCode, 201, res.payload);
+  const out = res.json<CallSummary>();
+  const dispatch = omniRequests.find((r) => r.url === "https://omni.test/api/v1/calls/dispatch")?.body;
+  assert.ok(dispatch);
+  assert.deepEqual([dispatch.agent_id, dispatch.to_number, dispatch.from_number_id, dispatch.metadata], [42, CALLER, 23, { callId: out.id }]);
+  assert.equal(dispatch.call_context.employee_name, "Ava");
+  const hook = new URL(dispatch.__post_call_actions.webhook.url);
+  assert.equal(`${hook.origin}${hook.pathname}`, `${PUBLIC}/voice/omnidimension/status`);
+  assert.equal(hook.searchParams.get("callId"), out.id);
+  assert.equal((await prisma.call.findUniqueOrThrow({ where: { id: out.id } })).providerCallId, "omnidimension:3166940");
+  assert.equal(placed.length + telnyxPlaced.length, 0);
+
+  const report = {
+    call_id: 7651752,
+    call_request_id: 3166940,
+    call_status: "completed",
+    call_duration: 42,
+    start_time: "2026-11-23 10:00:00",
+    call_report: {
+      summary: "Wants a demo on Friday.",
+      interactions: [
+        { sequence: 1, user_query: "", bot_response: "Hi, this is Ava.", time: "2026-11-23 10:00:01" },
+        { sequence: 2, user_query: "I'd like a demo on Friday.", bot_response: "Booked for Friday.", time: "2026-11-23 10:00:10" },
+      ],
+    },
+  };
+  const post = (url: URL) =>
+    app.inject({ method: "POST", url: url.pathname + url.search, headers: { "content-type": "application/json" }, payload: JSON.stringify(report) });
+  const forged = new URL(hook);
+  forged.searchParams.set("sig", "0".repeat(64));
+  assert.equal((await post(forged)).statusCode, 403);
+  assert.equal((await post(hook)).statusCode, 204);
+  assert.equal((await post(hook)).statusCode, 204); // OmniDimension retries: nothing is saved twice
+
+  const row = await prisma.call.findUniqueOrThrow({ where: { id: out.id }, include: { transcript: true } });
+  assert.deepEqual([row.status, row.durationSec], ["COMPLETED", 42]);
+  assert.equal(row.transcript.length, 3);
+  assert.ok(row.conversationId);
+  const messages = await prisma.conversationMessage.findMany({ where: { conversationId: row.conversationId }, orderBy: { createdAt: "asc" } });
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["ASSISTANT", "Hi, this is Ava."],
+      ["USER", "I'd like a demo on Friday."],
+      ["ASSISTANT", "Booked for Friday."],
+    ],
+  );
+  const conversation = await prisma.customerConversation.findUniqueOrThrow({ where: { conversationId: row.conversationId } });
+  assert.deepEqual([conversation.customerId, conversation.summary], [row.customerId, "Wants a demo on Friday."]);
 });
 
 test("live transfer: a handoff on a call puts the caller through to a person, with status, fallback and an audit row", async () => {

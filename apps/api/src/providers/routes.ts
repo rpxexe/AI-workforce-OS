@@ -43,6 +43,8 @@ const TESTS_PER_MINUTE = 10;
 export function webhookUrlsOf(row: Pick<ConnectionRow, "id" | "providerType" | "providerId">, publicUrl: string | null): Record<string, string> | null {
   if (!publicUrl) return null;
   const base = publicUrl.replace(/\/+$/, "");
+  // OmniDimension gets its (signed) status URL with each call; nothing to paste in its console.
+  if (row.providerType === "telephony" && row.providerId === "omnidimension") return null;
   if (row.providerType === "telephony")
     return { voice: `${base}/voice/${row.providerId}/c/${row.id}/inbound`, status: `${base}/voice/${row.providerId}/c/${row.id}/status` };
   if (row.providerType === "messaging") {
@@ -341,7 +343,8 @@ export function providerRoutes(
         (count(*) FILTER (WHERE "errorKind" = 'timeout'))::int AS "timeouts",
         (count(*) FILTER (WHERE "attempt" > 1))::int AS "fallbacks",
         round(coalesce(avg("latencyMs"), 0))::int AS "avgLatencyMs",
-        coalesce(sum("costUsd"), 0)::float8 AS "costUsd",
+        -- Own connections only: the platform's provider cost is never shown to tenants (Phase 16).
+        coalesce(sum("costUsd") FILTER (WHERE "credentialId" IS NOT NULL), 0)::float8 AS "costUsd",
         coalesce(sum("characters"), 0)::int AS "characters",
         coalesce(sum("seconds"), 0)::float8 AS "seconds"
       FROM "AiUsage"

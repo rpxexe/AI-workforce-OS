@@ -12,12 +12,13 @@ import {
   type CallSummary,
   type PhoneNumberInfo,
   toTransferRecord,
+  type UsageLimiter,
 } from "@workforce/shared";
 import type { STTProvider } from "@workforce/stt";
-import { dialResultOf, ENDED_STATUSES, HANG_UP, TelephonyError, type TelephonyProvider } from "@workforce/telephony";
+import { dialResultOf, ENDED_STATUSES, HANG_UP, TelephonyError, type DelegatedReport, type TelephonyProvider } from "@workforce/telephony";
 import type { ToolExecutor } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "../auth.ts";
 import { employeeParams, within } from "../employees.ts";
@@ -49,6 +50,7 @@ type Ai = {
   memory: (scope: { organizationId: string; workspaceId: string }) => MemoryService;
   tools: ToolExecutor;
   timeoutMs: number;
+  planLimits?: UsageLimiter;
 };
 
 const workspaceParams = z.object({ workspaceId: z.string().min(1) });
@@ -59,6 +61,8 @@ const statusQuery = z.object({ callId: z.string().min(1).optional() });
 const callsQuery = z.object({ employeeId: z.string().min(1).optional() });
 
 type Tenant = { organizationId: string; workspaceId: string };
+
+class AlreadySaved extends Error {}
 
 const fill = (template: string, name: string) => template.replaceAll("{name}", name);
 
@@ -85,6 +89,22 @@ const toSummary = (c: Prisma.CallGetPayload<object>): CallSummary => ({
   endedAt: c.endedAt?.toISOString() ?? null,
   durationSec: c.durationSec,
 });
+
+/** A JSON webhook body as flat parameters: nested values stay JSON text. */
+function jsonParams(rawBody: string): Record<string, string> {
+  let body: unknown;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return {};
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  return Object.fromEntries(
+    Object.entries(body)
+      .filter(([, value]) => value !== null && value !== undefined)
+      .map(([key, value]) => [key, typeof value === "string" ? value : typeof value === "object" ? JSON.stringify(value) : String(value)]),
+  );
+}
 
 /** What the caller hears when no one picked up the transferred call. */
 const TRANSFER_UNANSWERED = "Sorry, no one from our team could take your call right now. Someone will call you back shortly. Goodbye.";
@@ -130,6 +150,74 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
   };
 
   /** The version that answers a call with this customer (published, or a rollout's candidate), or null if the employee cannot take calls. */
+  /**
+   * A delegated call's transcript (the provider's agent talked): saved once as the call's conversation, transcript and
+   * message log, with the summary and what was learned in the customer's memory. Retried webhooks find it saved.
+   */
+  const saveReport = async (call: Prisma.CallGetPayload<object>, report: DelegatedReport, log: FastifyBaseLogger) => {
+    if (call.conversationId || report.turns.length === 0) return;
+    const scope = { organizationId: call.organizationId, workspaceId: call.workspaceId };
+    const firstWords = report.turns.find((t) => t.speaker === "CUSTOMER")?.text;
+    const ourNumber = call.direction === "INBOUND" ? call.to : call.from;
+    const callerNumber = call.direction === "INBOUND" ? call.from : call.to;
+    const saved = await prisma
+      .$transaction(async (tx) => {
+        const conversation = await tx.conversation.create({
+          data: {
+            ...scope,
+            employeeId: call.employeeId,
+            channel: "voice",
+            title: (firstWords ?? `Call with ${callerNumber}`).slice(0, 80),
+            createdBy: "voice",
+            ...(call.customerId && { customer: { create: { customerId: call.customerId, summary: report.summary } } }),
+          },
+        });
+        // A retried webhook racing this one: whoever claims the call first keeps its conversation.
+        const { count } = await tx.call.updateMany({ where: { id: call.id, conversationId: null }, data: { conversationId: conversation.id } });
+        if (count === 0) throw new AlreadySaved();
+        const base = Date.now();
+        await tx.conversationMessage.createMany({
+          data: report.turns.map((t, i) => ({
+            conversationId: conversation.id,
+            role: t.speaker === "CUSTOMER" ? ("USER" as const) : ("ASSISTANT" as const),
+            content: t.text,
+            ...(t.speaker === "EMPLOYEE" && { employeeVersion: call.employeeVersion, provider: call.provider }),
+            createdAt: new Date(base + i), // keeps the turn order
+          })),
+        });
+        await tx.callTranscript.createMany({ data: report.turns.map((t) => ({ callId: call.id, speaker: t.speaker, text: t.text, offsetMs: t.offsetMs })) });
+        await tx.channelMessage.createMany({
+          data: report.turns.map((t) => ({
+            ...scope,
+            employeeId: call.employeeId,
+            channel: "voice",
+            customerId: call.customerId,
+            conversationId: conversation.id,
+            direction: t.speaker === "CUSTOMER" ? ("INBOUND" as const) : ("OUTBOUND" as const),
+            status: t.speaker === "CUSTOMER" ? ("ANSWERED" as const) : ("SENT" as const),
+            from: t.speaker === "CUSTOMER" ? callerNumber : ourNumber,
+            to: t.speaker === "CUSTOMER" ? ourNumber : callerNumber,
+            text: t.text,
+          })),
+        });
+        return conversation;
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AlreadySaved) return null;
+        throw err;
+      });
+    if (!saved || !call.customerId) return;
+    const said = (speaker: "CUSTOMER" | "EMPLOYEE") =>
+      report.turns
+        .filter((t) => t.speaker === speaker)
+        .map((t) => t.text)
+        .join("\n");
+    void ai
+      .memory(scope)
+      .remember({ ...scope, customerId: call.customerId, conversationId: saved.id, customerMessage: said("CUSTOMER"), reply: said("EMPLOYEE") })
+      .catch((err: unknown) => log.error({ err, callId: call.id }, "Updating customer memory failed"));
+  };
+
   const liveVersion = async (employeeId: string, customer: string) => {
     const employee = await prisma.aiEmployee.findUnique({ where: { id: employeeId }, include: { publishedVersion: true, ...ROLLOUT_INCLUDE } });
     return employee?.status === "ACTIVE" && employee.publishedVersion ? servedVersion(employee.publishedVersion, employee.activeRollout, customer) : null;
@@ -147,7 +235,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       const { provider, connection = null } = providerParams.parse(req.params);
       const telephony = await providerOf(provider, connection);
       const rawBody = typeof req.body === "string" ? req.body : "";
-      const params = Object.fromEntries(new URLSearchParams(rawBody));
+      const params = rawBody.trimStart().startsWith("{") ? jsonParams(rawBody) : Object.fromEntries(new URLSearchParams(rawBody));
       // Signed over the exact URL the provider called.
       if (!telephony.verifyWebhook({ url: v.publicUrl + req.url, params, rawBody, headers: req.headers }))
         throw httpError(403, "Invalid webhook signature");
@@ -171,6 +259,9 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
       if (!version) return telephony.sayAndHangUp("Sorry, no one is available to take your call right now. Please try again later.");
       const speech = await speechFor({ organizationId: number.organizationId, workspaceId: number.workspaceId, employeeId: number.employeeId, workflowId: null });
       if (!speech.stt?.open || !speech.tts) return telephony.sayAndHangUp("Sorry, this line is not set up to take calls yet. Please try again later.");
+      // Plan limits (Phase 16): no new calls once the period's voice minutes are used up; a call in progress finishes.
+      if (await ai.planLimits?.(number.organizationId, ["voiceMinutes"]))
+        return telephony.sayAndHangUp("Sorry, this line cannot take calls right now. Please try again later.");
 
       // The provider retries webhooks; one call row per call.
       let call = await prisma.call.findUnique({ where: { providerCallId: sid } });
@@ -206,10 +297,17 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     both("/status", async (req, reply) => {
       const { telephony, params, connectionId } = await verified(req);
       const { providerCallId, status, durationSec } = telephony.statusOf(params);
-      let call = providerCallId ? await prisma.call.findFirst({ where: { providerCallId, provider: telephony.name, connectionId } }) : null;
-      // An outbound call whose provider did not return its id when placed: the first callback names it.
       const { callId } = statusQuery.parse(req.query);
-      if (!call && callId && providerCallId) {
+      // Delegated providers sign our call id into the URL; their own ids are not ours to match on.
+      let call = telephony.delegated
+        ? callId
+          ? await prisma.call.findFirst({ where: { id: callId, provider: telephony.name, connectionId } })
+          : null
+        : providerCallId
+          ? await prisma.call.findFirst({ where: { providerCallId, provider: telephony.name, connectionId } })
+          : null;
+      // An outbound call whose provider did not return its id when placed: the first callback names it.
+      if (!call && callId && providerCallId && !telephony.delegated) {
         const placed = await prisma.call.findFirst({ where: { id: callId, provider: telephony.name, connectionId, providerCallId: null } });
         if (placed) call = await prisma.call.update({ where: { id: placed.id }, data: { providerCallId } });
       }
@@ -244,6 +342,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         // The session may have marked it ended first; the provider's duration is the one billed.
         await prisma.call.update({ where: { id: call.id }, data: { durationSec } });
       }
+      const report = call && telephony.reportOf?.(params);
+      if (call && report) await saveReport(call, report, req.log);
       return reply.code(204).send();
     });
 
@@ -411,11 +511,15 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
     const v = ready();
     const telephony = await providerOf(from.provider, from.connectionId);
     const urls = v.urls(telephony, from.connectionId);
-    const speech = await speechFor({ ...within(scope), employeeId: id, workflowId: scope.workflowId ?? null });
-    if (!speech.stt?.open || !speech.tts)
+    // A delegated provider's own agent talks: no speech providers needed.
+    const speech = telephony.delegated ? null : await speechFor({ ...within(scope), employeeId: id, workflowId: scope.workflowId ?? null });
+    if (speech && (!speech.stt?.open || !speech.tts))
       throw httpError(503, "No live speech recognition or speech synthesis is configured: connect them in Settings, or in the server's .env");
+    const refused = await ai.planLimits?.(scope.organizationId, ["voiceMinutes"]);
+    if (refused) throw httpError(402, refused);
 
     const customerId = await ai.memory(scope).identify(scope, body.to);
+    const greeting = fill(body.greeting ?? DEFAULT_OUTBOUND_GREETING, version.name);
     const call = await prisma.call.create({
       data: {
         ...within(scope),
@@ -429,7 +533,7 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         provider: telephony.name,
         connectionId: from.connectionId,
         workflowId: scope.workflowId ?? null,
-        greeting: fill(body.greeting ?? DEFAULT_OUTBOUND_GREETING, version.name),
+        greeting,
         createdBy: scope.createdBy,
         idempotencyKey: scope.idempotencyKey,
         participants: {
@@ -448,6 +552,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         parameters: { callId: call.id, token: streamToken(v.secret, call.id) },
         statusCallbackUrl: `${urls.statusUrl}?callId=${call.id}`,
         timeLimitSec: Math.round(voice.limits.maxCallMs / 1000) + 60,
+        fromNumberId: from.providerNumberId,
+        context: { employee_name: version.name, greeting },
       });
       return await prisma.call.update({ where: { id: call.id }, data: { providerCallId } });
     } catch (err) {

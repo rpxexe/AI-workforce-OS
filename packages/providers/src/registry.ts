@@ -5,7 +5,7 @@ import { AIProviderError, createProvider, VENDOR_BASE_URLS, type AIProvider } fr
 import { metaWhatsApp, resendEmail, telnyxWhatsApp, twilioWhatsApp, type WhatsAppProvider } from "@workforce/channels";
 import { kindOfStatus, PROVIDER_CATALOG, ProviderError, type ProviderMeta, type ProviderType, type TestConnectionResult } from "@workforce/shared";
 import { assemblyAIProvider, azureTranscriber, deepgramProvider, googleTranscriber, openAITranscriber, type STTProvider } from "@workforce/stt";
-import { telnyxProvider, twilioProvider, type TelephonyProvider } from "@workforce/telephony";
+import { omnidimensionProvider, telnyxProvider, twilioProvider, type TelephonyProvider } from "@workforce/telephony";
 import {
   azureTTSProvider,
   cartesiaProvider,
@@ -287,6 +287,17 @@ const TELEPHONY: Record<string, Entry<"telephony">> = {
     test: async (c, signal) => {
       const project = c.credentials.projectId ?? "";
       await getJson(c.fetch, `${signalwireApi(c)}/2010-04-01/Accounts/${encodeURIComponent(project)}.json`, { authorization: basic(project, c.credentials.apiToken ?? "") }, signal);
+      return {};
+    },
+  },
+  omnidimension: {
+    build: (c) => omnidimensionProvider({ apiKey: c.credentials.apiKey ?? "", agentId: Number(str(c, "agentId")) }, undefined, c.fetch),
+    test: async (c, signal) => {
+      // Proves the key and that the agent exists in this account.
+      const agentId = Number(str(c, "agentId"));
+      if (!Number.isInteger(agentId) || agentId <= 0) throw new ProviderError("config", "Agent ID must be OmniDimension's numeric agent id");
+      const body = (await getJson(c.fetch, "https://omnidim.io/api/v1/agents?pagesize=150", { authorization: `Bearer ${c.credentials.apiKey ?? ""}` }, signal)) as { bots?: { id: number; name?: string }[] };
+      if (!body.bots?.some((b) => b.id === agentId)) throw new ProviderError("config", `No agent ${agentId} among the account's first 150 agents`);
       return {};
     },
   },

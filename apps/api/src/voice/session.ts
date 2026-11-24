@@ -7,6 +7,7 @@ import { runTurn, type HandoffNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
+import type { UsageLimiter } from "@workforce/shared";
 import type { STTEvent, STTProvider, STTStream } from "@workforce/stt";
 import type { MediaEvent, TelephonyProvider } from "@workforce/telephony";
 import { ENDED_STATUSES } from "@workforce/telephony";
@@ -39,6 +40,7 @@ export type SessionDeps = {
   tools: ToolExecutor;
   timeoutMs: number;
   onHandoff?: (notice: HandoffNotice) => void;
+  planLimits?: UsageLimiter;
   /** Where the provider reaches us (no trailing slash): the transfer result webhook is built from it. */
   publicUrl: string;
   secret: string;
@@ -46,8 +48,8 @@ export type SessionDeps = {
   log: FastifyBaseLogger;
 };
 
-// shortcut: these lines are English whatever the employee's language; make them per-language settings when needed
-const LINES = {
+// shortcut: fixed lines exist in English, Hindi and Hinglish; other languages hear English until they get their own
+const LINES_EN = {
   apology: "Sorry, I had trouble with that. Could you say it again?",
   stillThere: "Are you still there?",
   idleGoodbye: "I haven't heard anything for a while, so I'll end the call now. Goodbye.",
@@ -56,6 +58,28 @@ const LINES = {
   withPerson: "A member of our team is handling this now and will get back to you shortly. Goodbye.",
   connecting: "I'm connecting you now. Please hold.",
   transferFailed: "Sorry, I couldn't connect you. A member of our team will call you back shortly. Goodbye.",
+};
+const LINES_BY_LANGUAGE: Record<string, typeof LINES_EN> = {
+  hi: {
+    apology: "माफ़ कीजिए, मुझे समझने में दिक्कत हुई। क्या आप दोबारा बोल सकते हैं?",
+    stillThere: "क्या आप लाइन पर हैं?",
+    idleGoodbye: "काफ़ी देर से कुछ सुनाई नहीं दिया, इसलिए कॉल समाप्त की जा रही है। नमस्ते।",
+    timeLimit: "इस कॉल का समय पूरा हो गया है। नमस्ते।",
+    cannotHear: "माफ़ कीजिए, अभी मुझे आपकी आवाज़ ठीक से सुनाई नहीं दे रही। कृपया थोड़ी देर बाद फिर कॉल करें।",
+    withPerson: "हमारी टीम का एक सदस्य इसे देख रहा है और जल्द ही आपसे संपर्क करेगा। नमस्ते।",
+    connecting: "आपको अभी जोड़ा जा रहा है। कृपया लाइन पर बने रहें।",
+    transferFailed: "माफ़ कीजिए, आपको जोड़ा नहीं जा सका। हमारी टीम का एक सदस्य जल्द ही आपको वापस कॉल करेगा। नमस्ते।",
+  },
+  "hi-en": {
+    apology: "Sorry, mujhe samajhne mein dikkat hui. Kya aap dobara bol sakte hain?",
+    stillThere: "Kya aap line par hain?",
+    idleGoodbye: "Kaafi der se kuch sunai nahi diya, isliye call end ki ja rahi hai. Thank you.",
+    timeLimit: "Is call ka time limit pura ho gaya hai. Thank you.",
+    cannotHear: "Sorry, abhi aapki awaaz theek se nahi aa rahi. Please thodi der baad phir call kijiye.",
+    withPerson: "Hamari team ka ek member ise dekh raha hai aur jaldi aapse contact karega. Thank you.",
+    connecting: "Aapko abhi connect kiya ja raha hai. Please line par bane rahiye.",
+    transferFailed: "Sorry, aapko connect nahi kiya ja saka. Hamari team ka ek member jaldi aapko call back karega. Thank you.",
+  },
 };
 
 /** The stream token proves a media stream belongs to a call we set up (Twilio does not sign the socket). */
@@ -126,6 +150,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
   if (!version) throw new Error("The call's employee version is missing");
 
   const employee = configOf(version);
+  const LINES = LINES_BY_LANGUAGE[employee.language] ?? LINES_EN;
   const scope = { organizationId: call.organizationId, workspaceId: call.workspaceId };
   // Phone calls have their own task, so an organization can route them to a fast model.
   const overrides = { employeeId: call.employeeId, workflowId: call.workflowId };
@@ -306,6 +331,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       timeoutMs: deps.timeoutMs,
       signal: current.abort.signal,
       onHandoff: deps.onHandoff,
+      planLimits: deps.planLimits,
     })) {
       if (result.type === "text") {
         speaker.push(result.text);

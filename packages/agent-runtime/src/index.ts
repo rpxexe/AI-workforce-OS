@@ -24,6 +24,7 @@ import {
   type MessageSource,
   type MessageTool,
   type TurnHandoff,
+  type UsageLimiter,
 } from "@workforce/shared";
 import type { ToolExecutor } from "@workforce/tools";
 import { buildContext } from "./context.ts";
@@ -33,6 +34,9 @@ export { buildContext, systemPrompt } from "./context.ts";
 export { asksForHuman, DEFAULT_HANDOFF_MESSAGE, ruleMatches, startHandoff, toNumber, TRANSFER_TOOL, type HandoffRequest } from "./handoff.ts";
 export { suggest, toSuggestion, type CopilotInput } from "./copilot.ts";
 export { ROLLOUT_INCLUDE, rolloutBucket, servedVersion } from "./rollout.ts";
+export { asciiDigits, extractEntities, parseAmount, regionOf, type ExtractedEntity } from "./entities.ts";
+export { detectLanguage, languageProfile } from "./language.ts";
+export { analyzeConversation, type InsightMessage } from "./insights.ts";
 
 export type TurnInput = {
   provider: AIProvider;
@@ -62,6 +66,8 @@ export type TurnInput = {
   signal?: AbortSignal;
   /** Called (not awaited) after a turn hands the conversation to people. */
   onHandoff?: (notice: HandoffNotice) => void;
+  /** Plan limits (Phase 16): checked before the model is called; a refusal ends the turn with a `limit` error and saves nothing. */
+  planLimits?: UsageLimiter;
 };
 
 /** Told when a turn hands a conversation to people, so someone can be notified. */
@@ -85,7 +91,7 @@ export type TurnEvent =
   /** People have the conversation: the message was saved and the AI did not answer. */
   | { type: "held"; conversation: ConversationSummary; message: ConversationMessage }
   /** `message` is safe to show; `cause` is for the server log. */
-  | { type: "error"; kind: AIProviderErrorKind | "timeout" | "internal"; message: string; cause?: unknown };
+  | { type: "error"; kind: AIProviderErrorKind | "timeout" | "internal" | "limit"; message: string; cause?: unknown };
 
 /** Model calls per turn. The last one is not offered tools, so it has to answer. */
 const MAX_STEPS = 6;
@@ -100,6 +106,7 @@ const MESSAGES: Record<Extract<TurnEvent, { type: "error" }>["kind"], string> = 
   invalid: "The AI provider rejected this request.",
   unavailable: "The AI provider is unavailable right now. Try again.",
   internal: "Something went wrong while answering. Try again.",
+  limit: "This organization has reached a plan limit. An admin can upgrade the plan in Billing.",
 };
 
 /** A message safe to show for an error a provider call threw. */
@@ -195,6 +202,12 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
       yield { type: "error", kind: "internal", message: MESSAGES.internal, cause: err };
       return;
     }
+  }
+  // Plan limits: a new conversation, one more AI message, usage spend. Held messages above never reach here.
+  const refused = await input.planLimits?.(organizationId, conversation ? ["messages", "aiUsageUsd"] : ["conversations", "messages", "aiUsageUsd"]);
+  if (refused) {
+    yield { type: "error", kind: "limit", message: refused };
+    return;
   }
   // Known before saving, so tool audit rows and calendar events can point at it.
   const id = conversationId ?? randomUUID();

@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ToolCall, ToolResult } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
-import type { ToolExecutionStatus } from "@workforce/shared";
+import type { ToolExecutionStatus, UsageLimiter } from "@workforce/shared";
 import { safeFetch } from "./net.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { ToolError, type Mailer } from "./types.ts";
@@ -47,7 +47,13 @@ const abortable = <T>(work: Promise<T>, signal: AbortSignal) =>
  */
 export function createToolExecutor(
   registry: ToolRegistry,
-  options: { fetch?: typeof fetch; mailer?: Mailer; onError?: (err: unknown, tool: string) => void } = {},
+  options: {
+    fetch?: typeof fetch;
+    mailer?: Mailer;
+    onError?: (err: unknown, tool: string) => void;
+    /** Plan limits (Phase 16): a tool call over the plan's limit is DENIED, and DENIED calls are not billed. */
+    planLimits?: UsageLimiter;
+  } = {},
 ): ToolExecutor {
   const fetchForTools = options.fetch ?? safeFetch;
 
@@ -100,6 +106,9 @@ export function createToolExecutor(
       const config = tool.config.safeParse(grant.config);
       if (!config.success)
         return finish("FAILED", { error: `${tool.name} is not set up correctly. An admin needs to fix its settings.` });
+
+      const refused = await options.planLimits?.(scope.organizationId, ["toolCalls"]);
+      if (refused) return finish("DENIED", { error: refused });
 
       const input = tool.input.safeParse(call.input);
       if (!input.success) {

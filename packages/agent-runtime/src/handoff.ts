@@ -5,6 +5,7 @@
 import type { ToolSpec } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { Recalled } from "@workforce/memory";
+import { parseAmount } from "./entities.ts";
 import { AI_ANSWERS, type ConversationStatus, type EmployeeConfig, type HandoffRule, type HandoffTrigger } from "@workforce/shared";
 
 export type HandoffRequest = { trigger: HandoffTrigger; reason: string };
@@ -13,18 +14,17 @@ type Escalation = EmployeeConfig["escalation"];
 export const DEFAULT_HANDOFF_MESSAGE = "I'm passing you to a member of our team. They will get back to you shortly.";
 export const TRANSFER_TOOL = "transfer_to_human";
 
-// English only; the model's transfer tool covers other languages and other phrasings.
+// English, Hinglish and Hindi; the model's transfer tool covers other languages and other phrasings.
 const ASKS_FOR_HUMAN = [
+  /\b(human|insaan|insan|agent|executive|manager|customer care|kisi aadmi|kisi person)\s+(se|say)\s+(baat|bat)\b/i,
+  /(इंसान|एजेंट|मैनेजर|कस्टमर केयर|किसी व्यक्ति)\s+से\s+बात/,
   /\b(speak|talk|chat|connect|transfer|put)\b[^.?!\n]{0,30}\b(human|real person|person|agent|representative|operator|someone|somebody|staff|manager)\b/i,
   /^\W*(a\s+)?(human|agent|representative|operator|real person)(\s+please)?\W*$/i,
 ];
 export const asksForHuman = (text: string) => ASKS_FOR_HUMAN.some((r) => r.test(text));
 
-/** "$50,000" -> 50000; NaN when there is no number. */
-export const toNumber = (value: string) => {
-  const digits = value.replace(/[^0-9.-]/g, "");
-  return digits === "" ? NaN : Number(digits);
-};
+/** "$50,000" -> 50000, "₹1,50,000" -> 150000, "5 lakh" -> 500000; NaN when there is no number. */
+export const toNumber = (value: string) => parseAmount(value) ?? NaN;
 
 const describe = (r: HandoffRule) =>
   `${r.field === "message" ? "message" : r.key} ${r.operator.replace("_", " ")} "${r.value}"`;

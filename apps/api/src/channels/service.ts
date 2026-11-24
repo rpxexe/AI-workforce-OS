@@ -19,6 +19,7 @@ import {
   type ChannelMedia,
   type ChannelMessageStatus,
   type KnowledgeKind,
+  type UsageLimiter,
   type WhatsAppProviderName,
 } from "@workforce/shared";
 import type { STTProvider } from "@workforce/stt";
@@ -36,6 +37,8 @@ export type Ai = {
   timeoutMs: number;
   /** Tells people about a handoff a turn started. */
   onHandoff?: (notice: HandoffNotice) => void;
+  /** Plan limits (Phase 16); absent in apps without billing. */
+  planLimits?: UsageLimiter;
 };
 
 export type ChannelRow = Prisma.EmployeeChannelGetPayload<object>;
@@ -188,6 +191,7 @@ export function channelService(deps: {
       channel: channel.kind,
       timeoutMs: ai.timeoutMs,
       onHandoff: ai.onHandoff,
+      planLimits: ai.planLimits,
     } satisfies Omit<TurnInput, "userMessage">;
   };
 

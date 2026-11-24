@@ -24,3 +24,5 @@ export * from "./evaluation.ts";
 export * from "./improvement.ts";
 export * from "./ai.ts";
 export * from "./providers.ts";
+export * from "./insights.ts";
+export * from "./billing.ts";
