@@ -26,3 +26,5 @@ export * from "./ai.ts";
 export * from "./providers.ts";
 export * from "./insights.ts";
 export * from "./billing.ts";
+export * from "./developer.ts";
+export * from "./public-api.ts";

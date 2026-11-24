@@ -41,6 +41,9 @@ model Organization {
   usageEvents        UsageEvent[]
   usageCharges       UsageCharge[]
   billingInvoices    BillingInvoice[]
+  apiKeys            ApiKey[]
+  webhookEndpoints   WebhookEndpoint[]
+  developerAudit     DeveloperAuditLog[]
 }
 
 // A partition inside an organization (a brand, a team, an environment). Every organization has at least one.
@@ -55,6 +58,9 @@ model Workspace {
   knowledgeSources KnowledgeSource[]
   customers      Customer[]
   workflows      Workflow[]
+  apiKeys        ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+  apiIdempotency ApiIdempotency[]
 
   @@unique([organizationId, name])
 }
@@ -1270,6 +1276,123 @@ model BillingInvoice {
   periodEnd        DateTime?
   createdAt        DateTime
   updatedAt        DateTime     @updatedAt
+
+  @@index([organizationId, createdAt])
+}
+
+/**
+ * Phase 17: a key for the public API (/v1). It belongs to one workspace and carries scopes (API_SCOPES). Only a SHA-256
+ * hash of the secret is stored: the secret is shown once, at creation or rotation, and cannot be recovered.
+ */
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name           String
+  // The public part of the key (wfk_<prefix>_<secret>): finds the row; the hash proves the secret.
+  prefix         String       @unique
+  hash           String
+  scopes         String[]
+  createdBy      String // Clerk user id
+  createdAt      DateTime     @default(now())
+  lastUsedAt     DateTime?
+  lastUsedIp     String?
+  // Set by a rotation's grace period: the key stops working then.
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  revokedBy      String?
+  replacedById   String? // the key a rotation created
+  // Requests allowed per minute (each API process counts its own).
+  rateLimitPerMinute Int      @default(600)
+  // IPv4/IPv6 addresses or CIDR ranges the key works from; empty: anywhere.
+  allowedIps     String[]     @default([])
+
+  @@index([organizationId, createdAt])
+}
+
+/**
+ * Phase 17: an outgoing webhook endpoint of a workspace. The signing secret is sealed under AI_CREDENTIALS_KEY.
+ */
+model WebhookEndpoint {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaceId     String
+  workspace       Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  url             String
+  description     String       @default("")
+  events          String[] // WEBHOOK_EVENTS
+  enabled         Boolean      @default(true)
+  encryptedSecret String
+  // While a secret rotation's grace period runs, requests are signed with both secrets.
+  previousEncryptedSecret String?
+  previousSecretExpiresAt DateTime?
+  // Events up to this time were scanned (minus an overlap), so an API down for a while catches up.
+  scannedAt       DateTime?
+  createdBy       String
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([organizationId, workspaceId])
+}
+
+/**
+ * One event for one endpoint, and its delivery log. `eventId` is "<event>:<source id>[:<time>]", unique per endpoint, so
+ * finding the same event again never queues it twice; it is sent as `webhook-id` on every attempt.
+ */
+model WebhookDelivery {
+  id             String          @id @default(cuid())
+  organizationId String
+  workspaceId    String
+  endpointId     String
+  endpoint       WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventId        String
+  event          String
+  payload        Json // the body sent, as signed
+  status         String          @default("pending") // pending | succeeded | failed (gave up)
+  attempts       Int             @default(0)
+  nextAttemptAt  DateTime?       @default(now())
+  lockedUntil    DateTime?
+  // [{ at, statusCode, error, durationMs }], oldest first
+  log            Json            @default("[]")
+  deliveredAt    DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@unique([endpointId, eventId])
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, createdAt])
+}
+
+/**
+ * Phase 17: the first answer to a public API request with an Idempotency-Key, replayed for retries (24 hours).
+ */
+model ApiIdempotency {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  key         String
+  operation   String
+  status      Int? // null while the first request is still running
+  response    Json?
+  createdAt   DateTime  @default(now())
+
+  @@unique([workspaceId, key])
+}
+
+/** Phase 17: who changed API keys and webhook endpoints (create, rotate, revoke, update, delete, test, redeliver). Never secrets. */
+model DeveloperAuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorId        String // Clerk user id, or "api:<key id>"
+  action         String // api_key.create | api_key.rotate | api_key.revoke | webhook.create | webhook.update | webhook.delete | webhook.rotate_secret | webhook.test | webhook.redeliver
+  targetId       String
+  detail         Json         @default("{}")
+  createdAt      DateTime     @default(now())
 
   @@index([organizationId, createdAt])
 }

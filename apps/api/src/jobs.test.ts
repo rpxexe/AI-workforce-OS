@@ -128,6 +128,7 @@ test("the queue serves one function per job, the workflow sweep, the evaluation 
     ["evaluation-sweep", "*/5 * * * *"],
     ["improvement-analysis", "0 6 * * *"],
     ["usage-meter", "*/5 * * * *"],
+    ["webhook-sweep", "* * * * *"],
   ]);
 });
 
@@ -247,7 +248,7 @@ test("channels: a WhatsApp message is answered by its job, once", async () => {
   assert.equal(waSent, 1);
 });
 
-test("with Inngest itself, /api/inngest serves the eleven functions (seven jobs, four schedules)", async () => {
+test("with Inngest itself, /api/inngest serves the twelve functions (seven jobs, five schedules)", async () => {
   // Dev mode needs no keys and no network to describe itself.
   process.env.INNGEST_DEV = "1";
   const real = await buildApp({ authenticate: headerAuth, provider: model, embedder, logger: false, whatsapp: [], jobs: "inngest" });
@@ -255,7 +256,7 @@ test("with Inngest itself, /api/inngest serves the eleven functions (seven jobs,
     const res = await real.inject({ method: "GET", url: "/api/inngest" });
     assert.equal(res.statusCode, 200, res.payload);
     const body = res.json<{ function_count?: number; mode?: string }>();
-    assert.equal(body.function_count, 11);
+    assert.equal(body.function_count, 12);
     assert.equal(body.mode, "dev");
   } finally {
     delete process.env.INNGEST_DEV;

@@ -19,7 +19,7 @@ import {
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
-import { employeeParams, within } from "./employees.ts";
+import { employeeParams, within, type Scope } from "./employees.ts";
 import type { ProviderService } from "./providers/service.ts";
 
 const id = z.string().min(1);
@@ -92,9 +92,49 @@ export function knowledgeRoutes(
   };
 
   // Checked here so a misconfigured embedder is a 503 now, not a FAILED document later. Processing is a background job.
-  const startProcessing = (req: FastifyRequest, documentId: string) => {
-    embedder(req.log);
-    queueProcessing(documentId).catch((err: unknown) => req.log.error({ err, documentId }, "Queueing document processing failed"));
+  const startProcessing = (log: FastifyBaseLogger, documentId: string) => {
+    embedder(log);
+    queueProcessing(documentId).catch((err: unknown) => log.error({ err, documentId }, "Queueing document processing failed"));
+  };
+
+  /** Stores a file in a source (the organization's object storage, else Postgres) and queues its processing. */
+  const uploadDocument = async (scope: Scope, sourceId: string, name: string, bytes: Buffer, log: FastifyBaseLogger) => {
+    const kind = knowledgeKindOf(name);
+    if (!kind || bytes.length === 0) throw httpError(400, "Send a non-empty PDF, DOCX, TXT or CSV file");
+    if (bytes.length > MAX_UPLOAD_BYTES) throw httpError(413, "Files can be at most 10 MB");
+    const source = await prisma.knowledgeSource.findFirst({ where: { id: sourceId, ...within(scope) }, select: { id: true } });
+    if (!source) throw httpError(404, "Knowledge source not found");
+    embedder(log); // refuse the upload now rather than fail the document later
+    const refused = await planLimits?.(scope.organizationId, ["storageMb"], { storageMb: bytes.length / 1_048_576 });
+    if (refused) throw httpError(402, refused);
+
+    // With object storage the file goes there first; a row is only written for a file that was stored.
+    const storage = files ? await files.storage(scope.organizationId) : null;
+    let stored: { storageConnectionId: string; storageKey: string } | null = null;
+    if (storage) {
+      const storageKey = `knowledge/${scope.workspaceId}/${randomUUID()}/${name.replace(/[^\w.-]+/g, "_")}`;
+      try {
+        await storage.storage.put(storageKey, bytes, "application/octet-stream");
+      } catch (err) {
+        log.error({ err }, "Storing an upload failed");
+        throw httpError(502, `The file could not be stored in ${storage.storage.name}: ${err instanceof Error ? err.message : "unknown error"}`);
+      }
+      stored = { storageConnectionId: storage.connectionId, storageKey };
+    }
+    const document = await prisma.knowledgeDocument.create({
+      data: {
+        ...within(scope),
+        sourceId,
+        name,
+        kind,
+        sizeBytes: bytes.length,
+        ...(stored ?? { content: new Uint8Array(bytes) }),
+        createdBy: scope.userId,
+      },
+      select: documentSelect,
+    });
+    startProcessing(log, document.id);
+    return document;
   };
 
   app.get(`${base}/sources`, async (req): Promise<KnowledgeSource[]> => {
@@ -156,42 +196,8 @@ export function knowledgeRoutes(
       const { workspaceId, sourceId } = sourceParams.parse(req.params);
       const scope = await inWorkspace(admin(req), workspaceId);
       const { name } = uploadQuerySchema.parse(req.query);
-      const kind = knowledgeKindOf(name);
-      if (!kind || !Buffer.isBuffer(req.body) || req.body.length === 0)
-        throw httpError(400, "Send a non-empty PDF, DOCX, TXT or CSV file as the request body");
-      const source = await prisma.knowledgeSource.findFirst({ where: { id: sourceId, ...within(scope) }, select: { id: true } });
-      if (!source) throw httpError(404, "Knowledge source not found");
-      embedder(req.log); // refuse the upload now rather than fail the document later
-      const refused = await planLimits?.(scope.organizationId, ["storageMb"], { storageMb: req.body.length / 1_048_576 });
-      if (refused) throw httpError(402, refused);
-
-      // With object storage the file goes there first; a row is only written for a file that was stored.
-      const storage = files ? await files.storage(scope.organizationId) : null;
-      let stored: { storageConnectionId: string; storageKey: string } | null = null;
-      if (storage) {
-        const storageKey = `knowledge/${scope.workspaceId}/${randomUUID()}/${name.replace(/[^\w.-]+/g, "_")}`;
-        try {
-          await storage.storage.put(storageKey, req.body, "application/octet-stream");
-        } catch (err) {
-          req.log.error({ err }, "Storing an upload failed");
-          throw httpError(502, `The file could not be stored in ${storage.storage.name}: ${err instanceof Error ? err.message : "unknown error"}`);
-        }
-        stored = { storageConnectionId: storage.connectionId, storageKey };
-      }
-      const document = await prisma.knowledgeDocument.create({
-        data: {
-          ...within(scope),
-          sourceId,
-          name,
-          kind,
-          sizeBytes: req.body.length,
-          ...(stored ?? { content: new Uint8Array(req.body) }),
-          createdBy: scope.userId,
-        },
-        select: documentSelect,
-      });
-      startProcessing(req, document.id);
-      return reply.code(201).send(toDocument(document));
+      if (!Buffer.isBuffer(req.body)) throw httpError(400, "Send a non-empty PDF, DOCX, TXT or CSV file as the request body");
+      return reply.code(201).send(toDocument(await uploadDocument(scope, sourceId, name, req.body, req.log)));
     });
   });
 
@@ -215,7 +221,7 @@ export function knowledgeRoutes(
       data: { status: "PENDING", error: null },
     });
     if (count === 0) throw httpError(404, "Document not found");
-    startProcessing(req, documentId);
+    startProcessing(req.log, documentId);
     return toDocument(await prisma.knowledgeDocument.findUniqueOrThrow({ where: { id: documentId }, select: documentSelect }));
   });
 
@@ -270,4 +276,6 @@ export function knowledgeRoutes(
     ]);
     return attached(employee.id);
   });
+
+  return { uploadDocument };
 }

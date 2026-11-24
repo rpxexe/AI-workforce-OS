@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-24, Phase 16 built (analytics, usage metering, billing) after Phase 15.
+Last updated: 2026-11-25, Phase 17 completed: the items first left out (API writes, streaming, key limits, secret rotation, test events, audit log, catch-up, Inngest delivery, publishable SDK, Python SDK) built.
 
 ## Phases
 
@@ -23,7 +23,8 @@ Last updated: 2026-11-24, Phase 16 built (analytics, usage metering, billing) af
 | 14 | Universal provider and integration settings: a provider registry (catalog + adapters + test per provider) over 7 types; organization connections (`ProviderConnection`, Phase 13 keys migrated with their ids) sealed and never returned; 7 more LLMs (Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Hugging Face); STT AssemblyAI (live + files), Whisper, Google, Azure, custom (files); TTS OpenAI, Google, Azure, Cartesia, PlayHT, Kokoro, VoiceStudio, custom; telephony SignalWire plus organizations' own Twilio/Telnyx accounts; WhatsApp on organizations' own Meta/Twilio/Telnyx accounts; email SendGrid, SES, SMTP plus organizations' Resend; storage R2, S3, GCS, Azure Blob, S3-compatible (knowledge uploads); resolution workflow > employee > organization default > platform for LLM/STT/TTS/email; fallback with Phase 13's loop rules for LLM/STT/TTS/email, none on auth/config errors; Test Connection (rate limited, deduplicated); rotation, audit log, disable/default/delete with in-use checks; per-connection webhooks; SSRF pinning; usage and provider metrics per type; the Settings page, employee and workflow Providers overrides | Built; 165 API tests (19 new for Phase 14, 13 speech adapters, 9 email/storage adapters). Plivo, Vonage, SIP and live Google/Azure recognition are listed as coming soon. **No new provider called against its real API yet**; Settings page not tried in a browser |
 | 15 | India-first conversation intelligence: language detection (English, Hindi, Hinglish, 8 other Indian scripts) with code-switching and language switches; structured extraction of names, phones (+91 mobiles, landlines, toll-free, international), addresses with PIN codes and landmarks, order/reference ids, dates (day first, Hindi months, kal/parso by tense, weekdays), times (AM/PM, "shaam 5 baje"), amounts (₹, lakh, crore, k), GSTIN, IFSC, UPI ids, payment methods; Aadhaar/PAN only masked; sentiment indicators, intent, resolution and escalation signals in English/Hindi/Hinglish; reply-language guidance per customer message and Indian conventions only for businesses operating in India; new employee languages English (India) and Hindi + English (Hinglish) mapped per speech provider (Deepgram `multi`); Hindi/Hinglish fixed call lines; ₹ amounts and phone numbers formatted for speech; Hinglish/Hindi requests for a person; lakh/crore in handoff thresholds; memory refuses Aadhaar/PAN; the conversation Insights card and the Analytics "Conversation intelligence" section | Built; 14 tests (`insights.test.ts`). **Insights card and Analytics section not tried in a browser**; they typecheck and lint. **Hinglish speech (Deepgram `multi`, ElevenLabs without `language_code`) not tried on a real call**; the analyzers are phrase lists and regular expressions, so expect misses on spellings they do not list |
 | 16 | Analytics, usage metering and billing: a usage ledger (`UsageEvent`, one immutable row per source row: provider attempts with cost and the amount billed, conversations, AI messages, voice minutes, tool calls, workflow runs; id `<sourceType>:<sourceId>`, so metering is idempotent), the meter (set-based SQL, before limit checks and billing reads, plus a 5-minute sweep), provider cost x (1 + `BILLING_MARKUP`, set in the server's environment) on the platform's providers only, platform unit prices for speech, calls and email; plans in code (Free, Starter, Growth, Scale) with limits enforced on the server (AI employees, conversations, AI messages, voice minutes, knowledge storage, usage spend, tool calls); Stripe isolated in `billing/stripe.ts` (fetch, no SDK): Checkout, plan changes, the customer portal, signed webhooks re-reading subscriptions, the period's usage added to the renewal invoice once, invoices mirrored; tenant analytics for a date range (`/analytics/report`); the Billing (plan, usage, invoices, limits) and Reports pages | Built; 6 tests (`billing.test.ts`, fake Stripe API). **No real Stripe account used yet**; **Billing and Reports pages not tried in a browser** (they typecheck, lint and build) |
-| 17+ | Not started | Owner pastes the next phase prompt |
+| 17 | Public Developer API and SDK foundations: a hand-written public contract (`packages/shared/src/public-api.ts`: zod schemas, route table, webhook payloads) separate from internal types, `/v1` routes for employees (create, save a version, publish, send a message, stream the reply), conversations (incl. resolve), customers (incl. set/delete a remembered fact), knowledge (incl. create a source, upload a document, search), workflows (incl. starting a run), executions, tools and analytics; API keys per workspace with scopes, SHA-256 hashes only, expiry, rotation with a grace period, revocation, last use, per-key rate limit and IP allowlist, edits; Idempotency-Key on writes; a developer audit log; webhooks for 11 events derived from rows (conversation.started/completed, message.received/sent, workflow.started/completed/failed, human.handoff, call.completed, employee.published, customer.updated) with a per-endpoint scan cursor (catch-up up to 7 days), Standard Webhooks signatures (two during a secret rotation), 8 attempts over ~3 days, test events, a paged delivery log, redelivery, on Inngest when configured; `GET /v1/openapi.json`; `@workforce/sdk` (standalone, generated types, builds to `dist/` for npm) and a Python SDK (`packages/sdk-python`); Settings > API Keys and Settings > Webhooks | Built; 10 tests (`developer.test.ts`, fake model, fake embedder, fake receiver, the Python SDK against the API). **Settings > API Keys and Webhooks not tried in a browser** (they typecheck, lint and build). **No webhook sent to a real receiver yet. Neither SDK published** |
+| 18+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -36,6 +37,16 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 (`resend.test.ts`); **not yet sent through a real Resend account**.
 
 ## Open items
+
+- **Phase 17 for real.** Production needs `prisma migrate deploy` for `20261124200000_developer_api` and `20261125090000_developer_api_more`
+  (not applied to Neon yet). Behind a proxy or load balancer set `TRUST_PROXY` (see `.env.example`) or key IP allowlists see the proxy's
+  address. Publishing the SDKs needs an npm scope / PyPI name you own (steps in `packages/sdk/README.md` and `packages/sdk-python/README.md`). Then:
+  Settings > API Keys, create a key with all permissions, run
+  `curl $API/v1/employees -H "Authorization: Bearer wfk_..."` and send a message with `POST /v1/employees/<id>/messages`. Settings >
+  Webhooks, add an endpoint (a request bin such as webhook.site), chat with the employee, check the deliveries and verify one with
+  `verifyWebhook` from `@workforce/sdk`; press "Send test" and "Rotate secret". Webhook secrets need `AI_CREDENTIALS_KEY` (503 without it).
+  Without Inngest every API process queries the database every 5 seconds for webhooks, even with no endpoints, so a serverless Postgres
+  will not suspend while the API runs; with Inngest it is once a minute.
 
 - **Phase 16 with a real Stripe sandbox.** Use a Stripe sandbox (not live mode) and a restricted key (`rk_`, permissions in
   `.env.example`). Create one Product per plan with one monthly USD Price each, set `STRIPE_SECRET_KEY`,
@@ -152,6 +163,43 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   configured provider). It follows the SDK docs and typechecks; run `AI_PROVIDER=anthropic LIVE_AI=1 pnpm test` once a key is set.
 
 ## Verified so far
+
+- Phase 17, the additions (`developer.test.ts`, 5 more tests). Key settings: addresses and ranges (IPv4, IPv6, IPv4-mapped), a bad
+  address 400, a key fenced to another network 403 from 127.0.0.1 and working after an edit (members 403 on edits), expiry at creation
+  (30 days, status expiring), 3 requests a minute then 429 `rate_limited` with Retry-After and counting `x-ratelimit-*` headers, rotation
+  keeps the limit; the developer audit log (admins only) lists every key and endpoint action and never a secret, other organizations see
+  only their own. Writes through the SDK: an employee created (draft, version 1, en-IN, Asia/Kolkata), an invalid time zone 400 on
+  `timeZone`, an empty change 400, a version with new instructions keeping the time zone, published (active, v2, release by `api:<key>`),
+  a key without employees:write 403; a streamed reply (text, done) and a 404 before the stream; resolve twice; customer memory set (lead
+  kept on update, confidence 1), identity `name` reaching the profile and cleared on delete, a card number 400, delete then 404, audited
+  as `api:`; a knowledge source, a duplicate 409, a TXT upload processed to ready (fake embedder), an .exe and non-base64 400;
+  employee.published (version 2, publish) and customer.updated events. Webhooks: a test event delivered at once and verified, members 403;
+  secret rotation with 1 hour sends two signatures and both secrets verify, with 0 only the new one does; an endpoint whose cursor is 3
+  hours old gets a call that ended 2 hours ago and not one from 8 days ago, and the cursor moves; the delivery log pages by cursor and
+  filters by event. The SDK's generated `types.ts` equals what the contract generates. The Python SDK (real HTTP to the app) lists
+  employees, sends and streams a message, gets 403 `permission_denied`, verifies a Node-signed webhook and refuses a changed body.
+  The built SDK (`dist/`) type-checks and imports as an installed package.
+
+- Phase 17 (`developer.test.ts`, 5 tests, fake model, fake webhook receiver). Keys: members 403, another organization's workspace
+  404, unknown scopes 400; `wfk_<12 hex>_<43>` shown once, only a 64-character hash stored, never listed; no key / a forged secret 401
+  (`authentication_failed`), a missing scope 403 (`permission_denied`), `request-id` header; last use and IP recorded; another
+  organization's key sees nothing (list empty, get 404, revoke 404); rotation with 1 hour keeps both working, the old one `expiring`
+  and linked, not rotated twice (409), stops after its grace ("expired"); rotation with 0 revokes at once; revoke is admin-only and
+  idempotent. Endpoints: members 403, private (127.0.0.1) and http addresses 400 with the `url` path, another organization's
+  workspace 404, `whsec_` shown once and sealed, never listed. Through the SDK: employees with exactly the contract's fields; a message
+  with an Idempotency-Key replayed (same answer, `idempotent-replayed`, one model call); the conversation continues on channel `api`,
+  4 messages, the customer normalized (`rahul@example.com`); paging by cursor and `paginate`; 400/404/403 in the public error format;
+  analytics with no internal cost fields. Webhooks: started/received/sent events after the endpoint was created, scanning again queues
+  nothing, every request verifies with `verifyWebhook` and `webhook-id` = event id; a changed body, a timestamp an hour off and another
+  secret are refused; a handoff (explicit request) then a held message, an agent's inbox reply readable through the API, resolve ->
+  human.handoff and conversation.completed. Retries: a 500 waits ~1 minute, nothing sent before it is due, then succeeds with the same
+  `webhook-id` and two log entries; the last attempt failing gives up; deliveries list by status, other organizations 404 on the log
+  and redelivery; redelivery (409 while pending) succeeds. A workflow started through the API (`startedBy: api`, retried
+  Idempotency-Key starts nothing) runs to completed with its steps -> workflow.started (as queued) and workflow.completed; a call
+  ending -> call.completed with its duration; unsubscribed events and disabled endpoints get nothing; deleting an endpoint deletes its
+  deliveries. OpenAPI 3.1 has every route with its operationId and every event under `webhooks`, without a key; unknown /v1 routes 404
+  in the public format. Also checked: the server's own webhook timer leaves the test suite's organizations alone (a running
+  `pnpm dev` raced the tests before that).
 
 - Phase 16 (`billing.test.ts`, 6 tests, fake Stripe API). Ledger: five AiUsage rows -> five rows with `ai_usage:<id>` ids and
   their source; metering again adds 0; platform LLM cost billed at cost x (1 + markup); own key billed 0; platform STT 120 s priced
@@ -301,6 +349,8 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   reload, dark mode, desktop and 390 px wide.
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
+- 203 API tests on the local Docker Postgres on 2026-11-25 (Phase 17 complete): 199 pass, 0 fail, 4 skipped (need `LIVE_AI=1`).
+- 198 API tests on the local Docker Postgres on 2026-11-24 (Phase 17 included): 194 pass, 0 fail, 4 skipped (need `LIVE_AI=1`).
 - 193 API tests on the local Docker Postgres on 2026-11-24 (Phases 15 and 16 included): 189 pass, 0 fail, 4 skipped (need `LIVE_AI=1`), in 2 minutes.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
 - 161 API tests (Phase 14 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 120 at the end of Phase 13. Earlier: 109 at the end of Phase 12. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
@@ -423,6 +473,12 @@ Billing meters (usage is one invoice line per period from our ledger, so another
 call already in progress at the voice-minutes limit, limits on workflow runs, memory/Copilot/grader model calls being refused
 at the usage cap (they are billed, only customer turns are stopped), corrections to ledger rows (append-only; a refund is
 Stripe's), a history of past plan periods (Stripe's invoices are the record), dunning beyond Stripe's own emails.
+
+Developer API, skipped: rate limits shared across API processes (each process counts its own minute), API writes beyond those listed
+(deleting employees, editing escalation/working days/tools/channels through the API, deleting documents, editing workflows), events
+older than 7 days when first scanned, events for anything not listed, the developer audit log beyond the newest 100 entries, SDKs in
+languages other than TypeScript and Python (generate them from `/v1/openapi.json`), publishing either SDK (needs the owner's npm and
+PyPI accounts).
 
 Conversation intelligence, skipped: a language model for intent, sentiment or entities (phrase lists and regular expressions,
 explainable and free; spellings they do not list are missed), Indian languages other than Hindi beyond script detection (no

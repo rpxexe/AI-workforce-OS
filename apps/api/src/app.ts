@@ -40,6 +40,9 @@ import { inboxRoutes } from "./inbox.ts";
 import type { HandoffNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
+import { developerRoutes } from "./public/manage.ts";
+import { publicRoutes } from "./public/routes.ts";
+import { webhookService } from "./public/webhooks.ts";
 import { reportRoutes } from "./reports.ts";
 import { qualityRoutes } from "./quality.ts";
 import { toolRoutes } from "./tools.ts";
@@ -51,6 +54,8 @@ import { workspaceRoutes } from "./workspaces.ts";
 const WORKFLOW_ROUNDS = 300;
 /** A conversation is evaluated automatically once it has been quiet this long. */
 const EVALUATION_IDLE_MS = 10 * 60_000;
+/** How often each API process looks for new webhook events and sends due deliveries (without Inngest; with it, every minute). */
+const WEBHOOK_TICK_MS = 5_000;
 
 /**
  * `authenticate`, `provider`, `embedder`, `memory`, `toolFetch` and `aiTimeoutMs` exist so tests can supply identities, fake models and a fake network;
@@ -91,6 +96,8 @@ export async function buildApp(
      * is configured), and the meter's markup and platform prices (default from .env: BILLING_*).
      */
     billing?: { stripe?: StripeConfig | null; enforced?: boolean; meter?: MeterConfig };
+    /** Phase 17: the network webhook deliveries use; defaults to safeFetch (public https only). Tests pass a fake receiver. */
+    webhooks?: { fetch?: typeof fetch };
     logger?: boolean;
   } = {},
 ) {
@@ -111,7 +118,13 @@ export async function buildApp(
     ],
     censor: "[redacted]",
   };
-  const app = Fastify({ logger: options.logger === false ? false : { redact } });
+  // Behind a proxy or load balancer, TRUST_PROXY makes req.ip the caller's address (API key IP allowlists, last use):
+  // "true" (trust X-Forwarded-For from anyone in front) or the proxies' addresses/ranges, comma-separated. Unset: the address that connected.
+  const trustProxy = process.env.TRUST_PROXY;
+  const app = Fastify({
+    logger: options.logger === false ? false : { redact },
+    trustProxy: !trustProxy ? false : trustProxy === "true" ? true : trustProxy.split(",").map((p) => p.trim()),
+  });
 
   const dashboardOrigin = process.env.DASHBOARD_ORIGIN ?? "http://localhost:3000";
   await app.register(cors, {
@@ -174,7 +187,7 @@ export async function buildApp(
   reportRoutes(app, authenticate);
 
   workspaceRoutes(app, authenticate);
-  employeeRoutes(app, authenticate, planLimits);
+  const employeeActions = employeeRoutes(app, authenticate, planLimits);
   customerRoutes(app, authenticate);
   toolRoutes(app, authenticate);
 
@@ -222,7 +235,7 @@ export async function buildApp(
   const router = modelRouter(platform, credentialsKey, app.log, options.byoProvider);
   aiRoutes(app, authenticate, platform, credentialsKey);
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
-  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }), providers, planLimits);
+  const knowledgeActions = knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }), providers, planLimits);
   /**
    * The send_email tool's, Message steps' and handoff emails' sender: the provider that serves the request's scope, from
    * its From address (RESEND_FROM for the platform's Resend). Test mode when none is configured: nothing is delivered.
@@ -354,6 +367,11 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   );
   workflowRoutes(app, authenticate, engine, process.env.PUBLIC_URL || null);
 
+  // Phase 17: the public API (/v1, API keys), and what the dashboard manages for it: keys and webhook endpoints.
+  publicRoutes(app, { ai, engine, employees: employeeActions, knowledge: knowledgeActions });
+  const webhooks = webhookService({ secret: credentialsKey, previousSecret: previousSecretFromEnv(), fetch: options.webhooks?.fetch ?? safeFetch, log: app.log });
+  developerRoutes(app, authenticate, { secret: credentialsKey, webhooks });
+
   const definitions: JobDefinitions = {
     "knowledge/document.uploaded": {
       retries: 0, // processDocument records FAILED itself; reprocessing is a person's choice
@@ -457,6 +475,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     { id: "improvement-analysis", cron: "0 6 * * *", handler: analyzeAll },
     // The usage meter over every organization: catches what no limit check or billing page metered (3 days back, idempotent).
     { id: "usage-meter", cron: "*/5 * * * *", handler: (step) => step.run("meter", () => meterAll()) },
+    // Webhooks with Inngest: new events and due deliveries every minute (up to 20 rounds of 25), instead of each process's timer.
+    { id: "webhook-sweep", cron: "* * * * *", handler: (step) => step.run("webhooks", () => webhooks.tick(null, 20)) },
   ];
   jobs.current =
     typeof options.jobs === "function"
@@ -483,8 +503,19 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       }, 5 * 60_000)
     : undefined;
 
+  // Webhooks without Inngest: every API process scans for events and sends due deliveries; both are claimed or deduplicated
+  // in Postgres, so processes never send an event twice. Never in test apps (tests run their own service for their organization).
+  let webhookRound: Promise<unknown> = Promise.resolve();
+  const webhookTimer = options.authenticate || queued()
+    ? undefined
+    : setInterval(() => {
+        webhookRound = webhookRound.then(() => webhooks.tick()).catch((err: unknown) => app.log.error({ err }, "Webhook round failed"));
+      }, WEBHOOK_TICK_MS);
+
   app.addHook("onClose", async () => {
     clearInterval(timer);
+    clearInterval(webhookTimer);
+    await webhookRound;
     await sweep;
     await stopRunner();
     await prisma.$disconnect();
