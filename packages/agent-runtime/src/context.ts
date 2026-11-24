@@ -1,6 +1,8 @@
 import type { ChatMessage } from "@workforce/ai-provider";
 import type { Recalled } from "@workforce/memory";
-import { LANGUAGES, type EmployeeConfig, type KnowledgeMatch } from "@workforce/shared";
+import { LANGUAGES, type DetectedLanguage, type EmployeeConfig, type KnowledgeMatch } from "@workforce/shared";
+import { regionOf } from "./entities.ts";
+import { detectLanguage } from "./language.ts";
 
 const CHANNEL_NAMES: Record<string, string> = {
   voice: "phone call",
@@ -40,9 +42,42 @@ function memorySection({ facts, previous }: Recalled) {
     .join("\n\n");
 }
 
+const SCRIPT_NAMES: Partial<Record<DetectedLanguage, string>> = { bn: "Bengali", pa: "Punjabi", gu: "Gujarati", or: "Odia", ta: "Tamil", te: "Telugu", kn: "Kannada", ml: "Malayalam" };
+
+/**
+ * Which language to answer in: the employee's own, unless the customer's latest message is in another
+ * one, in which case follow the customer, script included (Hinglish in Roman letters stays Roman).
+ */
+function languageSection(employee: EmployeeConfig, customerMessage?: string) {
+  const own = employee.language === "hi-en" ? "Hinglish (Hindi and English mixed, in Roman script)" : LANGUAGES[employee.language];
+  const lines = [`Reply in ${own} unless the customer writes in another language; then reply in theirs. Customers may switch languages mid-conversation: follow their latest message.`];
+  const latest = customerMessage ? detectLanguage(customerMessage).language : undefined;
+  if (latest === "hinglish")
+    lines.push("The customer's latest message is Hinglish: Hindi and English mixed, written in Roman letters. Reply the same way, in Roman letters, not Devanagari, keeping the English words they use.");
+  else if (latest === "hi")
+    lines.push("The customer's latest message is in Hindi (Devanagari). Reply in Hindi in Devanagari; keep product names, numbers and any English terms they used as they wrote them.");
+  else if (latest && SCRIPT_NAMES[latest]) lines.push(`The customer's latest message is in ${SCRIPT_NAMES[latest]}. Reply in ${SCRIPT_NAMES[latest]}.`);
+  return lines.join(" ");
+}
+
+/**
+ * Formatting conventions of the business's own operating region (from its settings, not from the
+ * customer), and the rule that a customer's background is never inferred.
+ */
+function localeSection(employee: EmployeeConfig, channel: string) {
+  const lines = ["Never assume a customer's nationality, region, religion or background from their name, language or phone number."];
+  if (regionOf(employee) === "IN") {
+    lines.push(
+      "This business operates in India. Write amounts in rupees (₹) with Indian digit grouping (₹1,50,000) and lakh or crore where natural, dates day first (25 December 2026 or 25/12/2026), times in 12-hour form (3:30 PM, IST unless said otherwise), and Indian phone numbers as +91 98765 43210. Customers may use terms such as UPI, COD, GST, EMI, NEFT, PIN code, lakh and crore; understand them without asking.",
+    );
+    if (channel === "voice") lines.push('On calls, say amounts the way people in India do ("one lakh fifty thousand rupees") and read phone numbers and order ids digit by digit.');
+  }
+  return lines.join(" ");
+}
+
 /**
  * Turns an employee's configuration into the instructions the model runs under. `memory` is
- * given when the conversation is with a known customer.
+ * given when the conversation is with a known customer; `customerMessage` (the latest one) steers the reply language.
  */
 export function systemPrompt(
   employee: EmployeeConfig,
@@ -51,6 +86,7 @@ export function systemPrompt(
   hasTools = false,
   channel = "test",
   now = new Date(),
+  customerMessage?: string,
 ) {
   const { timezone } = employee.workingHours;
   const weekday = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, weekday: "long" }).format(now);
@@ -61,7 +97,8 @@ export function systemPrompt(
     employee.personality && `Personality and tone:\n${employee.personality}`,
     employee.goals.length > 0 && `Your goals:\n${employee.goals.map((g) => `- ${g}`).join("\n")}`,
     employee.systemInstructions && `Instructions:\n${employee.systemInstructions}`,
-    `Reply in ${LANGUAGES[employee.language]} unless the person writes in another language.`,
+    languageSection(employee, customerMessage),
+    localeSection(employee, channel),
     knowledge.length > 0
       ? [
           "Company knowledge relevant to the latest message is below. Base your answer on it and prefer it over what you otherwise believe. If it does not contain the answer, say you do not have that information; do not guess.",
@@ -100,5 +137,5 @@ export function buildContext(
       messages[messages.length - 1] = { ...last, content: `${(last as { content: string }).content}\n\n${m.content}` } as ChatMessage;
     else messages.push(m);
   }
-  return { system: systemPrompt(employee, knowledge, memory, hasTools, channel), messages };
+  return { system: systemPrompt(employee, knowledge, memory, hasTools, channel, new Date(), userMessage), messages };
 }

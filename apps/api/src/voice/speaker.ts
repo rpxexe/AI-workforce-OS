@@ -4,10 +4,29 @@
 // tells us when the caller has actually heard it.
 import type { TTSProvider } from "@workforce/tts";
 
-/** What a person would say: no markdown, links reduced to their text. */
+const INDIAN_UNITS: [number, string][] = [[1e7, "crore"], [1e5, "lakh"], [1e3, "thousand"]];
+/** 150000 -> "1 lakh 50 thousand rupees": how amounts are said in India, which TTS cannot guess from "₹1,50,000". */
+export const spokenRupees = (amount: number) => {
+  let rest = Math.floor(amount);
+  const parts: string[] = [];
+  for (const [size, name] of INDIAN_UNITS)
+    if (rest >= size) {
+      parts.push(`${Math.floor(rest / size)} ${name}`);
+      rest %= size;
+    }
+  if (rest > 0 || parts.length === 0) parts.push(String(rest));
+  const paise = Math.round((amount - Math.floor(amount)) * 100);
+  return `${parts.join(" ")} rupees${paise ? ` and ${paise} paise` : ""}`;
+};
+
+/** What a person would say: no markdown, links reduced to their text, rupee amounts in lakh/crore, phone numbers digit by digit. */
 export const forSpeech = (text: string) =>
   text
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/(?:₹|\bRs\.?|\bINR)\s?(\d[\d,]*(?:\.\d+)?)(?:\s?(lakhs?|crores?)\b)?(?:\/-)?/gi, (_, n: string, unit?: string) =>
+      unit ? `${n.replace(/,/g, "")} ${unit} rupees` : spokenRupees(Number(n.replace(/,/g, ""))),
+    )
+    .replace(/\+(\d[\d -]{7,16}\d)/g, (_, n: string) => `plus ${n.split(/[ -]+/).map((g) => g.split("").join(" ")).join(", ")}`)
     .replace(/[*#`>|~]/g, "")
     .replace(/\s+/g, " ")
     .trim();

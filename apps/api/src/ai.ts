@@ -347,13 +347,17 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
     const { organizationId } = member(req);
     const { days } = usageQuery.parse(req.query);
     const where = { organizationId, providerType: "llm", createdAt: { gte: new Date(Date.now() - days * 86_400_000) } };
-    const sums = { _sum: { inputTokens: true, outputTokens: true, costUsd: true }, _avg: { latencyMs: true }, _count: { _all: true } } as const;
-    const [byModel, failedByModel, byTask, fallbacks, recent] = await Promise.all([
+    const sums = { _sum: { inputTokens: true, outputTokens: true }, _avg: { latencyMs: true }, _count: { _all: true } } as const;
+    // Costs only of the organization's own keys (its own vendor bill): the platform's provider cost is never shown (Phase 16).
+    const ownKeys = { ...where, credentialId: { not: null } };
+    const [byModel, failedByModel, byTask, fallbacks, recent, ownByModel, ownByTask] = await Promise.all([
       prisma.aiUsage.groupBy({ by: ["provider", "model"], where, ...sums }),
       prisma.aiUsage.groupBy({ by: ["provider", "model"], where: { ...where, success: false }, _count: { _all: true } }),
-      prisma.aiUsage.groupBy({ by: ["task"], where, _sum: { costUsd: true }, _count: { _all: true } }),
+      prisma.aiUsage.groupBy({ by: ["task"], where, _count: { _all: true } }),
       prisma.aiUsage.count({ where: { ...where, attempt: { gt: 1 } } }),
       prisma.aiUsage.findMany({ where, orderBy: { createdAt: "desc" }, take: 100 }),
+      prisma.aiUsage.groupBy({ by: ["provider", "model"], where: ownKeys, _sum: { costUsd: true } }),
+      prisma.aiUsage.groupBy({ by: ["task"], where: ownKeys, _sum: { costUsd: true } }),
     ]);
     const groups = byModel
       .map((g) => ({
@@ -363,7 +367,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
         failures: failedByModel.find((f) => f.provider === g.provider && f.model === g.model)?._count._all ?? 0,
         inputTokens: g._sum.inputTokens ?? 0,
         outputTokens: g._sum.outputTokens ?? 0,
-        costUsd: g._sum.costUsd ?? 0,
+        costUsd: ownByModel.find((o) => o.provider === g.provider && o.model === g.model)?._sum.costUsd ?? 0,
         avgLatencyMs: Math.round(g._avg.latencyMs ?? 0),
       }))
       .sort((a, b) => b.calls - a.calls);
@@ -380,7 +384,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
         avgLatencyMs: calls === 0 ? 0 : Math.round(groups.reduce((n, g) => n + g.avgLatencyMs * g.calls, 0) / calls),
       },
       byModel: groups,
-      byTask: byTask.map((t) => ({ task: t.task, calls: t._count._all, costUsd: t._sum.costUsd ?? 0 })).sort((a, b) => b.calls - a.calls),
+      byTask: byTask.map((t) => ({ task: t.task, calls: t._count._all, costUsd: ownByTask.find((o) => o.task === t.task)?._sum.costUsd ?? 0 })).sort((a, b) => b.calls - a.calls),
       recent: recent.map((r) => ({
         id: r.id,
         task: r.task,
@@ -391,7 +395,7 @@ export function aiRoutes(app: FastifyInstance, authenticate: Authenticate, platf
         credentialId: r.credentialId,
         inputTokens: r.inputTokens,
         outputTokens: r.outputTokens,
-        costUsd: r.costUsd,
+        costUsd: r.credentialId ? r.costUsd : null,
         latencyMs: r.latencyMs,
         success: r.success,
         errorKind: r.errorKind,

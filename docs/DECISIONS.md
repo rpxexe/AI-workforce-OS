@@ -332,6 +332,57 @@ problem re-discovered.
 - **Clearing a customer's memory also blanks conversation summaries**, because summaries are recalled into prompts just like facts.
   Conversations and messages stay: they are the business's record, not memory. Audit rows name keys and counts, never values, so a
   delete does not leave the deleted value behind in the log.
+- **OmniDimension is a delegated telephony provider, not a media stream.** It runs its own speech, model and voice and offers no
+  raw call audio, so our employee cannot talk on its calls. The owner wanted it as a calling provider anyway: employees (and
+  workflow Voice Call steps) dispatch calls to an OmniDimension agent, and the transcript and summary come back into the
+  conversation and customer memory. The employee's instructions, knowledge and tools do not apply during those calls; the
+  agent's own prompt in OmniDimension does.
+
+- **Conversation intelligence is deterministic and computed on read** (Phase 15). Phrase lists and regular expressions in
+  English, Hindi and Hinglish: free, instant, testable, and each label can point at the phrase that produced it. Nothing is
+  stored, so there is no backfill and no migration; the overview reads the newest 2,000 conversations of a period. Store
+  insights per conversation (or add a model) when workspaces outgrow that or the misses matter.
+- **Locale is operational context, not a classification of the customer.** Indian conventions (₹, lakh, day-first dates, +91 for
+  bare 10-digit numbers) apply when the business's employee runs in an Indian time zone or an Indian language variant. A
+  customer's +91 number, Hindi or name never changes how they are treated; the prompt tells the model not to infer background
+  from them. Analytics count languages of messages, not nationalities.
+- **Follow the customer's language and script per message.** Hinglish answered in Roman letters, Hindi in Devanagari: the
+  latest message decides, so a customer who switches is followed. The employee's language stays the default.
+- **Hinglish is an employee language (`hi-en`), mapped per speech provider**, so STT/TTS stay provider-agnostic: providers that
+  can listen for several languages do (Deepgram `multi`), the rest are told Hindi or left to detect.
+- **Aadhaar and PAN are recognised only to be masked or refused**: entities show `XXXX XXXX 1234`, memory rejects values and keys
+  that hold them. `pin_code` stays a secret key (it may be a card PIN); postal codes are stored as `postal_code`.
+- **Hindi call lines avoid gendered first-person verbs** (passive forms), since the employee's gender is not known.
+
+- **The usage ledger is derived from rows that already record each fact** (Phase 16), not written at each call site. AiUsage,
+  messages, calls, tool executions and workflow runs are immutable records the code already writes in one place each; the meter
+  copies them with set-based SQL. Ledger ids are `<sourceType>:<sourceId>` with ON CONFLICT DO NOTHING, so any number of meter
+  runs, retries or API processes count each fact once, and every billed line names its source. New code paths that write those
+  rows are billed without touching billing.
+- **Charges come from the ledger, never from counters**: a period's usage charge is the sum of the ledger's `amountUsd` over the
+  period, written once as a `UsageCharge` before Stripe is called, and sent with an idempotency key.
+- **Markup applies to platform cost only** (owner's choice; the rate is set only in the server's environment, never in the repository). Organizations' own keys are paid to the vendor directly,
+  so their usage is recorded with amount 0. A cost nobody knows is recorded as unpriced and not billed, never guessed.
+- **Calls are billed per started minute from the Call row**, once the duration settled (10 minutes after the call ended), because
+  the provider's billed length can replace our estimate right after hang-up and ledger rows are never updated.
+- **Stripe is isolated in one file and holds money, not truth.** Plans, limits, usage and invoices' copies live in our tables; Stripe
+  objects are re-read on every subscription event (order-proof), and the only Stripe features used are Checkout, subscriptions,
+  invoice items and the portal, so another gateway is a rewrite of `billing/stripe.ts` and the webhook route.
+- **Usage is one invoice line per period, added to the renewal draft** rather than Stripe meters or Metronome (Stripe's recommendation
+  for new usage billing): our ledger already has the numbers, and the owner wants to be able to change payment gateway, which
+  Metronome would make harder. Revisit for prepaid credits or enterprise contracts.
+- **Stripe review (stripe-best-practices skill, 2026-11-24)**: API version pinned (`2026-11-18.endive`); Checkout sends
+  `integration_identifier` and never `payment_method_types`; organizations are resolved through the stored Stripe customer first,
+  metadata and `client_reference_id` only as fallbacks; refunds, disputes and early fraud warnings are logged with the organization
+  (nothing automatic acts on them); restricted keys (`rk_`) and sandboxes recommended in `.env.example`. Still fetch, not Stripe's
+  SDK (the codebase calls every vendor that way).
+- **The markup and the platform's provider cost are never shown to tenants** (owner's company policy, 2026-11-24). Billing, Reports,
+  Model routing > Usage and Settings > provider metrics show what is billed, and provider cost only for an organization's own keys
+  (its own vendor bill). The markup lives in `BILLING_MARKUP` on the server; `billing.test.ts` asserts no response carries it.
+- **Limits are enforced only when billing is on** (Stripe configured), so development, tests and self-hosted servers are not limited.
+  A limit check that fails (database hiccup) allows the action: the usage is still recorded and billed.
+- **Limits stop new work, not work in progress**: a refused turn saves nothing and says why; a call over the minutes limit finishes;
+  memory, Copilot and graders are not refused (they are billed).
 
 ## Traps already hit
 
@@ -397,6 +448,8 @@ problem re-discovered.
 - **Importing `@workforce/providers` (or `@workforce/tools`) loads `@workforce/database`**, which throws without `DATABASE_URL`;
   tests that need no database set a dummy one before importing (Phase 14).
 - **Prisma `groupBy` with a shared `by` variable does not typecheck**; the provider metrics use one SQL query with `FILTER` instead.
+- **ESLint's `no-misleading-character-class` rejects a Devanagari class range starting at U+0900** (a combining sign); ranges in
+  `entities.ts` start at U+0904. Python edit scripts must use raw strings for regexes: `"\b"` became a backspace once (Phase 15).
 - **A Fastify `httpError` drops custom fields**; the error handler now passes `issues` through on 400s so catalog field checks map
   to form fields like Zod's do.
 

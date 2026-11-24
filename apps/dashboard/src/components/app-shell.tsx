@@ -7,6 +7,8 @@ import {
   ChartColumn,
   Check,
   ChevronsUpDown,
+  CreditCard,
+  FileChartColumn,
   Laptop,
   LayoutDashboard,
   Lightbulb,
@@ -65,6 +67,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     items: [
       { href: "/", label: "Dashboard", icon: LayoutDashboard },
       { href: "/analytics", label: "Analytics", icon: ChartColumn },
+      { href: "/reports", label: "Reports", icon: FileChartColumn },
     ],
   },
   {
@@ -88,7 +91,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
 ];
 
 const SETTINGS: NavItem = { href: "/settings", label: "Settings", icon: Settings };
-const NAV = [...NAV_GROUPS.flatMap((group) => group.items), SETTINGS];
+const BILLING: NavItem = { href: "/billing", label: "Billing", icon: CreditCard };
+const NAV = [...NAV_GROUPS.flatMap((group) => group.items), BILLING, SETTINGS];
 
 const THEMES = [
   { value: "light", label: "Light", icon: Sun },
@@ -238,6 +242,7 @@ function AppSidebar() {
 
       <SidebarFooter>
         <SidebarMenu>
+          <NavLink {...BILLING} />
           <NavLink {...SETTINGS} />
           <SidebarMenuItem>
             <ThemeMenu />

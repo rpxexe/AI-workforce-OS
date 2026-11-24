@@ -30,12 +30,17 @@ import { channelService, whatsappProviderOf } from "./channels/service.ts";
 import { webChatRoutes } from "./channels/webchat.ts";
 import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
+import { meterConfigFromEnv, type MeterConfig } from "./billing/meter.ts";
+import { billingRoutes } from "./billing/routes.ts";
+import { billingService } from "./billing/service.ts";
+import { stripeClient, stripeFromEnv, type StripeConfig } from "./billing/stripe.ts";
 import { employeeRoutes } from "./employees.ts";
 import { improvementRoutes } from "./improvements.ts";
 import { inboxRoutes } from "./inbox.ts";
 import type { HandoffNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
+import { reportRoutes } from "./reports.ts";
 import { qualityRoutes } from "./quality.ts";
 import { toolRoutes } from "./tools.ts";
 import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
@@ -81,6 +86,11 @@ export async function buildApp(
     jobs?: "inngest" | "inline" | ((definitions: JobDefinitions, schedules: Schedule[]) => Jobs);
     /** The workflow runner: how often it looks for due runs, and how often a Voice Call step checks its call. Tests that give this get a runner. */
     workflows?: { intervalMs?: number; callPollMs?: number };
+    /**
+     * Phase 16: Stripe (default from .env: STRIPE_*; never for test apps), whether plan limits apply (default: when Stripe
+     * is configured), and the meter's markup and platform prices (default from .env: BILLING_*).
+     */
+    billing?: { stripe?: StripeConfig | null; enforced?: boolean; meter?: MeterConfig };
     logger?: boolean;
   } = {},
 ) {
@@ -155,8 +165,16 @@ export async function buildApp(
     socket.on("message", (data) => socket.send(data.toString()));
   });
 
+  // Phase 16: the usage ledger, plan limits and Stripe. Limits apply when billing is on, else nothing is limited.
+  const stripeConfig = options.billing ? (options.billing.stripe ?? null) : options.authenticate ? null : stripeFromEnv();
+  const stripe = stripeConfig ? stripeClient(stripeConfig) : null;
+  const billing = billingService({ ...(options.billing?.meter ?? meterConfigFromEnv()), enforced: options.billing?.enforced ?? stripe !== null }, app.log);
+  const planLimits = billing.check;
+  billingRoutes(app, authenticate, { billing, stripe, dashboardOrigin });
+  reportRoutes(app, authenticate);
+
   workspaceRoutes(app, authenticate);
-  employeeRoutes(app, authenticate);
+  employeeRoutes(app, authenticate, planLimits);
   customerRoutes(app, authenticate);
   toolRoutes(app, authenticate);
 
@@ -204,7 +222,7 @@ export async function buildApp(
   const router = modelRouter(platform, credentialsKey, app.log, options.byoProvider);
   aiRoutes(app, authenticate, platform, credentialsKey);
   const getEmbedder = () => (embedder ??= embeddingProviderFromEnv());
-  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }), providers);
+  knowledgeRoutes(app, authenticate, getEmbedder, (documentId) => send("knowledge/document.uploaded", { documentId }), providers, planLimits);
   /**
    * The send_email tool's, Message steps' and handoff emails' sender: the provider that serves the request's scope, from
    * its From address (RESEND_FROM for the platform's Resend). Test mode when none is configured: nothing is delivered.
@@ -225,6 +243,7 @@ export async function buildApp(
     fetch: options.toolFetch,
     mailer,
     onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
+    planLimits,
   });
   /** Emails the employee's escalation contact about a handoff (test mode without Resend: logged only). */
   const onHandoff = (n: HandoffNotice) => {
@@ -267,6 +286,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     tools,
     timeoutMs,
     onHandoff,
+    planLimits,
   };
   conversationRoutes(app, authenticate, ai);
   const voiceConfig: VoiceConfig = {
@@ -415,6 +435,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     await Promise.all(scopes.map((scope) => send("improvement/analyze", scope)));
     return scopes.length;
   };
+  const meterAll = () => billing.meter(null, new Date(Date.now() - 3 * 86_400_000));
   /** Queues evaluations of conversations that went quiet; the evaluation-sweep schedule, or a timer without Inngest. */
   const sweepEvaluations = async (step: Pick<Steps, "run">) => {
     const ids = await step.run("queue-evaluations", () => queueDueEvaluations({ idleMs: EVALUATION_IDLE_MS }));
@@ -434,6 +455,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     },
     { id: "evaluation-sweep", cron: "*/5 * * * *", handler: sweepEvaluations },
     { id: "improvement-analysis", cron: "0 6 * * *", handler: analyzeAll },
+    // The usage meter over every organization: catches what no limit check or billing page metered (3 days back, idempotent).
+    { id: "usage-meter", cron: "*/5 * * * *", handler: (step) => step.run("meter", () => meterAll()) },
   ];
   jobs.current =
     typeof options.jobs === "function"
@@ -452,7 +475,11 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
   let sweep: Promise<unknown> = Promise.resolve();
   const timer = sweeping
     ? setInterval(() => {
-        sweep = sweep.then(() => sweepEvaluations({ run: (_id, fn) => fn() })).catch((err: unknown) => app.log.error({ err }, "Evaluation sweep failed"));
+        sweep = sweep
+          .then(() => sweepEvaluations({ run: (_id, fn) => fn() }))
+          .catch((err: unknown) => app.log.error({ err }, "Evaluation sweep failed"))
+          .then(meterAll)
+          .catch((err: unknown) => app.log.error({ err }, "Usage meter failed"));
       }, 5 * 60_000)
     : undefined;
 

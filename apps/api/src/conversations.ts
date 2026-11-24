@@ -10,6 +10,7 @@ import {
   type ChatStreamEvent,
   type ConversationDetail,
   type ConversationSummary,
+  type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
 import { guards, httpError, type Authenticate } from "./auth.ts";
@@ -42,6 +43,7 @@ export function conversationRoutes(
     tools: ToolExecutor;
     timeoutMs: number;
     onHandoff?: (notice: HandoffNotice) => void;
+    planLimits?: UsageLimiter;
   },
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
@@ -148,6 +150,7 @@ export function conversationRoutes(
       timeoutMs: ai.timeoutMs,
       signal: gone.signal,
       onHandoff: ai.onHandoff,
+      planLimits: ai.planLimits,
     });
     const events = async function* () {
       for await (const event of turn) {

@@ -112,7 +112,7 @@ after(async () => {
   await deleteOrgs(org);
 });
 
-test("the queue serves one function per job, the workflow sweep, the evaluation sweep and the improvement analysis", () => {
+test("the queue serves one function per job, the workflow sweep, the evaluation sweep, the improvement analysis and the usage meter", () => {
   assert.deepEqual(Object.keys(definitions).sort(), [
     "channel/message.received",
     "evaluation/dataset.run",
@@ -127,6 +127,7 @@ test("the queue serves one function per job, the workflow sweep, the evaluation 
     ["workflow-sweep", "* * * * *"],
     ["evaluation-sweep", "*/5 * * * *"],
     ["improvement-analysis", "0 6 * * *"],
+    ["usage-meter", "*/5 * * * *"],
   ]);
 });
 
@@ -246,7 +247,7 @@ test("channels: a WhatsApp message is answered by its job, once", async () => {
   assert.equal(waSent, 1);
 });
 
-test("with Inngest itself, /api/inngest serves the ten functions (seven jobs, three schedules)", async () => {
+test("with Inngest itself, /api/inngest serves the eleven functions (seven jobs, four schedules)", async () => {
   // Dev mode needs no keys and no network to describe itself.
   process.env.INNGEST_DEV = "1";
   const real = await buildApp({ authenticate: headerAuth, provider: model, embedder, logger: false, whatsapp: [], jobs: "inngest" });
@@ -254,7 +255,7 @@ test("with Inngest itself, /api/inngest serves the ten functions (seven jobs, th
     const res = await real.inject({ method: "GET", url: "/api/inngest" });
     assert.equal(res.statusCode, 200, res.payload);
     const body = res.json<{ function_count?: number; mode?: string }>();
-    assert.equal(body.function_count, 10);
+    assert.equal(body.function_count, 11);
     assert.equal(body.mode, "dev");
   } finally {
     delete process.env.INNGEST_DEV;

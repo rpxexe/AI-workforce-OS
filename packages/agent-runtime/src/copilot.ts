@@ -58,7 +58,7 @@ export async function suggest(input: CopilotInput): Promise<CopilotSuggestion> {
   const usage = { inputTokens: 0, outputTokens: 0 };
   let handledBy = { provider: provider.name, model: provider.model };
   for await (const event of provider.stream({
-    system: `${COPILOT_PROMPT}\n\n${systemPrompt(employee, matches, memory, false, conversation.channel)}`,
+    system: `${COPILOT_PROMPT}\n\n${systemPrompt(employee, matches, memory, false, conversation.channel, new Date(), lastCustomerMessage)}`,
     messages: [{ role: "user", content: `The conversation so far:\n\n${transcript}` }],
     signal,
   })) {

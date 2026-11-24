@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-21, Phase 5 finished (Customers page and memory controls) after Phase 14.
+Last updated: 2026-11-24, Phase 16 built (analytics, usage metering, billing) after Phase 15.
 
 ## Phases
 
@@ -21,7 +21,9 @@ Last updated: 2026-11-21, Phase 5 finished (Customers page and memory controls) 
 | 12 | Controlled continuous improvement: failure patterns (an evaluator failing on an employee's live version) -> a model-proposed change to instructions, personality or goals with its evidence -> a person creates the proposed version and replays the employee's regression suite on both versions (fixed and broken cases) -> human approval -> percentage rollout (A/B, sticky per customer across channels) with a chosen KPI compared between versions -> promote or roll back; rollback to the previous live version; a release log; version comparison (field-by-field line diff); the Improvements pages and the employee Releases card | Built; 4 tests (`improvement.test.ts`, fake model). **Improvements pages, Releases card and Compare versions not tried in a browser**; they typecheck, lint and build. **The proposal prompt has not run against a real model yet** |
 | 13 | Model routing and BYOAI: provider abstraction (OpenAI, Anthropic, Gemini, OpenRouter, custom OpenAI-compatible), organization keys sealed at rest and never returned, a model policy per task (primary, up to 3 fallbacks, cost limit, timeout, allowed providers, order by list / latency / cost), a router that filters by capability, context and cost and falls back without loops, usage records per attempt (provider, model, tokens, cost, latency, success), replies storing the model that actually answered, the AI models page | Built; 11 tests (`routing.test.ts`: the router with fake providers, and the API with the database and faked providers built from keys). **AI models page not tried in a browser**; it typechecks, lints and builds. **No real OpenAI, Gemini or custom endpoint called yet**; Anthropic with an organization's key untested against the real API |
 | 14 | Universal provider and integration settings: a provider registry (catalog + adapters + test per provider) over 7 types; organization connections (`ProviderConnection`, Phase 13 keys migrated with their ids) sealed and never returned; 7 more LLMs (Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Hugging Face); STT AssemblyAI (live + files), Whisper, Google, Azure, custom (files); TTS OpenAI, Google, Azure, Cartesia, PlayHT, Kokoro, VoiceStudio, custom; telephony SignalWire plus organizations' own Twilio/Telnyx accounts; WhatsApp on organizations' own Meta/Twilio/Telnyx accounts; email SendGrid, SES, SMTP plus organizations' Resend; storage R2, S3, GCS, Azure Blob, S3-compatible (knowledge uploads); resolution workflow > employee > organization default > platform for LLM/STT/TTS/email; fallback with Phase 13's loop rules for LLM/STT/TTS/email, none on auth/config errors; Test Connection (rate limited, deduplicated); rotation, audit log, disable/default/delete with in-use checks; per-connection webhooks; SSRF pinning; usage and provider metrics per type; the Settings page, employee and workflow Providers overrides | Built; 165 API tests (19 new for Phase 14, 13 speech adapters, 9 email/storage adapters). Plivo, Vonage, SIP and live Google/Azure recognition are listed as coming soon. **No new provider called against its real API yet**; Settings page not tried in a browser |
-| 15+ | Not started | Owner pastes the next phase prompt |
+| 15 | India-first conversation intelligence: language detection (English, Hindi, Hinglish, 8 other Indian scripts) with code-switching and language switches; structured extraction of names, phones (+91 mobiles, landlines, toll-free, international), addresses with PIN codes and landmarks, order/reference ids, dates (day first, Hindi months, kal/parso by tense, weekdays), times (AM/PM, "shaam 5 baje"), amounts (₹, lakh, crore, k), GSTIN, IFSC, UPI ids, payment methods; Aadhaar/PAN only masked; sentiment indicators, intent, resolution and escalation signals in English/Hindi/Hinglish; reply-language guidance per customer message and Indian conventions only for businesses operating in India; new employee languages English (India) and Hindi + English (Hinglish) mapped per speech provider (Deepgram `multi`); Hindi/Hinglish fixed call lines; ₹ amounts and phone numbers formatted for speech; Hinglish/Hindi requests for a person; lakh/crore in handoff thresholds; memory refuses Aadhaar/PAN; the conversation Insights card and the Analytics "Conversation intelligence" section | Built; 14 tests (`insights.test.ts`). **Insights card and Analytics section not tried in a browser**; they typecheck and lint. **Hinglish speech (Deepgram `multi`, ElevenLabs without `language_code`) not tried on a real call**; the analyzers are phrase lists and regular expressions, so expect misses on spellings they do not list |
+| 16 | Analytics, usage metering and billing: a usage ledger (`UsageEvent`, one immutable row per source row: provider attempts with cost and the amount billed, conversations, AI messages, voice minutes, tool calls, workflow runs; id `<sourceType>:<sourceId>`, so metering is idempotent), the meter (set-based SQL, before limit checks and billing reads, plus a 5-minute sweep), provider cost x (1 + `BILLING_MARKUP`, set in the server's environment) on the platform's providers only, platform unit prices for speech, calls and email; plans in code (Free, Starter, Growth, Scale) with limits enforced on the server (AI employees, conversations, AI messages, voice minutes, knowledge storage, usage spend, tool calls); Stripe isolated in `billing/stripe.ts` (fetch, no SDK): Checkout, plan changes, the customer portal, signed webhooks re-reading subscriptions, the period's usage added to the renewal invoice once, invoices mirrored; tenant analytics for a date range (`/analytics/report`); the Billing (plan, usage, invoices, limits) and Reports pages | Built; 6 tests (`billing.test.ts`, fake Stripe API). **No real Stripe account used yet**; **Billing and Reports pages not tried in a browser** (they typecheck, lint and build) |
+| 17+ | Not started | Owner pastes the next phase prompt |
 
 Also done after Phase 9: **background jobs on Inngest** (document processing, memory learning, answering WhatsApp and
 email, workflow runs with sleeps, a one-minute sweep), with the in-process backend kept for tests and development
@@ -34,6 +36,29 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
 (`resend.test.ts`); **not yet sent through a real Resend account**.
 
 ## Open items
+
+- **Phase 16 with a real Stripe sandbox.** Use a Stripe sandbox (not live mode) and a restricted key (`rk_`, permissions in
+  `.env.example`). Create one Product per plan with one monthly USD Price each, set `STRIPE_SECRET_KEY`,
+  `STRIPE_PRICE_STARTER/GROWTH/SCALE`, add a webhook to `PUBLIC_URL/billing/stripe/webhook` (checkout.session.completed,
+  customer.subscription.created/updated/deleted, invoice.*, charge.refunded, charge.dispute.created,
+  radar.early_fraud_warning.created; full list in `.env.example`) and put its secret in `STRIPE_WEBHOOK_SECRET`; turn on the customer
+  portal in Stripe. Buy Starter from Billing with card 4242..., check the plan, then use Stripe's test clock to reach a renewal
+  and check the usage line on the draft invoice. Set `BILLING_PRICE_*` to your providers' prices first, or platform speech and
+  calls stay unpriced. Unconfirmed from the docs: that a renewal invoice's `period_start/period_end` is the period just ended
+  (the usage window we bill), and that `invoice.created` arrives while the invoice is still a draft for every account setting.
+  **Turning Stripe on enforces limits**: the Free plan allows 1 AI employee, so existing organizations over a limit can still
+  read everything but cannot add more until they upgrade.
+- **Tests run against the local Docker Postgres only** (`pnpm infra:up`, `DATABASE_URL` pointing at it). Neon is production:
+  the suite creates and deletes throwaway organizations and, against a remote database, its short waits time out (26-36
+  failures on 2026-11-24, all timeouts or knock-ons). Production needs `prisma migrate deploy` for each new migration
+  (`20261124100000_billing` was applied to Neon on 2026-11-24).
+
+- **Phase 15 for real.** Set an employee's language to "Hindi + English (Hinglish)" (or its time zone to Asia/Kolkata), chat in
+  Hinglish and Hindi in test chat and check the replies keep the customer's script; open the conversation and check the
+  Insights card; check Analytics > Conversation intelligence. Place a call with a Hinglish employee: Deepgram should get
+  `language=multi` (Nova-3) and the fixed lines should be in Hinglish. Unconfirmed from the docs: Deepgram `multi`
+  transcribing Hindi on 8 kHz mu-law phone audio; ElevenLabs Flash reading Roman-script Hinglish without `language_code`;
+  Cartesia and PlayHT with Hindi. AssemblyAI live calls stay English-only.
 
 - **Phase 14 for real.** With `AI_CREDENTIALS_KEY` set, open Settings and for each category connect a real account, press Test
   Connection, set it as default, then: test-chat an employee (LLM; check the reply's model and Developer > metrics), give the
@@ -48,6 +73,11 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   signature header (Twilio's algorithm with the Signing Key); VoiceStudio's `/v1/audio/voices` shape and whether its
   `/v1/audio/speech` streams (it is asked for WAV and converted). VoiceStudio runs on your machine: expose it over https
   (remote access with `OMNIVOICE_API_KEY`, behind a TLS tunnel), never plain localhost.
+- **OmniDimension calling (added 2026-11-23) against the real API.** Connect it in Settings > Telephony (API key + agent id),
+  Test Connection, add an OmniDimension number of that account to an employee choosing that connection, place a call, and
+  check the call's status, transcript, conversation and customer summary afterwards. Tested only against a fake API
+  (`voice.test.ts`). Unconfirmed from the docs: whether `__post_call_actions.webhook` needs `enabled: true` (we send it),
+  that `interactions[].time` and `start_time` are UTC, and that `/phone_number/list` returns every number in one page of 150.
 - **Phase 14 dashboard in a browser**: the Settings sections, connect/configure/test/rotate/default/disable/delete, the employee
   Providers card, the workflow Providers sheet, the phone-account and WhatsApp-account choices.
 
@@ -122,6 +152,36 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   configured provider). It follows the SDK docs and typechecks; run `AI_PROVIDER=anthropic LIVE_AI=1 pnpm test` once a key is set.
 
 ## Verified so far
+
+- Phase 16 (`billing.test.ts`, 6 tests, fake Stripe API). Ledger: five AiUsage rows -> five rows with `ai_usage:<id>` ids and
+  their source; metering again adds 0; platform LLM cost billed at cost x (1 + markup); own key billed 0; platform STT 120 s priced
+  per minute and marked up; telephony attempts billed 0 (the call is); unknown cost unpriced (null) and counted; a 61 s call is 2
+  minutes, billed once settled, a call that just ended waits; denied tool calls and regression replays are not usage;
+  the usage endpoint's totals and sources, other organizations see nothing, inverted ranges 400. Limits on Free: a second
+  employee 402; the 101st conversation refused in the chat stream while an existing conversation continues; the 501st AI
+  message refused and nothing saved; the 201st tool call DENIED by the executor; an upload past 50 MB 402; voice minutes
+  over 30 refused; the overview's used/limit per key; billing off = no limits. Stripe: members 403 on checkout, the Checkout
+  session carries the organization and price, one customer per organization, a plan without a price 503; forged and stale
+  signatures 400; checkout completion sets Starter with the subscription's period (and a refused conversation is answered
+  again); a plan change moves the subscription's price and Stripe's own event agrees; the renewal draft gets the ledger's
+  billed amount once (a redelivered event adds nothing; idempotency key `usage-<charge id>`); invoices mirrored with the
+  newest status; the portal (409 without a customer); cancellation returns Free. Report: totals for a range without replays,
+  one daily row per UTC day, another organization sees zeros, another organization's workspace 404, inverted or longer than
+  366 days 400, signed out 401.
+
+- Phase 15 (`insights.test.ts`, 14 tests; no model). Language: English, Hindi, Hinglish (Roman, and Devanagari with English
+  words), Bengali, Tamil, other Latin languages and digits only; switches skip digit-only messages; ties go to the first
+  language. Entities in English, Hindi (Devanagari names, Hindi digits, Hindi months, "kal" tomorrow or yesterday by tense,
+  "शाम 6 बजे"), Hinglish ("mera naam ... hai", 5 lakh, parso, "shaam 5 baje", "saade 3 baje", agle somvar, GPay, 1.2 crore,
+  50k); addresses ending at the PIN code with landmark, PIN codes only with the word; GSTIN, IFSC, UPI id, NEFT; Aadhaar and PAN
+  masked everywhere, a +91 number never taken for Aadhaar; landline, toll-free, international. Region from the business's time
+  zone or language variant only: a bare 10-digit number gets +91 and an unmarked amount is rupees only then. Conversation
+  analysis (Hinglish complaint: negative, order status, with people, "consumer court"; English: positive, pricing, resolved).
+  System prompt follows Hinglish/Hindi script, adds Indian conventions only for Indian businesses, never for a +91 caller to a
+  US business. Hinglish/Hindi requests for a person; toNumber with lakh/crore. Memory refuses Aadhaar/PAN values and keys, keeps
+  postal_code and Devanagari names. Voice: lakh/crore speech, Rs. 999/-, phone digits; Deepgram `multi` for Hinglish, ElevenLabs
+  en-IN -> en. API: detail insight for members (entities with message index, +91 from the employee's region), overview counts
+  without evaluation replays, 404 for other organizations, 401 signed out.
 
 - Phase 5 memory controls (`customers.test.ts`, 8 tests, no model): extraction keeps a confidence only between 0 and 1. The list
   searches name, email, phone and channel id, case-insensitive; detail carries memory id, confidence, source conversation and each
@@ -241,6 +301,7 @@ id; replies threaded by a tagged Reply-To; delivery events), the `send_email` to
   reload, dark mode, desktop and 390 px wide.
 
 - `pnpm typecheck`, `pnpm lint`, dashboard production build: pass.
+- 193 API tests on the local Docker Postgres on 2026-11-24 (Phases 15 and 16 included): 189 pass, 0 fail, 4 skipped (need `LIVE_AI=1`), in 2 minutes.
 - Docker Postgres and Redis run via `pnpm infra:up`; all migrations, including `channels`, are applied there.
 - 161 API tests (Phase 14 included; 4 more need `LIVE_AI=1`), all passing on 2026-11-20. Earlier: 120 at the end of Phase 13. Earlier: 109 at the end of Phase 12. Earlier: 105 at the end of Phase 11. Earlier: 98 on 2026-11-19. Earlier: 75 API tests against the Docker Postgres (`pnpm test`; 4 more need `LIVE_AI=1`). Workflows (12, fake model, fake Twilio, fake network,
   the real background runner): the example end to end (webhook trigger, outbound call placed with the templated
@@ -354,6 +415,22 @@ steps or automatic promotion/rollback on the KPI (people decide), more than one 
 a regression gate on manual publishes and rollouts of versions not from suggestions (the suite can be run from its dataset
 page), the daily analysis without Inngest, KPI paging (newest 10,000 evaluations per side), significance beyond a 95% Welch
 test, notifications about new suggestions.
+
+Billing, skipped: plans editable without a deploy (in code), per-organization custom limits or contracts, trials and coupons
+(Stripe's portal can apply them, our plan follows the subscription), taxes (GST/VAT; add Stripe Tax or a gateway that does it),
+currencies other than USD, usage of a cancelled subscription's last partial period (no renewal invoice to add it to), Stripe
+Billing meters (usage is one invoice line per period from our ledger, so another gateway needs no meter setup), stopping a
+call already in progress at the voice-minutes limit, limits on workflow runs, memory/Copilot/grader model calls being refused
+at the usage cap (they are billed, only customer turns are stopped), corrections to ledger rows (append-only; a refund is
+Stripe's), a history of past plan periods (Stripe's invoices are the record), dunning beyond Stripe's own emails.
+
+Conversation intelligence, skipped: a language model for intent, sentiment or entities (phrase lists and regular expressions,
+explainable and free; spellings they do not list are missed), Indian languages other than Hindi beyond script detection (no
+Tamil/Telugu/... phrase lists; Marathi and Nepali count as Hindi), number words ("pachaas hazaar"), storing insights (computed
+on read; the overview reads the newest 2,000 conversations of the period with their last 100 customer messages), acting on
+insights (nothing routes or hands off on sentiment), the agent's and employee's messages (customers' messages only),
+month-first dates (day first unless the second number is over 12), Devanagari order-id keywords, fixed call lines in languages
+other than English, Hindi and Hinglish.
 
 Provider settings, skipped: Plivo, Vonage, SIP and live Google/Azure recognition (coming soon, listed), AssemblyAI languages other
 than English on calls, platform API keys for our own API (the API Keys section says so), webhook signing for our outgoing

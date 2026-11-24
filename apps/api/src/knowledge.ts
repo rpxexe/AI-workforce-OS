@@ -14,6 +14,7 @@ import {
   type KnowledgeMatch,
   type KnowledgeSource,
   type KnowledgeSourceDetail,
+  type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -65,6 +66,8 @@ export function knowledgeRoutes(
   queueProcessing: (documentId: string) => Promise<void>,
   /** Phase 14: the organization's default object storage, where new uploads go instead of Postgres when there is one. */
   files?: Pick<ProviderService, "storage" | "storageById">,
+  /** Plan limits (Phase 16): knowledge storage. */
+  planLimits?: UsageLimiter,
 ) {
   const { member, admin, inWorkspace } = guards(authenticate);
   const base = "/workspaces/:workspaceId/knowledge";
@@ -159,6 +162,8 @@ export function knowledgeRoutes(
       const source = await prisma.knowledgeSource.findFirst({ where: { id: sourceId, ...within(scope) }, select: { id: true } });
       if (!source) throw httpError(404, "Knowledge source not found");
       embedder(req.log); // refuse the upload now rather than fail the document later
+      const refused = await planLimits?.(scope.organizationId, ["storageMb"], { storageMb: req.body.length / 1_048_576 });
+      if (refused) throw httpError(402, refused);
 
       // With object storage the file goes there first; a row is only written for a file that was stored.
       const storage = files ? await files.storage(scope.organizationId) : null;

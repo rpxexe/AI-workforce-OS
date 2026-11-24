@@ -320,6 +320,19 @@ export const PROVIDER_CATALOG: ProviderMeta[] = [
     docsUrl: "https://developer.signalwire.com/compatibility-api/",
     notes: "Through SignalWire's Twilio-compatible (LaML) API. Not yet tried against the real API.",
   },
+  {
+    id: "omnidimension",
+    type: "telephony",
+    name: "OmniDimension",
+    status: "supported",
+    capabilities: ["calls", "outbound"],
+    credentialFields: [apiKey],
+    configFields: [text("agentId", "Agent ID", true, { help: "The OmniDimension agent that talks on these calls (its id in OmniDimension's dashboard or API)" })],
+    models: [],
+    docsUrl: "https://docs.omnidim.io/docs/api-reference/calls/dispatchCall",
+    notes:
+      "OmniDimension's own agent runs the call (its speech, model and voice), so the employee's instructions, knowledge and tools do not apply during it. The transcript and summary come back to the conversation and customer memory after the call. Outbound only, no live transfer. Not yet tried against the real API.",
+  },
   soon("plivo", "telephony", "Plivo", "https://www.plivo.com/docs/voice/", "Plivo's audio stream uses its own message format; coming soon."),
   soon("vonage", "telephony", "Vonage", "https://developer.vonage.com/en/voice/voice-api/overview", "Vonage streams 16 kHz linear PCM over its own WebSocket protocol; coming soon."),
   soon("sip", "telephony", "SIP / custom", "https://datatracker.ietf.org/doc/html/rfc3261", "Direct SIP trunks need a media server (RTP); coming soon."),
@@ -630,5 +643,10 @@ export const kindOfStatus = (status: number): ProviderErrorKind =>
 const LOCALES: Record<string, string> = {
   en: "en-US", es: "es-ES", fr: "fr-FR", de: "de-DE", it: "it-IT", pt: "pt-BR", nl: "nl-NL", hi: "hi-IN", ja: "ja-JP", ko: "ko-KR",
   zh: "zh-CN", ar: "ar-SA", ru: "ru-RU", pl: "pl-PL", tr: "tr-TR", sv: "sv-SE", da: "da-DK", fi: "fi-FI", nb: "nb-NO", id: "id-ID",
+  "hi-en": "hi-IN",
 };
-export const localeOf = (language: string) => (language.includes("-") ? language : (LOCALES[language] ?? `${language}-${language.toUpperCase()}`));
+export const localeOf = (language: string) => LOCALES[language] ?? (language.includes("-") ? language : `${language}-${language.toUpperCase()}`);
+/** The ISO 639-1 code for providers that take one (en-IN -> en; hi-en, Hinglish, -> hi). */
+export const isoOf = (language: string) => language.split("-")[0]!;
+/** Hinglish: providers that can listen for several languages at once should; the others are told Hindi or guess. */
+export const isMixedLanguage = (language: string) => language === "hi-en";

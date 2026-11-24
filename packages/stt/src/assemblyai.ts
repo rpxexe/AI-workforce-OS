@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { kindOfStatus, ProviderError } from "@workforce/shared";
+import { isMixedLanguage, isoOf, kindOfStatus, ProviderError } from "@workforce/shared";
 import WebSocket from "ws";
 import type { STTEvent, STTProvider } from "./types.ts";
 
@@ -142,7 +142,7 @@ export function assemblyAIProvider({
       const { id } = await call<{ id: string }>("/v2/transcript", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ audio_url: upload_url, language_code: language }),
+        body: JSON.stringify({ audio_url: upload_url, ...(isMixedLanguage(language) ? { language_detection: true } : { language_code: isoOf(language) }) }),
       });
       for (;;) {
         const transcript = await call<{ status?: string; text?: string; error?: string }>(`/v2/transcript/${encodeURIComponent(id)}`);

@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { ConversationMessage } from "./conversation.ts";
 import type { MessageSource } from "./knowledge.ts";
+import type { ConversationInsight } from "./insights.ts";
 import type { CallTransferRecord } from "./voice.ts";
 
 export const CONVERSATION_STATUSES = ["AI_ACTIVE", "WAITING_FOR_HUMAN", "HUMAN_ACTIVE", "RESOLVED", "REOPENED"] as const;
@@ -124,6 +125,8 @@ export type InboxConversation = Omit<InboxItem, "lastMessage" | "handoff"> & {
   transfers: CallTransferRecord[];
   /** Whether an agent's message can reach the customer on this channel (not on voice or workflow conversations). */
   canReply: boolean;
+  /** Language, sentiment, intent, entities, resolution and escalation, worked out from the messages (Phase 15). */
+  insight: ConversationInsight;
 };
 
 /** Durations are milliseconds; null when nothing was measured. */

@@ -1,3 +1,4 @@
+import { isMixedLanguage, isoOf } from "@workforce/shared";
 import { TTSError, type TTSProvider } from "./types.ts";
 import { stripWavHeader } from "./wav.ts";
 
@@ -36,7 +37,7 @@ export function elevenLabsProvider({
           method: "POST",
           headers: { "xi-api-key": apiKey, "content-type": "application/json", accept: "audio/basic" },
           // Normalization reads numbers, times and prices out properly; Flash leaves it off by default.
-          body: JSON.stringify({ text, model_id: model, language_code: language, apply_text_normalization: "on" }),
+          body: JSON.stringify({ text, model_id: model, ...(isMixedLanguage(language) ? {} : { language_code: isoOf(language) }), apply_text_normalization: "on" }),
           signal,
         }),
       );

@@ -4,7 +4,7 @@
 // Agents are organization members, not only admins: answering customers is their job. The AI stops
 // answering a conversation in WAITING_FOR_HUMAN or HUMAN_ACTIVE (runTurn checks); only returning it
 // to the AI (or resolving and reopening it) lets it answer again.
-import { errorMessage, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
+import { analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
 import {
@@ -14,6 +14,8 @@ import {
   EVALUATION_CHANNEL,
   inboxQuerySchema,
   INBOX_VIEWS,
+  RESOLUTIONS,
+  SENTIMENTS,
   type ConversationStatus,
   type DurationStats,
   type HandoffAnalytics,
@@ -23,6 +25,7 @@ import {
   type InboxItem,
   type InboxResponse,
   type InboxView,
+  type InsightsOverview,
   toTransferRecord,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
@@ -52,14 +55,28 @@ const viewWhere = (view: InboxView, userId: string): Prisma.ConversationWhereInp
     all: {},
   })[view] as Prisma.ConversationWhereInput;
 
+const versionSelect = { name: true, language: true, workingHours: true } as const;
 const listInclude = {
   employee: {
-    select: { id: true, publishedVersion: { select: { name: true } }, versions: { orderBy: { number: "desc" }, take: 1, select: { name: true } } },
+    select: { id: true, publishedVersion: { select: versionSelect }, versions: { orderBy: { number: "desc" }, take: 1, select: versionSelect } },
   },
   customer: { select: { customer: { select: { id: true, externalId: true, profile: { select: { name: true } } } } } },
 } satisfies Prisma.ConversationInclude;
 
 type ListRow = Prisma.ConversationGetPayload<{ include: typeof listInclude }>;
+
+/** The business's operating context for the analyzer: region and time zone of the live (else latest) version. Never the customer's. */
+const operating = (c: Pick<ListRow, "employee">) => {
+  const v = c.employee.publishedVersion ?? c.employee.versions[0];
+  const timezone = (v?.workingHours as { timezone?: string } | null)?.timezone ?? "UTC";
+  return { timezone, region: v ? regionOf({ language: v.language, workingHours: { timezone } }) : null };
+};
+
+const tally = <K extends string>(keys: K[]) => {
+  const counts = new Map<K, number>();
+  for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1]);
+};
 
 const base = (c: ListRow) => ({
   id: c.id,
@@ -120,13 +137,15 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
         suggestions: { orderBy: { createdAt: "desc" }, take: 10 },
       },
     });
+    const messages = c.messages.reverse();
     return {
       ...base(c),
-      messages: c.messages.reverse().map(toMessage),
+      messages: messages.map(toMessage),
       handoffs: c.handoffs.map(toHandoff),
       suggestions: c.suggestions.map(toSuggestion),
       transfers: (await transfers).map(toTransferRecord),
       canReply: REPLY_CHANNELS.includes(c.channel) && (c.channel === "test" || c.customer !== null),
+      insight: analyzeConversation({ messages, status: c.status, handoffs: c.handoffs, ...operating(c) }),
     };
   };
 
@@ -321,6 +340,44 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
       req.log.error(err, "Copilot failed");
       throw httpError(502, `The copilot could not answer: ${errorMessage(err)}`);
     }
+  });
+
+  // Conversation intelligence over the period: languages, code-switching, sentiment, intents, entities, resolution, escalation.
+  app.get("/workspaces/:workspaceId/insights", async (req): Promise<InsightsOverview> => {
+    const { workspaceId } = workspaceParams.parse(req.params);
+    const scope = await inWorkspace(member(req), workspaceId);
+    const { days } = analyticsQuerySchema.parse(req.query);
+    const where = { ...within(scope), ...REAL, updatedAt: { gte: new Date(Date.now() - days * 86_400_000) } };
+    const [conversations, rows] = await Promise.all([
+      prisma.conversation.count({ where }),
+      // shortcut: analyzed on read, the newest 2,000 conversations with their last 100 customer messages; store insights per conversation when workspaces outgrow it
+      prisma.conversation.findMany({
+        where,
+        orderBy: { updatedAt: "desc" },
+        take: 2_000,
+        select: {
+          status: true,
+          employee: listInclude.employee,
+          messages: { where: { role: "USER" }, orderBy: { createdAt: "desc" }, take: 100, select: { role: true, content: true, createdAt: true } },
+          handoffs: { select: { trigger: true } },
+        },
+      }),
+    ]);
+    const insights = rows.map((c) => analyzeConversation({ messages: c.messages.reverse(), status: c.status, handoffs: c.handoffs, ...operating(c) }));
+    const escalated = insights.filter((i) => i.escalation.escalated).length;
+    return {
+      days,
+      conversations,
+      analyzed: insights.length,
+      languages: tally(insights.map((i) => i.primaryLanguage).filter((l) => l !== "unknown")).map(([language, n]) => ({ language, conversations: n })),
+      codeSwitched: insights.filter((i) => i.codeSwitchedMessages > 0).length,
+      withSwitches: insights.filter((i) => i.switches > 0).length,
+      sentiment: Object.fromEntries(SENTIMENTS.map((s) => [s, insights.filter((i) => i.sentiment === s).length])) as InsightsOverview["sentiment"],
+      intents: tally(insights.map((i) => i.intent)).map(([intent, n]) => ({ intent, conversations: n })),
+      entities: tally(insights.flatMap((i) => i.entities.map((e) => e.type))).map(([type, count]) => ({ type, count })),
+      resolution: Object.fromEntries(RESOLUTIONS.map((r) => [r, insights.filter((i) => i.resolution === r).length])) as InsightsOverview["resolution"],
+      escalation: { conversations: escalated, rate: insights.length > 0 ? escalated / insights.length : null, withSignals: insights.filter((i) => i.escalation.signals.length > 0).length },
+    };
   });
 
   app.get("/workspaces/:workspaceId/handoffs/analytics", async (req): Promise<HandoffAnalytics> => {

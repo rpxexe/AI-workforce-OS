@@ -1,6 +1,14 @@
 "use client";
 
-import { HANDOFF_TRIGGER_LABELS, type DurationStats, type HandoffAnalytics } from "@workforce/shared";
+import {
+  DETECTED_LANGUAGES,
+  ENTITY_TYPES,
+  HANDOFF_TRIGGER_LABELS,
+  INTENTS,
+  type DurationStats,
+  type HandoffAnalytics,
+  type InsightsOverview,
+} from "@workforce/shared";
 import { useState } from "react";
 import { formatDuration } from "@/components/inbox/meta";
 import { ErrorState, LoadingState, PageHeader } from "@/components/states";
@@ -34,15 +42,91 @@ function DurationTile({ label, stats }: { label: string; stats: DurationStats })
   );
 }
 
+const pct = (n: number, of: number) => (of === 0 ? "—" : `${Math.round((n / of) * 100)}%`);
+
+/** A labelled horizontal bar per row, longest first. */
+function Bars({ title, rows, empty }: { title: string; rows: { label: string; count: number }[]; empty: string }) {
+  const most = Math.max(1, ...rows.map((r) => r.count));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{empty}</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {rows.map((r) => (
+              <li key={r.label} className="flex flex-col gap-1" title={`${r.label}: ${r.count}`}>
+                <div className="flex justify-between gap-2 text-sm">
+                  <span>{r.label}</span>
+                  <span className="tabular-nums text-muted-foreground">{r.count}</span>
+                </div>
+                <div className="h-2 rounded-r-[4px] bg-muted" aria-hidden>
+                  <div className="h-full rounded-r-[4px] bg-primary" style={{ width: `${(r.count / most) * 100}%` }} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Phase 15: languages, code-switching, sentiment, intents, entities, resolution and escalation over the period. */
+function Insights({ data }: { data: InsightsOverview }) {
+  const n = data.analyzed;
+  return (
+    <>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-semibold">Conversation intelligence</h2>
+        <p className="text-sm text-muted-foreground">
+          Read from customers&apos; messages: {n === data.conversations ? `${n} conversations` : `the newest ${n} of ${data.conversations} conversations`}. Languages
+          describe messages, not people.
+        </p>
+      </div>
+      <section aria-label="Conversation intelligence" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Tile label="Mixed-language conversations" value={pct(data.codeSwitched, n)} hint={`${data.codeSwitched} with Hinglish or mixed scripts · ${data.withSwitches} switched language`} />
+        <Tile label="Negative sentiment" value={pct(data.sentiment.negative, n)} hint={`${data.sentiment.positive} positive · ${data.sentiment.mixed} mixed · ${data.sentiment.neutral} neutral`} />
+        <Tile label="Resolved" value={pct(data.resolution.resolved, n)} hint={`${data.resolution.with_people} with people · ${data.resolution.open} open`} />
+        <Tile
+          label="Escalated"
+          value={data.escalation.rate === null ? "—" : `${Math.round(data.escalation.rate * 100)}%`}
+          hint={`${data.escalation.conversations} handed off · ${data.escalation.withSignals} customers threatened to escalate`}
+        />
+      </section>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Bars
+          title="Languages"
+          rows={data.languages.map((l) => ({ label: DETECTED_LANGUAGES[l.language], count: l.conversations }))}
+          empty="No customer messages in this period."
+        />
+        <Bars title="Intents" rows={data.intents.map((i) => ({ label: INTENTS[i.intent], count: i.conversations }))} empty="No customer messages in this period." />
+        <Bars
+          title="Details customers gave"
+          rows={data.entities.map((e) => ({ label: ENTITY_TYPES[e.type], count: e.count }))}
+          empty="No names, numbers, addresses, dates or amounts found."
+        />
+      </div>
+    </>
+  );
+}
+
 export default withWorkspace(function AnalyticsPage({ workspace }) {
   const [days, setDays] = useState<number>(30);
   const { data, error, reload } = useApiQuery<HandoffAnalytics>(`/workspaces/${workspace.id}/handoffs/analytics?days=${days}`);
+  const insights = useApiQuery<InsightsOverview>(`/workspaces/${workspace.id}/insights?days=${days}`);
   const { nameOf } = useMembers();
 
   const most = Math.max(1, ...(data?.byTrigger.map((t) => t.count) ?? []));
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title="Analytics" description="How often AI employees hand conversations to people, why, and how quickly people and the AI answer.">
+      <PageHeader
+        title="Analytics"
+        description="How often AI employees hand conversations to people, why, how quickly people and the AI answer, and what customers talk about."
+      >
         <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
           <SelectTrigger aria-label="Period" className="w-40">
             <SelectValue />
@@ -150,6 +234,14 @@ export default withWorkspace(function AnalyticsPage({ workspace }) {
             </Card>
           </div>
         </>
+      )}
+
+      {insights.error && !insights.data ? (
+        <ErrorState message={insights.error.message} onRetry={insights.reload} />
+      ) : !insights.data ? (
+        <LoadingState rows={3} />
+      ) : (
+        <Insights data={insights.data} />
       )}
     </div>
   );
