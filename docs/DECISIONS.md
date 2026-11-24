@@ -384,6 +384,52 @@ problem re-discovered.
 - **Limits stop new work, not work in progress**: a refused turn saves nothing and says why; a call over the minutes limit finishes;
   memory, Copilot and graders are not refused (they are billed).
 
+- **The public API has its own contract, written by hand** (Phase 17). `public-api.ts` holds zod schemas of every object customers see,
+  the route table and the webhook payloads; the API maps rows into them in one file (`public/serialize.ts`) and parses every answer
+  with its schema, so an internal field can never leak and an internal rename cannot change a response. The OpenAPI document and the
+  SDK's types come from the same objects, and TypeScript requires a handler for every route in the table. Internal routes keep their
+  own types and may change freely. Versioned as `/v1`: within it, only additions.
+- **API keys belong to one workspace and carry scopes**, like the dashboard's tenant model: the key's row decides the organization and
+  workspace, never the request. A key is `wfk_<prefix>_<secret>`; only a SHA-256 hash is stored. The secret has 256 random bits, so a
+  fast unsalted hash is safe (a slow hash protects guessable passwords, not random keys) and keeps verification cheap. Last use is
+  written at most once a minute per key. Revoked keys stay as records.
+- **Rotation creates a new key and gives the old one a grace period** (0, 1, 24 or 168 hours), so a deployment can switch without
+  downtime; 0 revokes it at once.
+- **Webhook events are derived from rows, like the usage ledger**, not emitted at each call site: messages, conversations, workflow
+  runs, handoffs and calls are already written in one place each, and a scan every 5 seconds turns new ones into deliveries with
+  deterministic ids, unique per endpoint. No code path can forget to emit, a crash between a write and an emit cannot lose an event,
+  and any number of API processes can scan. Cost: up to ~5 seconds of latency (a minute on Inngest).
+- **A scan cursor per endpoint, not a fixed window** (Phase 17, second pass): each scan reads from `scannedAt` minus 10 minutes (rows
+  whose transaction committed after their timestamp), never more than 7 days back, and moves the cursor only after a scan that was not
+  cut off by its 500-row page. An API that was down catches up; the NOT EXISTS check keeps the overlap from sending anything twice.
+- **Webhook delivery: a 5-second timer in each API process without Inngest, Inngest's `webhook-sweep` schedule (every minute) with it.**
+  Deliveries are rows claimed with `SKIP LOCKED` either way, so the schedule only replaces the timer (as for workflows): serverless
+  deployments get delivery without a long-lived process, and the database is queried once a minute instead of every 5 seconds.
+- **Standard Webhooks signing** (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<HMAC-SHA256>`): a published scheme that
+  receivers' libraries already verify (Svix's included), with replay protection from the timestamp. The signing secret is sealed under
+  `AI_CREDENTIALS_KEY` (it must be read to sign), shown once, and the endpoint must be public https (checked on save and on every send).
+- **Retries: 8 attempts over about 3 days** (1 min, 5 min, 30 min, 2 h, 5 h, 10 h, 24 h), any non-2xx or no answer in 10 s; redirects
+  are not followed. `webhook-id` stays the same on every attempt and on redelivery, so receivers deduplicate on it.
+- **Idempotency-Key on the two public writes** (send a message, start a run): the first answer is stored and replayed for 24 hours per
+  workspace; a failed request stores nothing, so it can be retried. The SDK adds a key itself when it retries a write.
+- **Two message routes: whole and streamed.** `/messages` answers with the whole reply (and takes an Idempotency-Key); `/messages/stream`
+  sends server-sent events through the same turn, refusing everything it can before the stream opens. Streams are not retried by the SDK:
+  a turn that started may have used tools.
+- **API writes go through the dashboard routes' own functions** (`employeeRoutes` and `knowledgeRoutes` return `create`, `saveVersion`,
+  `publish`, `uploadDocument`; `resolveConversation` in inbox.ts), acting as `api:<key id>`, so plan limits, versioning, rollout checks,
+  release logs and storage behave the same. The public employee shape is smaller than the internal config (name, role, description,
+  personality, instructions, goals, language, timeZone); everything else starts from the dashboard's defaults and is kept on new versions.
+- **Per-key rate limits count in each API process** (a fixed one-minute window), like Test Connection's limit: no new infrastructure,
+  exact on one process, up to N times the limit on N processes. IP allowlists check `req.ip`, so deployments behind a proxy set
+  `TRUST_PROXY`.
+- **Webhook secret rotation signs with both secrets during a grace period** (Standard Webhooks allows several space-separated
+  signatures), so receivers switch without losing a request; the SDKs accept any matching signature.
+- **The SDK's types are generated, not imported**: `packages/sdk/generate.ts` turns the contract's zod schemas into plain TypeScript
+  (`src/types.ts`, checked in, a test fails when stale), so the published package has no dependency on the monorepo or zod. Built with
+  `tsc` (`rewriteRelativeImportExtensions`), no bundler. Python uses the standard library only; both SDKs mirror one route table.
+- **Publishing the SDKs is the owner's step**: the package names must be in npm and PyPI accounts the owner controls, so `private: true`
+  stays until a name is chosen.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.
@@ -452,6 +498,12 @@ problem re-discovered.
   `entities.ts` start at U+0904. Python edit scripts must use raw strings for regexes: `"\b"` became a backspace once (Phase 15).
 - **A Fastify `httpError` drops custom fields**; the error handler now passes `issues` through on 400s so catalog field checks map
   to form fields like Zod's do.
+
+- **A running `pnpm dev` raced the webhook tests** (Phase 17): its 5-second timer claimed the test organizations' deliveries in the shared
+  database and sent them to the test's unreachable address. The server's timer now skips organizations whose id starts with
+  `org_test_` (testing.ts `newOrg`; Clerk ids never have a second underscore); tests deliver their own with `tick(organizationId)`.
+- **Prisma's `$queryRaw` tag reads cooked template strings**: `\_` in a LIKE pattern became a bare `_` wildcard. Use
+  `starts_with()` for prefixes.
 
 ## Checking the signed-in UI without a login
 

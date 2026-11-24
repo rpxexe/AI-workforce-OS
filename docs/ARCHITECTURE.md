@@ -19,6 +19,9 @@ packages/providers     Phase 14: the provider registry (build + test per catalog
                        email senders (SendGrid, SES, SMTP), object storage (S3, R2, GCS, S3-compatible, Azure Blob), AWS SigV4.
 packages/workflows     Workflow engine: claims due runs, runs nodes, waits, retries (`createWorkflowEngine`).
 packages/channels      Messaging channels: the common message model, `WhatsAppProvider` (Meta, Twilio, Telnyx), `EmailProvider` (Resend; test mode without it), `splitText`.
+packages/sdk          Phase 17: the TypeScript SDK for the public API (`createClient`, `paginate`, `streamMessage`, `verifyWebhook`); fetch and Web
+                      Crypto only; `generate.ts` writes `src/types.ts` from the contract; `pnpm build` -> `dist/` for npm.
+packages/sdk-python   Phase 17: the Python SDK (`workforce_sdk`: `Client`, `paginate`, `stream_message`, `verify_webhook`), standard library only.
 workers/evaluation-worker  The evaluation worker: graders, `runEvaluation`, the sweep, regression replays, improvement analysis and `compareKpi` (run as API jobs).
 workers/*         agent-worker, call-worker: empty stubs.
 ```
@@ -143,6 +146,15 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
   `cancelAtPeriodEnd`), `UsageEvent` (the ledger: `id` = `<sourceType>:<sourceId>`, `kind` (`USAGE_KINDS`), `quantity`, `costUsd`,
   `amountUsd`, `detail`, `occurredAt`; never updated), `UsageCharge` (the usage billed for one period, unique per organization and
   period start, with the Stripe invoice item), `BillingInvoice` (Stripe invoices mirrored by id).
+
+- Phase 17: `ApiKey` (one workspace, `scopes` (`API_SCOPES`), `prefix` (public, unique) + `hash` (SHA-256 of the whole key; the secret
+  is never stored), `lastUsedAt/Ip` (written at most once a minute), `expiresAt` (a rotation's grace period), `revokedAt/By`,
+  `replacedById`, `rateLimitPerMinute`, `allowedIps` (addresses or CIDR ranges)), `WebhookEndpoint` (workspace, https `url`, `events`
+  (`WEBHOOK_EVENTS`), `enabled`, `encryptedSecret` sealed like provider credentials, `previousEncryptedSecret` + `previousSecretExpiresAt`
+  (a rotation's grace period), `scannedAt` (the scan cursor)), `DeveloperAuditLog` (who created, changed, rotated, revoked, tested,
+  redelivered what; no secrets), `WebhookDelivery` (one event for one endpoint: `eventId` unique per endpoint, `payload` as signed, `status`
+  pending/succeeded/failed, `attempts`, `nextAttemptAt`, `lockedUntil`, `log` of every attempt), `ApiIdempotency` (the first answer to
+  a request with an `Idempotency-Key`, per workspace, 24 hours).
 
 Deleting an organization cascades to everything under it. Clerk owns users, members and roles;
 we store only Clerk user ids (`createdBy`).
@@ -294,6 +306,22 @@ POST  /voice/:provider/c/:connection/inbound|status|transfer   as the platform's
 GET   /voice/:provider/c/:connection/stream     the media stream of a call on that connection
 GET|POST /channels/whatsapp/:provider/c/:connection/webhook   as the platform's, for an organization's WhatsApp connection
 POST  /channels/email/resend/c/:connection/webhook             received mail through an organization's Resend connection
+GET   /developer/api-keys                       member; ApiKeyInfo[] (never the secret)
+POST  /developer/api-keys                       admin; { name, workspaceId, scopes, expiresInDays?, rateLimitPerMinute?, allowedIps? }; 201 CreatedApiKey: the only response with the secret
+PATCH /developer/api-keys/:id                   admin; { name?, rateLimitPerMinute?, allowedIps? }; 409 when revoked
+POST  /developer/api-keys/:id/rotate            admin; { expireOldInHours: 0..168 }; a new key, the old one expires then (0: revoked); 409 unless active
+DELETE /developer/api-keys/:id                  admin; revokes (kept for the record); idempotent
+GET   /developer/webhooks                       member; endpoints with pending/failed counts (7 days)
+POST  /developer/webhooks                       admin; { url (public https), description, workspaceId, events }; 201 with the signing secret once; 503 without AI_CREDENTIALS_KEY
+PATCH /developer/webhooks/:id                   admin; { url?, description?, events?, enabled? }
+POST  /developer/webhooks/:id/rotate-secret     admin; { keepOldForHours: 0..168 }; the new secret once; both sign during the grace period
+POST  /developer/webhooks/:id/test              admin; sends webhook.test now (any subscription, even turned off); the delivery with its attempt
+DELETE /developer/webhooks/:id                  admin; deliveries go with it; 204
+GET   /developer/webhooks/:id/deliveries        member; { data, nextCursor }, newest first, with payload and attempts; ?status= ?event= ?limit= ?cursor=
+POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fresh attempts (same event id); 409 if pending
+GET   /developer/audit                          admin; newest 100 developer audit entries
+GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
+*     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
 GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile; ?q= searches name/email/phone/company/externalId
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
@@ -748,6 +776,58 @@ Stripe (billing/stripe.ts, the only Stripe code): Checkout (subscription, client
   regression replays left out; latency percentiles and the daily series in SQL.
 - Dashboard: `/billing` (tabs Plan, Usage, Invoices, Limits) and `/reports` (date range, workspace filter), in the sidebar.
 
+## Public API, API keys and webhooks (Phase 17)
+
+```
+contract   packages/shared/src/public-api.ts: zod schemas of every public object and request, PUBLIC_ROUTES (method, path, scope,
+           schemas, status, idempotent), WEBHOOK_EVENT_DATA, openApiDocument() -> GET /v1/openapi.json. Written by hand, never
+           derived from internal types: changing it is a breaking change for customers (add fields, never rename within /v1).
+request    /v1 plugin (apps/api/src/public/routes.ts): verifyKey (prefix -> row, SHA-256 compare, revoked/expired, IP allowlist
+           against req.ip (TRUST_PROXY behind a proxy), per-key requests per minute (in process; 429 + Retry-After), last use)
+           -> scope -> params/query/body parsed -> handler (organization and workspace from the key; writes act as `api:<key id>`
+           through the same functions the dashboard routes use) -> response parsed with its schema (unknown fields dropped) -> sent;
+           `stream` routes send each event as SSE, parsed the same way. Idempotency-Key on the writes marked idempotent: first answer
+           stored and replayed (Idempotent-Replayed: true); a failed request leaves nothing. Errors { error: { type, message, issues? } },
+           request-id and x-ratelimit-limit/remaining/reset headers on every answer.
+mapping    apps/api/src/public/serialize.ts: the only code that knows rows and the contract (enums lower-case, ISO dates,
+           roles customer/employee/agent, startedBy api/webhook/dashboard).
+webhooks   apps/api/src/public/webhooks.ts: every 5 s in each API process without Inngest; with Inngest the `webhook-sweep` schedule
+           every minute (up to 20 rounds of 25 deliveries); never in test apps, and the server never touches `org_test_` organizations:
+           scan: one SQL from each endpoint's cursor (`scannedAt` - 10 min, at most 7 days back, never before the endpoint existed) over
+                 Conversation (started, resolved), ConversationMessage (received = USER, sent = ASSISTANT/AGENT), WorkflowExecution
+                 (started, finished COMPLETED/FAILED), Handoff, Call (ended), EmployeeRelease (employee.published), CustomerMemory and
+                 CustomerProfile (customer.updated, one per customer per scan), in workspaces with an enabled endpoint subscribed,
+                 without a delivery yet -> objects mapped with serialize.ts -> WebhookDelivery per endpoint (createMany skipDuplicates
+                 on endpoint + event id); the cursors move when a scan found fewer than 500 (else the next scan continues)
+           deliver: claim due rows (lockedUntil, SKIP LOCKED) -> POST via safeFetch, 10 s, headers webhook-id (= event id),
+                 webhook-timestamp, webhook-signature (v1, HMAC-SHA256 of id.timestamp.body with the whsec_ secret; during a secret
+                 rotation two space-separated signatures, new and old) -> 2xx succeeded;
+                 else retry after 1 min, 5 min, 30 min, 2 h, 5 h, 10 h, 24 h, then failed; every attempt logged on the row
+```
+
+- Routes: `GET|POST /v1/employees`, `GET /v1/employees/{id}`, `POST /v1/employees/{id}/versions` (fields given replace the latest
+  version's; instructions = systemInstructions, timeZone = workingHours.timezone), `POST /v1/employees/{id}/publish` (default latest),
+  `POST /v1/employees/{id}/messages` (the published version answers on the `api` channel, whole reply, `held` while people have it, 402 at
+  a plan limit), `POST /v1/employees/{id}/messages/stream` (SSE: text, done, error), `GET /v1/conversations[/{id}]`,
+  `POST /v1/conversations/{id}/resolve`, `GET /v1/customers[/{id}]`, `PUT|DELETE /v1/customers/{id}/memories/{key}` (extraction's
+  validation, profile follows identity keys, audited), `GET|POST /v1/knowledge/sources`, `GET /v1/knowledge/sources/{id}`,
+  `POST /v1/knowledge/sources/{id}/documents` (base64, 10 MB; the dashboard's upload path), `POST /v1/knowledge/search`,
+  `GET /v1/workflows[/{id}]`, `POST /v1/workflows/{id}/executions` (202), `GET /v1/executions[/{id}]`, `GET /v1/tools`,
+  `GET /v1/tools/executions`, `GET /v1/analytics?from&to`. Lists: `limit` (1-100) and
+  `cursor` -> `{ data, nextCursor }`, newest first by creation.
+- Conversations started through the API have channel `api`: in the inbox like any other; agents' replies are not sent anywhere (the
+  integration reads them, or gets `message.sent`). API customers are keyed with `normalizeCustomerId`, so they are the same customers
+  as on calls, WhatsApp and web chat.
+- SDK (`packages/sdk`): `createClient({ apiKey, baseUrl, fetch, maxRetries })` with one method per operation, typed by `src/types.ts`
+  (generated from the contract by `generate.ts`; a test fails when it is stale), no imports outside the package; retries reads and
+  writes with an Idempotency-Key (it adds one) on network errors, 429 (Retry-After) and 5xx; `paginate`; `streamMessage` (SSE);
+  `WorkforceError`; `verifyWebhook(body, headers, secret)` (Web Crypto, 5-minute tolerance, several signatures allowed). `pnpm build`
+  compiles `dist/` (`tsconfig.build.json`); `publishConfig` points the published package at it. Python (`packages/sdk-python`): the
+  same operations with Python names, urllib only, `verify_webhook`.
+- Dashboard: Settings > API Keys and Settings > Webhooks (`components/developer/developer-api.tsx`): create (permissions, rate limit,
+  addresses, expiry), edit, rotate with a grace period, revoke, the developer activity log (admins); endpoints with events, on/off,
+  send test, rotate secret, deliveries (filter by event, load more) with payload and attempts, send again. Secrets are shown once.
+
 ## Conversation intelligence (Phase 15)
 
 ```
@@ -853,6 +933,7 @@ evaluation/requested         { evaluationId }               runEvaluation (claim
 evaluation/dataset.run       { runId }                      runCase per case (skips graded cases), then finishRun
 evaluation-sweep             cron, every 5 minutes          queueDueEvaluations -> evaluation/requested for each
 usage-meter                  cron, every 5 minutes          meter every organization, 3 days back (Phase 16; in process: after the evaluation sweep)
+webhook-sweep                cron, every minute (Inngest only) new webhook events and due deliveries (Phase 17; without Inngest: a 5 s timer)
 improvement/analyze          { organizationId, workspaceId } analyzeWorkspace: patterns -> suggestions (never a version)
 improvement-analysis         cron, daily 06:00              workspacesWithFailures -> improvement/analyze for each (Inngest only)
 ```

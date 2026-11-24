@@ -1,0 +1,25 @@
+{
+  "name": "@workforce/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the AI Workforce public API: typed client, paging, retries, streaming replies and webhook verification.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "exports": "./src/index.ts",
+  "files": ["dist", "README.md"],
+  "publishConfig": {
+    "access": "public",
+    "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+    "types": "./dist/index.d.ts"
+  },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "generate": "node generate.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "node generate.ts && tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@workforce/shared": "workspace:*",
+    "zod": "^4.6.7"
+  }
+}

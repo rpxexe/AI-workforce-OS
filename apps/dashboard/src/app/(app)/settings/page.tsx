@@ -23,16 +23,18 @@ import {
   LayoutList,
   Settings2,
   ShieldCheck,
+  Webhook,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, Suspense, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { ApiKeys, Webhooks } from "@/components/developer/developer-api";
 import { formatDate } from "@/components/employees/meta";
 import { AuditLog, ProviderMetrics } from "@/components/providers/provider-activity";
 import { ProviderList, platformNames } from "@/components/providers/provider-list";
-import { ComingSoon, EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -169,6 +171,7 @@ const SECTIONS = [
   { id: "storage", label: "Storage", icon: HardDrive },
   { id: "tools", label: "Employee tools", icon: Wrench },
   { id: "api-keys", label: "API Keys", icon: KeyRound },
+  { id: "webhooks", label: "Webhooks", icon: Webhook },
   { id: "audit", label: "Credentials & audit", icon: ShieldCheck },
   { id: "developer", label: "Developer", icon: Code },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon }[];
@@ -436,11 +439,17 @@ function SectionBody({ section, providers, accountTab }: { section: SectionId; p
       );
     case "api-keys":
       return (
-        <ComingSoon
-          icon={KeyRound}
-          title="API Keys"
-          description="The platform has no API keys for its own API yet; everyone signs in through Clerk. Keys for outside providers live in the provider sections."
-        />
+        <>
+          <SectionHeading title="API Keys" description="Keys for the platform's own API (/v1). Keys for outside providers live in the provider sections." />
+          <ApiKeys isAdmin={isAdmin} />
+        </>
+      );
+    case "webhooks":
+      return (
+        <>
+          <SectionHeading title="Webhooks" description="Signed requests to your servers when conversations, workflows and calls change." />
+          <Webhooks isAdmin={isAdmin} />
+        </>
       );
     case "audit":
       return (
@@ -463,7 +472,7 @@ function SectionBody({ section, providers, accountTab }: { section: SectionId; p
 const GROUPS: { label: string; ids: SectionId[] }[] = [
   { label: "Account", ids: ["general"] },
   { label: "Providers", ids: ["overview", "ai-providers", "voice", "messaging", "email", "storage"] },
-  { label: "Platform", ids: ["tools", "api-keys", "audit", "developer"] },
+  { label: "Platform", ids: ["tools", "api-keys", "webhooks", "audit", "developer"] },
 ];
 
 // The menu's collapsed state, remembered per browser. Storage can be unavailable (private windows): then it just resets.

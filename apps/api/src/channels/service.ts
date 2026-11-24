@@ -358,7 +358,8 @@ export function channelService(deps: {
      * chat read it from the conversation, so there is nothing to send. Returns the error if sending failed.
      */
     async deliverAgentMessage(conversation: { id: string; employeeId: string; channel: string; title: string; customerId: string; to: string; fromName: string }, text: string) {
-      if (conversation.channel === "test") return null;
+      // Test chat and the public API read it from the conversation (the API also through the message.sent webhook).
+      if (conversation.channel === "test" || conversation.channel === "api") return null;
       const channel = await prisma.employeeChannel.findUnique({ where: { employeeId_kind: { employeeId: conversation.employeeId, kind: conversation.channel } } });
       if (!channel) return `The employee no longer has a ${conversation.channel} channel`;
       const context = { customerId: conversation.customerId, conversationId: conversation.id, startedAt: Date.now() };

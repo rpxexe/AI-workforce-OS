@@ -38,7 +38,9 @@ const workspaceParams = z.object({ workspaceId: z.string().min(1) });
 const conversationParams = workspaceParams.extend({ conversationId: z.string().min(1) });
 
 /** Channels an agent's message can reach the customer on. Calls are not transferred; workflow conversations have no customer line. */
-const REPLY_CHANNELS = ["test", "web_chat", "whatsapp", "email"];
+const REPLY_CHANNELS = ["test", "api", "web_chat", "whatsapp", "email"];
+/** Channels whose callers read agents' messages from the conversation (test chat, the public API), so nothing is sent. */
+const READ_BACK_CHANNELS = ["test", "api"];
 const WITH_PEOPLE: ConversationStatus[] = ["WAITING_FOR_HUMAN", "HUMAN_ACTIVE"];
 /** Regression replays are not customer conversations: no inbox, no analytics. */
 const REAL = { channel: { not: EVALUATION_CHANNEL } } satisfies Prisma.ConversationWhereInput;
@@ -113,6 +115,19 @@ export function stats(values: number[]): DurationStats {
 
 const between = (from: Date, to: Date | null) => (to ? to.getTime() - from.getTime() : null);
 
+/** Resolves a conversation from any open state and ends its open handoff; false when it was already resolved. */
+export async function resolveConversation(where: { id: string; organizationId: string; workspaceId: string }, now = new Date()) {
+  return prisma.$transaction(async (tx) => {
+    const { count } = await tx.conversation.updateMany({
+      where: { ...where, status: { in: ["AI_ACTIVE", "REOPENED", ...WITH_PEOPLE] } },
+      data: { status: "RESOLVED", resolvedAt: now },
+    });
+    if (count === 0) return false;
+    await tx.handoff.updateMany({ where: { conversationId: where.id, endedAt: null }, data: { endedAt: now, outcome: "resolved" } });
+    return true;
+  });
+}
+
 export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai: Ai, channels: ChannelService) {
   const { member, inWorkspace } = guards(authenticate);
   const conversationPath = "/workspaces/:workspaceId/conversations/:conversationId";
@@ -144,7 +159,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
       handoffs: c.handoffs.map(toHandoff),
       suggestions: c.suggestions.map(toSuggestion),
       transfers: (await transfers).map(toTransferRecord),
-      canReply: REPLY_CHANNELS.includes(c.channel) && (c.channel === "test" || c.customer !== null),
+      canReply: REPLY_CHANNELS.includes(c.channel) && (READ_BACK_CHANNELS.includes(c.channel) || c.customer !== null),
       insight: analyzeConversation({ messages, status: c.status, handoffs: c.handoffs, ...operating(c) }),
     };
   };
@@ -232,22 +247,17 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
         });
         break;
       }
-      case "return_to_ai":
-      case "resolve": {
-        const from: ConversationStatus[] = body.action === "resolve" ? ["AI_ACTIVE", "REOPENED", ...WITH_PEOPLE] : WITH_PEOPLE;
+      case "resolve":
+        if (!(await resolveConversation(where, now))) throw conflict();
+        break;
+      case "return_to_ai": {
         await prisma.$transaction(async (tx) => {
           const { count } = await tx.conversation.updateMany({
-            where: { ...where, status: { in: from } },
-            data:
-              body.action === "resolve"
-                ? { status: "RESOLVED", resolvedAt: now }
-                : { status: "AI_ACTIVE", assignedTo: null, failedTurns: 0 },
+            where: { ...where, status: { in: WITH_PEOPLE } },
+            data: { status: "AI_ACTIVE", assignedTo: null, failedTurns: 0 },
           });
           if (count === 0) throw conflict();
-          await tx.handoff.updateMany({
-            where: { conversationId: conversation.id, endedAt: null },
-            data: { endedAt: now, outcome: body.action === "resolve" ? "resolved" : "returned_to_ai" },
-          });
+          await tx.handoff.updateMany({ where: { conversationId: conversation.id, endedAt: null }, data: { endedAt: now, outcome: "returned_to_ai" } });
         });
         break;
       }
@@ -267,7 +277,7 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
     if (!REPLY_CHANNELS.includes(conversation.channel))
       throw httpError(409, conversation.channel === "voice" ? "Phone calls cannot be continued by text. Call the customer back." : "This conversation has no customer to write to.");
     const customer = conversation.customer?.customer;
-    if (!customer && conversation.channel !== "test") throw httpError(409, "This conversation has no customer to write to.");
+    if (!customer && !READ_BACK_CHANNELS.includes(conversation.channel)) throw httpError(409, "This conversation has no customer to write to.");
     const where = { id: conversation.id, ...within(scope) };
     if (!WITH_PEOPLE.includes(conversation.status))
       await startHandoff(where, { trigger: "agent", reason: "An agent wrote to the customer" }, { assignedTo: scope.userId, accept: true });

@@ -22,6 +22,7 @@ export function ConversationStatusBadge({ status }: { status: ConversationStatus
 
 export const CHANNEL_LABELS: Record<string, string> = {
   test: "Test chat",
+  api: "API",
   web_chat: "Web chat",
   whatsapp: "WhatsApp",
   email: "Email",

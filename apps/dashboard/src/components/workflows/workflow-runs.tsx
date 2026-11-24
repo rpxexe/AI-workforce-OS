@@ -204,7 +204,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
                       <button type="button" className="text-left hover:underline" onClick={() => setSelected(run.id)}>
                         {formatTime(run.createdAt)}
                       </button>
-                      <span className="block text-xs text-muted-foreground">{run.startedBy === "webhook" ? "Webhook" : "Manual"}</span>
+                      <span className="block text-xs text-muted-foreground">{run.startedBy === "webhook" ? "Webhook" : run.startedBy.startsWith("api:") ? "API" : "Manual"}</span>
                     </TableCell>
                     <TableCell>
                       <RunStatusBadge status={run.status} />

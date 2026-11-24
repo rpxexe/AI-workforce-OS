@@ -133,11 +133,8 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
     return loadDetail(scope, id);
   });
 
-  // Saving never changes an existing version: it appends one. Production keeps serving the
-  // published version until someone publishes the new one.
-  app.put(`${base}/:id`, async (req) => {
-    const { scope, id } = await scoped(req, admin);
-    const config = employeeConfigSchema.parse(req.body);
+  /** Appends a version; nothing goes live until it is published. */
+  const saveVersion = async (scope: Scope, id: string, config: EmployeeConfig) => {
     const latest = await latestVersion(scope, id);
     try {
       await prisma.aiEmployee.update({
@@ -153,20 +150,31 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
         throw httpError(409, "Someone else saved this employee at the same time. Reload and try again.");
       throw err;
     }
-    return loadDetail(scope, id);
-  });
+  };
 
-  app.post(`${base}/:id/publish`, async (req) => {
-    const { scope, id } = await scoped(req, admin);
-    const { version } = publishSchema.parse(req.body);
+  /** Moves the live pointer to a version (and logs the release); 409 during a rollout or for an unapproved suggestion's version. */
+  const publish = async (scope: Scope, id: string, version: number) => {
     const target = await prisma.aiEmployeeVersion.findFirst({
       where: { number: version, employee: { id, ...within(scope) } },
       select: { id: true, number: true, employee: { select: { id: true, status: true, publishedVersion: { select: { id: true, number: true } } } } },
     });
     if (!target) throw httpError(404, "Version not found");
-    if (target.employee.publishedVersion?.id === target.id) return loadDetail(scope, id);
+    if (target.employee.publishedVersion?.id === target.id) return;
     await assertPublishable(id, target.id);
     await prisma.$transaction((tx) => release(tx, { scope, employee: target.employee, version: target, action: "publish", by: scope.userId }));
+  };
+
+  // Saving never changes an existing version: it appends one. Production keeps serving the
+  // published version until someone publishes the new one.
+  app.put(`${base}/:id`, async (req) => {
+    const { scope, id } = await scoped(req, admin);
+    await saveVersion(scope, id, employeeConfigSchema.parse(req.body));
+    return loadDetail(scope, id);
+  });
+
+  app.post(`${base}/:id/publish`, async (req) => {
+    const { scope, id } = await scoped(req, admin);
+    await publish(scope, id, publishSchema.parse(req.body).version);
     return loadDetail(scope, id);
   });
 
@@ -194,4 +202,7 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
     const copy = await create(scope, { ...config, name: `${config.name.slice(0, 73)} (copy)` });
     return reply.code(201).send(copy);
   });
+
+  return { create, saveVersion, publish, latestVersion };
 }
+export type EmployeeActions = ReturnType<typeof employeeRoutes>;
