@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@clerk/nextjs";
-import { EVAL_DIMENSION_LABELS, KPI_LABELS, type EmployeeDetail, type ImprovementDetail, type SuggestionStage } from "@workforce/shared";
+import { defaultEmployeeConfig, EVAL_DIMENSION_LABELS, KPI_LABELS, type EmployeeDetail, type ImprovementDetail, type SuggestionStage } from "@workforce/shared";
 import { ArrowLeft, Check, CircleCheck, CircleDot, FlaskConical, X } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -12,10 +12,12 @@ import { StageBadge } from "@/components/improvements/meta";
 import { RolloutPanel, StartRollout } from "@/components/improvements/rollout";
 import { timeAgo } from "@/components/inbox/meta";
 import { formatScore, ResultBadge } from "@/components/quality/meta";
-import { ErrorState, LoadingState } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { ErrorState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,6 +26,78 @@ import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 const POLL_MS = 3000;
 const ORDER: SuggestionStage[] = ["proposed", "testing", "tested", "approved", "rolling_out", "released"];
+
+const SAMPLE_DATE = "2026-01-01T00:00:00.000Z";
+const SAMPLE_BASE = {
+  ...defaultEmployeeConfig(),
+  name: "Priya Support",
+  role: "Customer support agent",
+  systemInstructions: "Answer questions about orders, refunds and delivery.\nUse the knowledge base for policies.\nHand the customer to a person when asked.",
+};
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: ImprovementDetail = {
+  id: "sample-improvement",
+  employee: { id: "sample-employee", name: "Priya Support" },
+  baseVersion: 3,
+  proposedVersion: 4,
+  dimension: "grounding",
+  title: "Quote the refund window from the policy, not from memory",
+  kpi: "pass_rate",
+  stage: "tested",
+  approval: "pending",
+  failures: 6,
+  createdAt: SAMPLE_DATE,
+  evaluatorId: "sample-evaluator",
+  evaluatorName: "Answer is grounded in knowledge",
+  reason: "Six conversations in the last 14 days quoted a refund window that is not in the refund policy.",
+  evidence: {
+    failures: 6,
+    results: 48,
+    days: 14,
+    examples: Array.from({ length: 3 }, (_, i) => ({
+      evaluationId: `sample-evaluation-${i}`,
+      conversationId: `sample-conversation-${i}`,
+      conversationTitle: "Customer asked about a delayed refund",
+      score: 40,
+      reason: "The reply promised a refund within 3 days; the policy says 7 working days.",
+      findings: [{ message: "States a refund window not found in the knowledge base.", quote: "You will get your money back within 3 days." }],
+    })),
+  },
+  change: { summary: "Tell the employee to look up the refund window before quoting it.", fields: {} },
+  base: SAMPLE_BASE,
+  proposed: { ...SAMPLE_BASE, systemInstructions: `${SAMPLE_BASE.systemInstructions}\nAlways look up the refund window in the refund policy before quoting it.` },
+  tests: {
+    datasetId: "sample-dataset",
+    baseline: null,
+    candidate: null,
+    cases: ["Delayed refund", "Refund for a damaged item", "Refund after 30 days", "Partial refund request"].map((name, i) => ({
+      caseId: `sample-case-${i}`,
+      name,
+      baseline: false,
+      candidate: true,
+      change: "fixed",
+    })),
+    fixes: 4,
+    regressions: 0,
+    complete: true,
+  },
+  decidedBy: null,
+  decidedAt: null,
+  decisionNote: "",
+  rollout: null,
+  createdBy: "system",
+};
+
+// Stands in for the real employee so Skullet can draw a skeleton of the rollout form; never shown as data.
+const SAMPLE_EMPLOYEE: EmployeeDetail = {
+  id: "sample-employee",
+  status: "ACTIVE",
+  publishedVersion: 3,
+  createdAt: SAMPLE_DATE,
+  updatedAt: SAMPLE_DATE,
+  versions: [],
+};
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   return (
@@ -54,16 +128,20 @@ function Pipeline({ s }: { s: ImprovementDetail }) {
         const current = !done && (i === 0 || steps[i - 1]?.[2]) && s.approval !== "rejected" && at >= 0;
         const Icon = done ? CircleCheck : current ? CircleDot : FlaskConical;
         return (
-          <li key={label} className="flex items-start gap-2 rounded-lg border p-3" aria-current={current ? "step" : undefined}>
-            <Icon className={done ? "mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" : "mt-0.5 size-4 shrink-0 text-muted-foreground"} aria-hidden />
-            <span className="flex flex-col">
-              <span className="text-sm font-medium">{label}</span>
-              <span className="text-xs text-muted-foreground">
-                {done ? "Done · " : current ? "Next · " : ""}
-                {state}
-              </span>
-            </span>
-          </li>
+          <Item key={label} variant="outline" asChild className="flex-nowrap items-start gap-2 p-3" aria-current={current ? "step" : undefined}>
+            <li>
+              <ItemMedia>
+                <Icon className={done ? "size-4 shrink-0 text-success" : "size-4 shrink-0 text-muted-foreground"} aria-hidden />
+              </ItemMedia>
+              <ItemContent className="gap-0">
+                <ItemTitle>{label}</ItemTitle>
+                <ItemDescription className="text-xs">
+                  {done ? "Done · " : current ? "Next · " : ""}
+                  {state}
+                </ItemDescription>
+              </ItemContent>
+            </li>
+          </Item>
         );
       })}
     </ol>
@@ -73,15 +151,9 @@ function Pipeline({ s }: { s: ImprovementDetail }) {
 export default withWorkspace(function ImprovementPage({ workspace }) {
   const { id } = useParams<{ id: string }>();
   const isAdmin = useIsAdmin();
-  const { userId } = useAuth();
-  const api = useApi();
   const path = `/workspaces/${workspace.id}/improvements/${id}`;
   const { data, error, reload, setData } = useApiQuery<ImprovementDetail>(path);
   const employee = useApiQuery<EmployeeDetail>(data ? `/workspaces/${workspace.id}/employees/${data.employee.id}` : null);
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string>();
-  const [confirm, setConfirm] = useState<Confirmation | null>(null);
 
   const testing = data?.stage === "testing";
   useEffect(() => {
@@ -91,18 +163,57 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
   }, [testing, reload]);
 
   if (error && !data) return <ErrorState message={error.message} onRetry={reload} />;
-  if (!data) return <LoadingState rows={6} />;
-  const s = data;
+  return (
+    <Skullet data={data} sample={SAMPLE} id="improvement-detail" label="Loading improvement">
+      {(data) => (
+        <ImprovementView
+          s={data}
+          workspaceId={workspace.id}
+          path={path}
+          isAdmin={isAdmin}
+          reload={reload}
+          setData={setData}
+          employee={employee.data}
+          reloadEmployee={employee.reload}
+        />
+      )}
+    </Skullet>
+  );
+});
+
+function ImprovementView({
+  s,
+  workspaceId,
+  path,
+  isAdmin,
+  reload,
+  setData,
+  employee,
+  reloadEmployee,
+}: {
+  s: ImprovementDetail;
+  workspaceId: string;
+  path: string;
+  isAdmin: boolean;
+  reload: () => void;
+  setData: (data: ImprovementDetail) => void;
+  employee: EmployeeDetail | undefined;
+  reloadEmployee: () => void;
+}) {
+  const { userId } = useAuth();
+  const api = useApi();
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<Confirmation | null>(null);
 
   const run = async (action: () => Promise<ImprovementDetail | void>) => {
-    setActionError(undefined);
     setBusy(true);
     try {
       const updated = await action();
       if (updated) setData(updated);
       else reload();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(false);
     }
@@ -112,7 +223,10 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
       title: s.proposedVersion === null ? "Create the version and test it?" : "Run the regression tests again?",
       description: `${s.proposedVersion === null ? "A new version of the employee is saved with this change. It is not published. " : ""}The employee's regression suite (the conversations behind this suggestion and a few recent passing ones are added to it) is replayed on v${s.baseVersion} and on the new version, without tools, and graded. This calls the model for every message and every LLM grader.`,
       confirmLabel: s.proposedVersion === null ? "Create and test" : "Run tests",
-      onConfirm: () => run(() => api<ImprovementDetail>(`${path}/test`, { method: "POST" })),
+      onConfirm: () => run(() => api<ImprovementDetail>(`${path}/test`, {
+            method: "POST",
+            toast: { loading: "Starting regression tests…", success: "Regression tests started" },
+          })),
     });
   const decide = (decision: "approve" | "reject") =>
     setConfirm({
@@ -122,10 +236,13 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
           ? `${s.tests && s.tests.regressions > 0 ? `${s.tests.regressions} test case${s.tests.regressions === 1 ? "" : "s"} that passed before now fail${s.tests.regressions === 1 ? "s" : ""}. ` : ""}Approving allows the version to be rolled out or published. It does not change anything customers get by itself.`
           : "The suggestion is closed. Its version, if created, stays saved and unpublished.",
       confirmLabel: decision === "approve" ? "Approve" : "Reject",
-      onConfirm: () => run(() => api<ImprovementDetail>(`${path}/decision`, { method: "POST", body: { decision, note } })),
+      onConfirm: () => run(() => api<ImprovementDetail>(`${path}/decision`, {
+            method: "POST",
+            body: { decision, note },
+            toast: decision === "approve" ? `v${s.proposedVersion} approved` : "Suggestion rejected",
+          })),
     });
 
-  const live = employee.data?.publishedVersion ?? null;
   const by = (who: string | null) => (who === "system" ? "the analysis" : who === userId ? "you" : "a teammate");
 
   return (
@@ -148,35 +265,36 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
         </p>
       </div>
       <Pipeline s={s} />
-      {actionError && <ErrorState message={actionError} />}
 
       <Section title="Why" description={s.reason}>
         <ul className="flex flex-col gap-3">
           {s.evidence.examples.map((x) => (
-            <li key={x.evaluationId} className="flex flex-col gap-1.5 rounded-lg border p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <Link href={`/conversations/${x.conversationId}`} className="text-sm font-medium underline-offset-2 hover:underline">
-                  {x.conversationTitle}
-                </Link>
-                <span className="text-sm tabular-nums text-muted-foreground">
-                  <Link href={`/quality/evaluators/${s.evaluatorId}`} className="underline-offset-2 hover:underline">
-                    {s.evaluatorName}
-                  </Link>{" "}
-                  · score {formatScore(x.score)}
-                </span>
-              </div>
-              <p className="text-sm text-muted-foreground">{x.reason}</p>
-              {x.findings.length > 0 && (
-                <ul className="flex flex-col gap-1.5 text-sm">
-                  {x.findings.map((f, i) => (
-                    <li key={i} className="rounded-md bg-muted/60 px-2.5 py-1.5">
-                      {f.message}
-                      {f.quote && <q className="mt-0.5 block text-xs text-muted-foreground italic">{f.quote}</q>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
+            <Item key={x.evaluationId} variant="outline" asChild className="flex-col items-stretch gap-1.5 p-3">
+              <li>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Link href={`/conversations/${x.conversationId}`} className="text-sm font-medium underline-offset-2 hover:underline">
+                    {x.conversationTitle}
+                  </Link>
+                  <span className="text-sm tabular-nums text-muted-foreground">
+                    <Link href={`/quality/evaluators/${s.evaluatorId}`} className="underline-offset-2 hover:underline">
+                      {s.evaluatorName}
+                    </Link>{" "}
+                    · score {formatScore(x.score)}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground">{x.reason}</p>
+                {x.findings.length > 0 && (
+                  <ul className="flex flex-col gap-1.5 text-sm">
+                    {x.findings.map((f, i) => (
+                      <li key={i} className="rounded-md bg-muted/60 px-2.5 py-1.5">
+                        {f.message}
+                        {f.quote && <q className="mt-0.5 block text-xs text-muted-foreground italic">{f.quote}</q>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            </Item>
           ))}
         </ul>
       </Section>
@@ -201,10 +319,10 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
                     ["Broken", String(s.tests.regressions)],
                   ] as const
                 ).map(([term, value]) => (
-                  <div key={term} className="flex flex-col gap-0.5 rounded-md border p-2.5">
+                  <Item key={term} variant="outline" className="flex-col items-stretch gap-0.5 p-2.5">
                     <dt className="text-xs text-muted-foreground">{term}</dt>
                     <dd className="text-lg font-semibold tabular-nums">{value}</dd>
-                  </div>
+                  </Item>
                 ))}
               </dl>
               <p className="text-sm text-muted-foreground" aria-live="polite">
@@ -294,25 +412,29 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
       {s.approval === "approved" && s.proposedVersion !== null && (
         <Section title="Rollout" description="Serve the new version to a share of customers, watch the KPI, then promote or roll back.">
           {s.rollout ? (
-            <RolloutPanel workspaceId={workspace.id} rollout={s.rollout} canEdit={isAdmin} onChange={() => (reload(), employee.reload())} />
+            <RolloutPanel workspaceId={workspaceId} rollout={s.rollout} canEdit={isAdmin} onChange={() => (reload(), reloadEmployee())} />
           ) : s.stage === "released" ? (
             <p className="text-sm">v{s.proposedVersion} was published directly.</p>
-          ) : !employee.data ? (
-            <LoadingState rows={1} />
-          ) : live === null || employee.data.status !== "ACTIVE" ? (
-            <p className="text-sm text-muted-foreground">Publish the employee and make it active to roll this out.</p>
-          ) : isAdmin ? (
-            <StartRollout
-              workspaceId={workspace.id}
-              employeeId={s.employee.id}
-              versions={[s.proposedVersion]}
-              defaultVersion={s.proposedVersion}
-              defaultKpi={s.kpi}
-              liveVersion={live}
-              onStarted={() => (reload(), employee.reload())}
-            />
           ) : (
-            <p className="text-sm text-muted-foreground">Not rolled out yet.</p>
+            <Skullet data={employee} sample={SAMPLE_EMPLOYEE} id="improvement-rollout" label="Loading rollout">
+              {(employee) =>
+                employee.publishedVersion === null || employee.status !== "ACTIVE" ? (
+                  <p className="text-sm text-muted-foreground">Publish the employee and make it active to roll this out.</p>
+                ) : isAdmin && s.proposedVersion !== null ? (
+                  <StartRollout
+                    workspaceId={workspaceId}
+                    employeeId={s.employee.id}
+                    versions={[s.proposedVersion]}
+                    defaultVersion={s.proposedVersion}
+                    defaultKpi={s.kpi}
+                    liveVersion={employee.publishedVersion}
+                    onStarted={() => (reload(), reloadEmployee())}
+                  />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Not rolled out yet.</p>
+                )
+              }
+            </Skullet>
           )}
         </Section>
       )}
@@ -320,4 +442,4 @@ export default withWorkspace(function ImprovementPage({ workspace }) {
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
-});
+}

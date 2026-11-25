@@ -25,6 +25,18 @@ export type JobEvents = {
   "memory/exchange.saved": { organizationId: string; workspaceId: string; customerId: string; conversationId: string; replyId: string };
   "channel/message.received": { messageId: string; queueKey: string };
   "workflow/run.due": { executionId: string };
+  /** Re-alerts people when nobody has taken a handed-off conversation by `dueAt`. */
+  "handoff/reminder.due": {
+    handoffId: string;
+    organizationId: string;
+    workspaceId: string;
+    employeeId: string;
+    employeeName: string;
+    conversationId: string;
+    contactEmail: string;
+    minutes: number;
+    dueAt: string;
+  };
   "evaluation/requested": { evaluationId: string };
   "evaluation/dataset.run": { runId: string };
   "improvement/analyze": { organizationId: string; workspaceId: string };

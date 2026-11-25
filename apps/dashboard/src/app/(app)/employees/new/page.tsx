@@ -31,6 +31,7 @@ export default withWorkspace(function NewEmployeePage({ workspace }) {
           const created = await api<EmployeeDetail>(`/workspaces/${workspace.id}/employees`, {
             method: "POST",
             body: config,
+            toast: `${config.name} created`,
           });
           setFormKey((k) => k + 1);
           router.push(`/employees/${created.id}`);

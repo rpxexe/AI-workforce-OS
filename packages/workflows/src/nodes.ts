@@ -6,7 +6,7 @@
 // same attempt). Every step with an outside effect is keyed by `run.idempotencyKey`
 // (execution:node:attempt), so the second run finds or deduplicates the first one's effect; where
 // that is impossible it fails instead of acting twice. A manual retry is a new attempt and acts again.
-import { configOf, ROLLOUT_INCLUDE, runTurn, servedVersion, startHandoff, type HandoffNotice } from "@workforce/agent-runtime";
+import { configOf, ROLLOUT_INCLUDE, runTurn, servedVersion, startHandoff, type HandoffNotice, type HandoffRequest } from "@workforce/agent-runtime";
 import { AIProviderError, type AIProvider, type EmbeddingProvider, type Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, type MemoryService } from "@workforce/memory";
@@ -99,6 +99,32 @@ async function liveEmployee(run: StepRun, employeeId: string, customer?: string)
   if (!employee) throw new StepError("The employee no longer exists");
   if (employee.status !== "ACTIVE" || !employee.publishedVersion) throw new StepError("The employee is not published and active");
   return { ...employee, publishedVersion: servedVersion(employee.publishedVersion, employee.activeRollout, customer ? normalizeCustomerId(customer) : run.executionId) };
+}
+
+/** Tells people about a handoff a workflow started, as a handoff in a chat does (alert, email, reminder). */
+async function notifyHandoff(run: StepRun, handoffId: string, conversationId: string, employeeId: string, request: HandoffRequest) {
+  if (!run.deps.onHandoff) return;
+  const employee = await prisma.aiEmployee.findFirst({
+    where: { id: employeeId, ...run.scope },
+    include: { publishedVersion: true, versions: { orderBy: { number: "desc" }, take: 1 } },
+  });
+  const version = employee?.publishedVersion ?? employee?.versions[0];
+  if (!version) return;
+  const { name, escalation } = configOf(version);
+  try {
+    run.deps.onHandoff({
+      ...run.scope,
+      employeeId,
+      employeeName: name,
+      conversationId,
+      handoffId,
+      ...request,
+      contactEmail: escalation.contactEmail,
+      reminderMinutes: escalation.reminderMinutes,
+    });
+  } catch {
+    // A failed notification must not fail the step: the conversation is already with people.
+  }
 }
 
 /** Sends a request through the guarded fetch and returns the status and the body (JSON when it parses). */
@@ -343,7 +369,9 @@ export const handlers: Handlers = {
     if (config.conversationId) {
       const conversation = await prisma.conversation.findFirst({ where: { id: config.conversationId, ...run.scope }, select: { id: true, organizationId: true, workspaceId: true } });
       if (!conversation) throw new StepError(`Conversation "${config.conversationId}" not found`);
-      await startHandoff(conversation, { trigger: "workflow_condition", reason: `Workflow: ${config.note}`.slice(0, 500) });
+      const request = { trigger: "workflow_condition" as const, reason: `Workflow: ${config.note}`.slice(0, 500) };
+      const started = await startHandoff(conversation, request);
+      if (started) await notifyHandoff(run, started.id, conversation.id, started.employeeId, request);
     }
     return { wait: { until: null, state: { note: config.note, conversationId: config.conversationId || null } } };
   },

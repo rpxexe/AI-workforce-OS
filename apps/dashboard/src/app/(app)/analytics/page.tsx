@@ -1,5 +1,6 @@
 "use client";
 
+import { ArrowRightLeft, CircleCheck, Frown, Headset, Inbox, Languages, Percent, Sparkles, Timer, TriangleAlert, UserCheck, UserRoundCheck } from "lucide-react";
 import {
   DETECTED_LANGUAGES,
   ENTITY_TYPES,
@@ -11,8 +12,10 @@ import {
 } from "@workforce/shared";
 import { useState } from "react";
 import { formatDuration } from "@/components/inbox/meta";
-import { ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { ErrorState, PageHeader, StatTile } from "@/components/states";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useApiQuery } from "@/lib/api";
@@ -21,21 +24,74 @@ import { withWorkspace } from "@/lib/workspace";
 
 const PERIODS = [7, 30, 90] as const;
 
-function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="flex flex-col gap-1 rounded-lg border p-4">
-      <span className="text-sm text-muted-foreground">{label}</span>
-      <span className="text-2xl font-semibold tabular-nums">{value}</span>
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-    </div>
-  );
-}
+const SAMPLE_DURATION: DurationStats = { count: 42, average: 312, median: 245, p90: 840 };
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_HANDOFFS: HandoffAnalytics = {
+  days: 30,
+  conversations: 1240,
+  handoffs: 186,
+  handoffRate: 0.15,
+  byTrigger: [
+    { trigger: "customer_request", count: 72 },
+    { trigger: "low_confidence", count: 48 },
+    { trigger: "policy_risk", count: 31 },
+    { trigger: "repeated_failure", count: 22 },
+    { trigger: "agent", count: 13 },
+  ],
+  outcomes: { resolved: 140, returnedToAi: 28, open: 18 },
+  open: { queue: 6, assigned: 3, humanActive: 9 },
+  timeToAccept: SAMPLE_DURATION,
+  timeToFirstResponse: SAMPLE_DURATION,
+  timeToResolve: SAMPLE_DURATION,
+  replyTime: { ai: SAMPLE_DURATION, human: SAMPLE_DURATION },
+  byAgent: Array.from({ length: 5 }, (_, i) => ({
+    agentId: `sample-${i}`,
+    handoffs: 40 - i * 5,
+    resolved: 32 - i * 4,
+    firstResponse: SAMPLE_DURATION,
+  })),
+  suggestions: { total: 120, used: 84 },
+};
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_INSIGHTS: InsightsOverview = {
+  days: 30,
+  conversations: 1240,
+  analyzed: 1000,
+  languages: [
+    { language: "en", conversations: 520 },
+    { language: "hinglish", conversations: 310 },
+    { language: "hi", conversations: 120 },
+    { language: "ta", conversations: 30 },
+    { language: "bn", conversations: 20 },
+  ],
+  codeSwitched: 340,
+  withSwitches: 210,
+  sentiment: { positive: 420, negative: 180, neutral: 340, mixed: 60 },
+  intents: [
+    { intent: "order_status", conversations: 280 },
+    { intent: "refund", conversations: 160 },
+    { intent: "delivery", conversations: 140 },
+    { intent: "payment", conversations: 90 },
+    { intent: "complaint", conversations: 60 },
+  ],
+  entities: [
+    { type: "order_id", count: 410 },
+    { type: "phone", count: 260 },
+    { type: "person_name", count: 180 },
+    { type: "address", count: 90 },
+    { type: "amount", count: 70 },
+  ],
+  resolution: { resolved: 700, with_people: 150, open: 150 },
+  escalation: { conversations: 186, rate: 0.15, withSignals: 24 },
+};
 
 /** A duration headline: the median, with the average, 90th percentile and sample size underneath. */
 function DurationTile({ label, stats }: { label: string; stats: DurationStats }) {
   return (
-    <Tile
-      label={label}
+    <StatTile
+      label={label} icon={Timer}
       value={stats.count === 0 ? "—" : formatDuration(stats.median)}
       hint={stats.count === 0 ? "Nothing measured yet" : `median · average ${formatDuration(stats.average)} · 90% within ${formatDuration(stats.p90)} · ${stats.count} measured`}
     />
@@ -63,9 +119,7 @@ function Bars({ title, rows, empty }: { title: string; rows: { label: string; co
                   <span>{r.label}</span>
                   <span className="tabular-nums text-muted-foreground">{r.count}</span>
                 </div>
-                <div className="h-2 rounded-r-[4px] bg-muted" aria-hidden>
-                  <div className="h-full rounded-r-[4px] bg-primary" style={{ width: `${(r.count / most) * 100}%` }} />
-                </div>
+                <Progress value={(r.count / most) * 100} className="h-2" aria-hidden />
               </li>
             ))}
           </ul>
@@ -88,11 +142,11 @@ function Insights({ data }: { data: InsightsOverview }) {
         </p>
       </div>
       <section aria-label="Conversation intelligence" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Tile label="Mixed-language conversations" value={pct(data.codeSwitched, n)} hint={`${data.codeSwitched} with Hinglish or mixed scripts · ${data.withSwitches} switched language`} />
-        <Tile label="Negative sentiment" value={pct(data.sentiment.negative, n)} hint={`${data.sentiment.positive} positive · ${data.sentiment.mixed} mixed · ${data.sentiment.neutral} neutral`} />
-        <Tile label="Resolved" value={pct(data.resolution.resolved, n)} hint={`${data.resolution.with_people} with people · ${data.resolution.open} open`} />
-        <Tile
-          label="Escalated"
+        <StatTile label="Mixed-language conversations" icon={Languages} value={pct(data.codeSwitched, n)} hint={`${data.codeSwitched} with Hinglish or mixed scripts · ${data.withSwitches} switched language`} />
+        <StatTile label="Negative sentiment" icon={Frown} value={pct(data.sentiment.negative, n)} hint={`${data.sentiment.positive} positive · ${data.sentiment.mixed} mixed · ${data.sentiment.neutral} neutral`} />
+        <StatTile label="Resolved" icon={CircleCheck} value={pct(data.resolution.resolved, n)} hint={`${data.resolution.with_people} with people · ${data.resolution.open} open`} />
+        <StatTile
+          label="Escalated" icon={TriangleAlert}
           value={data.escalation.rate === null ? "—" : `${Math.round(data.escalation.rate * 100)}%`}
           hint={`${data.escalation.conversations} handed off · ${data.escalation.withSignals} customers threatened to escalate`}
         />
@@ -120,7 +174,6 @@ export default withWorkspace(function AnalyticsPage({ workspace }) {
   const insights = useApiQuery<InsightsOverview>(`/workspaces/${workspace.id}/insights?days=${days}`);
   const { nameOf } = useMembers();
 
-  const most = Math.max(1, ...(data?.byTrigger.map((t) => t.count) ?? []));
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -143,26 +196,28 @@ export default withWorkspace(function AnalyticsPage({ workspace }) {
 
       {error && !data ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState rows={4} />
       ) : (
+        <Skullet data={data} sample={SAMPLE_HANDOFFS} id="analytics-handoffs" label="Loading analytics">
+          {(data) => {
+            const most = Math.max(1, ...data.byTrigger.map((t) => t.count));
+            return (
         <>
           <section aria-label="Right now" className="grid gap-3 sm:grid-cols-3">
-            <Tile label="In the queue now" value={String(data.open.queue)} hint="Waiting, no one assigned" />
-            <Tile label="Assigned, not picked up" value={String(data.open.assigned)} />
-            <Tile label="Being answered by people" value={String(data.open.humanActive)} />
+            <StatTile label="In the queue now" icon={Inbox} value={String(data.open.queue)} hint="Waiting, no one assigned" />
+            <StatTile label="Assigned, not picked up" icon={UserCheck} value={String(data.open.assigned)} />
+            <StatTile label="Being answered by people" icon={Headset} value={String(data.open.humanActive)} />
           </section>
 
           <section aria-label="Handoffs" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Tile label="Handoffs" value={String(data.handoffs)} hint={`${data.conversations} active conversations`} />
-            <Tile
-              label="Handoff rate"
+            <StatTile label="Handoffs" icon={ArrowRightLeft} value={String(data.handoffs)} hint={`${data.conversations} active conversations`} />
+            <StatTile
+              label="Handoff rate" icon={Percent}
               value={data.handoffRate === null ? "—" : `${Math.round(data.handoffRate * 100)}%`}
               hint="Conversations handed to people at least once"
             />
-            <Tile label="Resolved by people" value={String(data.outcomes.resolved)} hint={`${data.outcomes.returnedToAi} returned to the AI · ${data.outcomes.open} still open`} />
-            <Tile
-              label="Copilot suggestions used"
+            <StatTile label="Resolved by people" icon={UserRoundCheck} value={String(data.outcomes.resolved)} hint={`${data.outcomes.returnedToAi} returned to the AI · ${data.outcomes.open} still open`} />
+            <StatTile
+              label="Copilot suggestions used" icon={Sparkles}
               value={data.suggestions.total === 0 ? "—" : `${data.suggestions.used} of ${data.suggestions.total}`}
             />
           </section>
@@ -191,9 +246,7 @@ export default withWorkspace(function AnalyticsPage({ workspace }) {
                           <span>{HANDOFF_TRIGGER_LABELS[t.trigger]}</span>
                           <span className="tabular-nums text-muted-foreground">{t.count}</span>
                         </div>
-                        <div className="h-2 rounded-r-[4px] bg-muted" aria-hidden>
-                          <div className="h-full rounded-r-[4px] bg-primary" style={{ width: `${(t.count / most) * 100}%` }} />
-                        </div>
+                        <Progress value={(t.count / most) * 100} className="h-2" aria-hidden />
                       </li>
                     ))}
                   </ul>
@@ -234,14 +287,17 @@ export default withWorkspace(function AnalyticsPage({ workspace }) {
             </Card>
           </div>
         </>
+            );
+          }}
+        </Skullet>
       )}
 
       {insights.error && !insights.data ? (
         <ErrorState message={insights.error.message} onRetry={insights.reload} />
-      ) : !insights.data ? (
-        <LoadingState rows={3} />
       ) : (
-        <Insights data={insights.data} />
+        <Skullet data={insights.data} sample={SAMPLE_INSIGHTS} id="analytics-insights" label="Loading conversation intelligence">
+          {(data) => <Insights data={data} />}
+        </Skullet>
       )}
     </div>
   );

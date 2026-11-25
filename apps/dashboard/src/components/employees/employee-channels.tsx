@@ -19,8 +19,10 @@ import {
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -131,7 +133,7 @@ export function EmployeeChannels({
             return (
               <TabsTrigger key={kind} value={kind} className="gap-1.5">
                 {CHANNEL_CAPABILITIES[kind].label}
-                {c && <span className={`size-1.5 rounded-full ${c.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`} aria-label={c.enabled ? "on" : "off"} />}
+                {c && <span className={`size-1.5 rounded-full ${c.enabled ? "bg-success" : "bg-muted-foreground/50"}`} aria-label={c.enabled ? "on" : "off"} />}
               </TabsTrigger>
             );
           })}
@@ -227,7 +229,6 @@ function ChannelForm({
   const initial = draftFrom(channel);
   const [draft, setDraft] = useState(initial);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const update = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -236,13 +237,12 @@ function ChannelForm({
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
-    setError(undefined);
     try {
       await action();
       onSaved();
     } catch (err) {
+      // The toast in useApi shows why it failed; field issues also go next to their fields.
       if (err instanceof ApiRequestError && err.issues.length > 0) setErrors(Object.fromEntries(err.issues.map((i) => [i.path, i.message])));
-      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
     } finally {
       setBusy(false);
     }
@@ -255,7 +255,11 @@ function ChannelForm({
     setErrors(parsed.success ? {} : Object.fromEntries(parsed.error.issues.map((i) => [String(i.path[0] ?? ""), i.message])));
     if (!parsed.success) return;
     void run(() =>
-      api(path, { method: "PUT", body: { enabled: draft.enabled, allowedTools: draft.restrictTools ? draft.tools : null, config } }),
+      api(path, {
+        method: "PUT",
+        body: { enabled: draft.enabled, allowedTools: draft.restrictTools ? draft.tools : null, config },
+        toast: `${CHANNEL_CAPABILITIES[kind].label} ${channel ? "saved" : "added"}`,
+      }),
     );
   };
   const remove = () =>
@@ -266,7 +270,7 @@ function ChannelForm({
           ? "The widget stops working on every website that shows it. Its message log is kept. Adding web chat again gives a new key."
           : "Messages sent here are no longer answered. The message log is kept.",
       confirmLabel: "Remove channel",
-      onConfirm: () => void run(() => api(path, { method: "DELETE" })),
+      onConfirm: () => void run(() => api(path, { method: "DELETE", toast: `${CHANNEL_CAPABILITIES[kind].label} removed` })),
     });
 
   const id = (name: string) => `${kind}-${name}`;
@@ -290,16 +294,20 @@ function ChannelForm({
       </p>
 
       {kind === "whatsapp" && draft.connectionId === PLATFORM_ACCOUNT && !whatsappProviders.includes(draft.provider) && (
-        <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-          {WHATSAPP_PROVIDER_LABELS[draft.provider]} is not set up on the server yet. Add {ENV_NEEDED[draft.provider]} to its .env. You can save the number
-          now.
-        </p>
+        <Alert role="status">
+          <AlertDescription>
+            {WHATSAPP_PROVIDER_LABELS[draft.provider]} is not set up on the server yet. Add {ENV_NEEDED[draft.provider]} to its .env. You can save the
+            number now.
+          </AlertDescription>
+        </Alert>
       )}
       {kind === "email" && email.provider === null && (
-        <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-          Test mode: replies are written and logged below, but not delivered. Add RESEND_API_KEY and RESEND_WEBHOOK_SECRET to the server&apos;s .env to
-          send and receive through Resend.
-        </p>
+        <Alert role="status">
+          <AlertDescription>
+            Test mode: replies are written and logged below, but not delivered. Add RESEND_API_KEY and RESEND_WEBHOOK_SECRET to the server&apos;s .env to
+            send and receive through Resend.
+          </AlertDescription>
+        </Alert>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -453,26 +461,19 @@ function ChannelForm({
             <legend className="sr-only">Tools allowed on {CHANNEL_CAPABILITIES[kind].label}</legend>
             {granted.length === 0 && <p className="text-sm text-muted-foreground">This employee has no tools yet.</p>}
             {granted.map((tool) => (
-              <label key={tool} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  className="size-4 accent-primary"
+              <Label key={tool} className="font-normal">
+                <Checkbox
                   checked={draft.tools.includes(tool)}
                   disabled={disabled}
-                  onChange={(e) => update({ tools: e.target.checked ? [...draft.tools, tool] : draft.tools.filter((t) => t !== tool) })}
+                  onCheckedChange={(on) => update({ tools: on === true ? [...draft.tools, tool] : draft.tools.filter((t) => t !== tool) })}
                 />
                 {titles[tool] ?? tool}
-              </label>
+              </Label>
             ))}
           </fieldset>
         )}
       </div>
 
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
       {canEdit && (
         <div className="flex flex-wrap gap-2">
           <Button onClick={save} disabled={busy || (channel !== undefined && !changed)}>

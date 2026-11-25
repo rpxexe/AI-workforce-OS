@@ -4,11 +4,13 @@
 // Agents are organization members, not only admins: answering customers is their job. The AI stops
 // answering a conversation in WAITING_FOR_HUMAN or HUMAN_ACTIVE (runTurn checks); only returning it
 // to the AI (or resolving and reopening it) lets it answer again.
+import type { LiveBus, Presence } from "./live.ts";
 import { analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { prisma, type Prisma } from "@workforce/database";
 import {
   agentMessageSchema,
+  agentTypingSchema,
   analyticsQuerySchema,
   conversationActionSchema,
   EVALUATION_CHANNEL,
@@ -128,7 +130,13 @@ export async function resolveConversation(where: { id: string; organizationId: s
   });
 }
 
-export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai: Ai, channels: ChannelService) {
+export function inboxRoutes(
+  app: FastifyInstance,
+  authenticate: Authenticate,
+  ai: Ai,
+  channels: ChannelService,
+  { live, presence }: { live: LiveBus; presence: Presence },
+) {
   const { member, inWorkspace } = guards(authenticate);
   const conversationPath = "/workspaces/:workspaceId/conversations/:conversationId";
 
@@ -267,13 +275,18 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
         break;
       }
     }
+    // Live notifications: fresh inbox counts for everyone, and an alert for whoever was just given it.
+    if (body.action === "resolve" || body.action === "return_to_ai") presence.forget(conversation.id);
+    live.publish(scope.workspaceId, { type: "inbox_changed" });
+    if (body.action === "assign" && body.userId && body.userId !== scope.userId)
+      live.publish(scope.workspaceId, { type: "assigned", conversationId: conversation.id, assignedTo: body.userId, by: scope.userId });
     return detail(conversation.id);
   });
 
   // A human agent's message. Sending takes the conversation over: the AI stays silent from now on.
   app.post(`${conversationPath}/messages`, async (req) => {
     const { scope, conversation } = await scoped(req);
-    const { text, suggestionId } = agentMessageSchema.parse(req.body);
+    const { text, suggestionId, name } = agentMessageSchema.parse(req.body);
     if (!REPLY_CHANNELS.includes(conversation.channel))
       throw httpError(409, conversation.channel === "voice" ? "Phone calls cannot be continued by text. Call the customer back." : "This conversation has no customer to write to.");
     const customer = conversation.customer?.customer;
@@ -312,7 +325,17 @@ export function inboxRoutes(app: FastifyInstance, authenticate: Authenticate, ai
           await tx.copilotSuggestion.update({ where: { id: suggestionId }, data: { usedInMessageId: message.id, edited: suggestion.reply.trim() !== text } });
       }
     });
+    presence.touch(conversation.id, name ?? "", false);
+    live.publish(scope.workspaceId, { type: "inbox_changed" });
     return detail(conversation.id);
+  });
+
+  // The agent is typing: the web chat widget shows their name and "typing" for a few seconds.
+  app.post(`${conversationPath}/typing`, async (req, reply) => {
+    const { conversation } = await scoped(req);
+    const { name } = agentTypingSchema.parse(req.body);
+    presence.touch(conversation.id, name, true);
+    return reply.code(204).send();
   });
 
   // The AI Copilot: a suggestion for the agent, stored apart from the conversation and never sent.

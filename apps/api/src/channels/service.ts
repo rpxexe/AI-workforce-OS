@@ -5,7 +5,7 @@
 //   -> reply split to the channel's limits -> ChannelSender -> audit rows with delivery state
 //
 // Like voice, channels have no logic of their own for answers: `runTurn` writes every reply.
-import { ROLLOUT_INCLUDE, runTurn, servedVersion, type HandoffNotice, type TurnInput } from "@workforce/agent-runtime";
+import { ROLLOUT_INCLUDE, runTurn, servedVersion, type HandoffNotice, type HeldNotice, type TurnInput } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { ChannelError, splitText, taggedAddress, type ChannelSender, type DeliveryUpdate, type InboundMessage, type WhatsAppProvider } from "@workforce/channels";
 import { prisma, type Prisma } from "@workforce/database";
@@ -37,6 +37,7 @@ export type Ai = {
   timeoutMs: number;
   /** Tells people about a handoff a turn started. */
   onHandoff?: (notice: HandoffNotice) => void;
+  onHeld?: (notice: HeldNotice) => void;
   /** Plan limits (Phase 16); absent in apps without billing. */
   planLimits?: UsageLimiter;
 };
@@ -191,6 +192,7 @@ export function channelService(deps: {
       channel: channel.kind,
       timeoutMs: ai.timeoutMs,
       onHandoff: ai.onHandoff,
+      onHeld: ai.onHeld,
       planLimits: ai.planLimits,
     } satisfies Omit<TurnInput, "userMessage">;
   };

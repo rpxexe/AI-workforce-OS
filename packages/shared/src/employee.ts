@@ -90,6 +90,8 @@ export const escalationSchema = z
     handoffMessage: z.string().trim().max(500),
     /** Phone calls handed off are transferred to this number (a person or a team line); empty: the employee hangs up and someone calls back. */
     transferNumber: z.union([z.literal(""), e164]),
+    /** Alert people again (and remind the contact by email) when nobody takes a handed-off conversation within this many minutes; 0 never reminds. */
+    reminderMinutes: z.number().int().min(0, "Use 0 to turn reminders off").max(240, "Use at most 240 minutes").default(0),
   })
   .refine((e) => !e.enabled || e.contactEmail !== "", {
     path: ["contactEmail"],
@@ -141,6 +143,7 @@ export const defaultEscalation = (): EmployeeConfig["escalation"] => ({
   rules: [],
   handoffMessage: "",
   transferNumber: "",
+  reminderMinutes: 0,
 });
 
 export const publishSchema = z.object({ version: z.number().int().positive() });

@@ -19,17 +19,21 @@ import {
   type WebhookEndpointInfo,
   type WebhookEventType,
 } from "@workforce/shared";
-import { KeyRound, Webhook } from "lucide-react";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ChevronRight, CircleAlert, KeyRound, TriangleAlert, Webhook } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { CopyBlock } from "@/components/employees/employee-channels";
 import { timeAgo } from "@/components/inbox/meta";
-import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState } from "@/components/states";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
@@ -52,6 +56,66 @@ const DELIVERY_STATUS: Record<WebhookDeliveryRecord["status"], { label: string; 
   pending: { label: "Retrying", variant: "outline" },
   failed: { label: "Failed", variant: "destructive" },
 };
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_KEYS: ApiKeyInfo[] = Array.from({ length: 3 }, (_, i) => ({
+  id: `sample-${i}`,
+  name: "CRM sync",
+  workspaceId: "sample-workspace",
+  workspaceName: "Main workspace",
+  prefix: "wfk_a1b2c3d4",
+  scopes: ["employees:read", "conversations:read", "conversations:write"],
+  status: "active",
+  createdBy: "sample-user",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  lastUsedAt: "2026-01-01T00:00:00.000Z",
+  lastUsedIp: "203.0.113.7",
+  expiresAt: null,
+  rateLimitPerMinute: 600,
+  allowedIps: [],
+  revokedAt: null,
+  replacedById: null,
+}));
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_AUDIT: DeveloperAuditEntry[] = Array.from({ length: 4 }, (_, i) => ({
+  id: `sample-${i}`,
+  actorId: "sample-user",
+  action: "api_key.create",
+  targetId: `sample-target-${i}`,
+  detail: { name: "CRM sync" },
+  createdAt: "2026-01-01T00:00:00.000Z",
+}));
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_ENDPOINTS: WebhookEndpointInfo[] = Array.from({ length: 3 }, (_, i) => ({
+  id: `sample-${i}`,
+  url: "https://example.com/webhooks/workforce",
+  description: "Production CRM",
+  workspaceId: "sample-workspace",
+  workspaceName: "Main workspace",
+  events: ["conversation.started", "conversation.completed", "call.completed"],
+  enabled: true,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  pending: 0,
+  failed: 0,
+  previousSecretUntil: null,
+}));
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_DELIVERIES: WebhookDeliveryRecord[] = Array.from({ length: 3 }, (_, i) => ({
+  id: `sample-${i}`,
+  endpointId: "sample-endpoint",
+  eventId: `sample-event-${i}`,
+  event: "conversation.started",
+  status: "succeeded",
+  attempts: 1,
+  nextAttemptAt: null,
+  deliveredAt: "2026-01-01T00:00:00.000Z",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  log: [{ at: "2026-01-01T00:00:00.000Z", statusCode: 200, error: null, durationMs: 240 }],
+  payload: {},
+}));
 
 const errorOf = (err: unknown) =>
   err instanceof ApiRequestError ? (err.issues[0] ? `${err.issues[0].path}: ${err.issues[0].message}` : err.message) : "Something went wrong. Try again.";
@@ -104,9 +168,10 @@ function WorkspacePicker({ value, onChange }: { value: string; onChange: (id: st
 function SecretOnce({ label, secret, onDone }: { label: string; secret: string; onDone: () => void }) {
   return (
     <div className="flex flex-col gap-4 p-4">
-      <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-        Copy it now and keep it somewhere safe. It is not stored, so it cannot be shown again.
-      </p>
+      <Alert className="border-warning/40 bg-warning/10 *:[svg]:text-warning">
+        <TriangleAlert aria-hidden />
+        <AlertDescription className="text-foreground">Copy it now and keep it somewhere safe. It is not stored, so it cannot be shown again.</AlertDescription>
+      </Alert>
       <CopyBlock label={label} value={secret} />
       <Button onClick={onDone}>Done</Button>
     </div>
@@ -117,6 +182,45 @@ function SecretOnce({ label, secret, onDone }: { label: string; secret: string; 
 
 type KeySheet = { mode: "create" } | { mode: "edit"; key: ApiKeyInfo } | { mode: "rotate"; key: ApiKeyInfo } | { mode: "secret"; created: CreatedApiKey };
 
+
+/** The first two items, then "…" opening a popover with all of them on hover (click and keyboard still work). */
+function ShortList({ items, label }: { items: readonly string[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const closing = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const tags = (list: readonly string[]) =>
+    list.map((item) => (
+      <Badge key={item} variant="secondary" className="font-medium">
+        {item}
+      </Badge>
+    ));
+  if (items.length <= 2) return <span className="flex flex-wrap gap-1">{tags(items)}</span>;
+  const show = () => {
+    clearTimeout(closing.current);
+    setOpen(true);
+  };
+  // A short delay lets the pointer cross the gap from the trigger into the popover.
+  const hide = () => {
+    closing.current = setTimeout(() => setOpen(false), 150);
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <span className="flex items-center gap-1">
+        {tags(items.slice(0, 2))}
+        <PopoverTrigger asChild onMouseEnter={show} onMouseLeave={hide}>
+          <Button variant="outline" size="xs" className="h-5 rounded-full px-2" aria-label={`${label}: show all ${items.length}`}>
+            …
+          </Button>
+        </PopoverTrigger>
+      </span>
+      <PopoverContent className="w-auto max-w-80" align="start" onMouseEnter={show} onMouseLeave={hide} onOpenAutoFocus={(e) => e.preventDefault()}>
+        <p className="mb-2 text-sm font-semibold">
+          {label} <span className="font-normal text-muted-foreground">{items.length}</span>
+        </p>
+        <div className="flex flex-wrap gap-1">{tags(items)}</div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
   const api = useApi();
   const { workspace } = useWorkspaces();
@@ -160,7 +264,7 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
     try {
       const settings = { name, rateLimitPerMinute: Number(rateLimit), allowedIps: ipsOf(ips) };
       if (sheet.mode === "edit") {
-        await api(`/developer/api-keys/${sheet.key.id}`, { method: "PATCH", body: settings });
+        await api(`/developer/api-keys/${sheet.key.id}`, { method: "PATCH", body: settings, toast: `API key "${name}" saved` });
         setSheet(null);
       } else {
         const created =
@@ -168,8 +272,9 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
             ? await api<CreatedApiKey>("/developer/api-keys", {
                 method: "POST",
                 body: { ...settings, workspaceId, scopes, ...(expiry !== "never" && { expiresInDays: Number(expiry) }) },
+                toast: `API key "${name}" created`,
               })
-            : await api<CreatedApiKey>(`/developer/api-keys/${sheet.key.id}/rotate`, { method: "POST", body: { expireOldInHours: Number(grace) } });
+            : await api<CreatedApiKey>(`/developer/api-keys/${sheet.key.id}/rotate`, { method: "POST", body: { expireOldInHours: Number(grace) }, toast: `API key "${sheet.key.name}" rotated` });
         setSheet({ mode: "secret", created });
       }
       keys.reload();
@@ -187,7 +292,9 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
       confirmLabel: "Revoke key",
       onConfirm: () => {
         setConfirm(null);
-        api(`/developer/api-keys/${key.id}`, { method: "DELETE" }).then(keys.reload, (err: unknown) => setError(errorOf(err)));
+        api(`/developer/api-keys/${key.id}`, { method: "DELETE", toast: `API key "${key.name}" revoked` }).then(keys.reload, () => {
+          // The toast in useApi shows why it failed.
+        });
       },
     });
 
@@ -202,76 +309,77 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
           {isAdmin && <Button onClick={() => open({ mode: "create" })}>Create key</Button>}
         </CardHeader>
         <CardContent>
-          {error && !sheet && (
-            <p role="alert" className="mb-3 text-sm text-destructive">
-              {error}
-            </p>
-          )}
           {keys.error ? (
             <ErrorState message={keys.error.message} onRetry={keys.reload} />
-          ) : !keys.data ? (
-            <LoadingState rows={2} />
-          ) : keys.data.length === 0 ? (
-            <EmptyState icon={KeyRound} title="No API keys yet" description="Create a key to call the API from your own systems." />
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Key</TableHead>
-                    <TableHead>Workspace</TableHead>
-                    <TableHead>Permissions</TableHead>
-                    <TableHead>Limits</TableHead>
-                    <TableHead>Last used</TableHead>
-                    <TableHead>Status</TableHead>
-                    {isAdmin && <TableHead className="text-right">Actions</TableHead>}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {keys.data.map((key) => (
-                    <TableRow key={key.id}>
-                      <TableCell className="font-medium">{key.name}</TableCell>
-                      <TableCell className="font-mono text-xs">{key.prefix}…</TableCell>
-                      <TableCell>{key.workspaceName}</TableCell>
-                      <TableCell className="max-w-64 text-xs text-muted-foreground">{key.scopes.join(", ")}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {key.rateLimitPerMinute}/min
-                        {key.allowedIps.length > 0 && <span className="block">{key.allowedIps.join(", ")}</span>}
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {key.lastUsedAt ? `${timeAgo(key.lastUsedAt)}${key.lastUsedIp ? ` from ${key.lastUsedIp}` : ""}` : "Never"}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={KEY_STATUS[key.status].variant}>{KEY_STATUS[key.status].label}</Badge>
-                        {key.status === "expiring" && key.expiresAt && (
-                          <span className="mt-1 block text-xs text-muted-foreground">until {new Date(key.expiresAt).toLocaleString()}</span>
-                        )}
-                      </TableCell>
-                      {isAdmin && (
-                        <TableCell className="text-right whitespace-nowrap">
-                          {(key.status === "active" || key.status === "expiring") && (
-                            <Button size="sm" variant="ghost" onClick={() => open({ mode: "edit", key })}>
-                              Edit
-                            </Button>
-                          )}
-                          {(key.status === "active" || (key.status === "expiring" && !key.replacedById)) && (
-                            <Button size="sm" variant="ghost" onClick={() => open({ mode: "rotate", key })}>
-                              Rotate
-                            </Button>
-                          )}
-                          {(key.status === "active" || key.status === "expiring") && (
-                            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => revoke(key)}>
-                              Revoke
-                            </Button>
-                          )}
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+            <Skullet data={keys.data} sample={SAMPLE_KEYS} id="api-keys-list" label="Loading API keys">
+              {(data) =>
+                data.length === 0 ? (
+                  <EmptyState icon={KeyRound} title="No API keys yet" description="Create a key to call the API from your own systems." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Name</TableHead>
+                          <TableHead>Key</TableHead>
+                          <TableHead>Workspace</TableHead>
+                          <TableHead>Permissions</TableHead>
+                          <TableHead>Limits</TableHead>
+                          <TableHead>Last used</TableHead>
+                          <TableHead>Status</TableHead>
+                          {isAdmin && <TableHead className="text-right">Actions</TableHead>}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {data.map((key) => (
+                          <TableRow key={key.id}>
+                            <TableCell className="font-medium">{key.name}</TableCell>
+                            <TableCell className="font-mono text-xs">{key.prefix}…</TableCell>
+                            <TableCell>{key.workspaceName}</TableCell>
+                            <TableCell>
+                              <ShortList items={key.scopes} label="Permissions" />
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {key.rateLimitPerMinute}/min
+                              {key.allowedIps.length > 0 && <span className="block">{key.allowedIps.join(", ")}</span>}
+                            </TableCell>
+                            <TableCell className="text-sm text-muted-foreground">
+                              {key.lastUsedAt ? `${timeAgo(key.lastUsedAt)}${key.lastUsedIp ? ` from ${key.lastUsedIp}` : ""}` : "Never"}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={KEY_STATUS[key.status].variant}>{KEY_STATUS[key.status].label}</Badge>
+                              {key.status === "expiring" && key.expiresAt && (
+                                <span className="mt-1 block text-xs text-muted-foreground">until {new Date(key.expiresAt).toLocaleString()}</span>
+                              )}
+                            </TableCell>
+                            {isAdmin && (
+                              <TableCell className="text-right whitespace-nowrap">
+                                {(key.status === "active" || key.status === "expiring") && (
+                                  <Button size="sm" variant="ghost" onClick={() => open({ mode: "edit", key })}>
+                                    Edit
+                                  </Button>
+                                )}
+                                {(key.status === "active" || (key.status === "expiring" && !key.replacedById)) && (
+                                  <Button size="sm" variant="ghost" onClick={() => open({ mode: "rotate", key })}>
+                                    Rotate
+                                  </Button>
+                                )}
+                                {(key.status === "active" || key.status === "expiring") && (
+                                  <Button size="sm" variant="ghost" className="text-destructive" onClick={() => revoke(key)}>
+                                    Revoke
+                                  </Button>
+                                )}
+                              </TableCell>
+                            )}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )
+              }
+            </Skullet>
           )}
         </CardContent>
       </Card>
@@ -387,9 +495,10 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
                 </div>
               )}
               {error && (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
+                <Alert variant="destructive">
+                  <CircleAlert aria-hidden />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
               )}
               <Button type="submit" disabled={saving || (sheet?.mode === "create" && (!workspaceId || scopes.length === 0))}>
                 {saving ? "Working…" : sheet?.mode === "rotate" ? "Rotate key" : sheet?.mode === "edit" ? "Save" : "Create key"}
@@ -435,24 +544,28 @@ function DeveloperActivity() {
       <CardContent>
         {audit.error ? (
           <ErrorState message={audit.error.message} onRetry={audit.reload} />
-        ) : !audit.data ? (
-          <LoadingState rows={2} />
-        ) : audit.data.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nothing yet.</p>
         ) : (
-          <ul className="flex flex-col divide-y text-sm">
-            {audit.data.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
-                <span>
-                  <span className="font-medium">{ACTION_LABELS[e.action] ?? e.action}</span>
-                  {summary(e.detail) && <span className="text-muted-foreground"> · {summary(e.detail)}</span>}
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  {e.actorId === userId ? "You" : "A teammate"}, {timeAgo(e.createdAt)}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <Skullet data={audit.data} sample={SAMPLE_AUDIT} id="developer-activity" label="Loading developer activity">
+            {(data) =>
+              data.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Nothing yet.</p>
+              ) : (
+                <ul className="flex flex-col divide-y text-sm">
+                  {data.map((e) => (
+                    <li key={e.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
+                      <span>
+                        <span className="font-medium">{ACTION_LABELS[e.action] ?? e.action}</span>
+                        {summary(e.detail) && <span className="text-muted-foreground"> · {summary(e.detail)}</span>}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {e.actorId === userId ? "You" : "A teammate"}, {timeAgo(e.createdAt)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )
+            }
+          </Skullet>
         )}
       </CardContent>
     </Card>
@@ -490,14 +603,20 @@ function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAd
     void load(null);
   }, [load]);
   const redeliver = (id: string) =>
-    api(`/developer/webhook-deliveries/${id}/redeliver`, { method: "POST" }).then(() => load(null), (err: unknown) => setError(errorOf(err)));
+    api(`/developer/webhook-deliveries/${id}/redeliver`, { method: "POST", toast: { loading: "Sending delivery again…", success: "Delivery sent again" } }).then(
+      () => load(null),
+      () => {
+        // The toast in useApi shows why it failed.
+      },
+    );
 
   return (
     <div className="flex flex-col gap-3">
       {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
       <div className="flex items-center justify-between gap-2">
         <Select value={event} onValueChange={setEvent}>
@@ -517,44 +636,59 @@ function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAd
           Refresh
         </Button>
       </div>
-      {!items ? (
-        <LoadingState rows={3} />
-      ) : items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing sent yet. Events appear here within seconds of happening.</p>
-      ) : null}
-      {items?.map((d) => {
-        const last = d.log.at(-1);
-        return (
-          <div key={d.id} className="rounded-md border p-3 text-sm">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-mono text-xs">{d.event}</span>
-              <Badge variant={DELIVERY_STATUS[d.status].variant}>{DELIVERY_STATUS[d.status].label}</Badge>
+      <Skullet data={items} sample={SAMPLE_DELIVERIES} id="webhook-deliveries" label="Loading deliveries">
+        {(items) =>
+          items.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nothing sent yet. Events appear here within seconds of happening.</p>
+          ) : (
+            // Skullet wraps its content in a block, so this keeps the gaps the list used to get from its parent.
+            <div className="flex flex-col gap-3">
+              {items.map((d) => {
+                const last = d.log.at(-1);
+                return (
+                  <Card key={d.id} size="sm">
+                    <CardContent>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs">{d.event}</span>
+                        <Badge variant={DELIVERY_STATUS[d.status].variant}>{DELIVERY_STATUS[d.status].label}</Badge>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {timeAgo(d.createdAt)} · {d.attempts} {d.attempts === 1 ? "attempt" : "attempts"}
+                        {last && ` · last: ${last.statusCode ?? "no answer"}${last.error ? ` (${last.error})` : ""}, ${last.durationMs} ms`}
+                        {d.nextAttemptAt && ` · next try ${new Date(d.nextAttemptAt).toLocaleTimeString()}`}
+                      </p>
+                      <Collapsible className="mt-2">
+                        <CollapsibleTrigger asChild>
+                          <Button variant="link" size="xs" className="group h-auto px-0 text-xs font-normal text-muted-foreground">
+                            <ChevronRight className="transition-transform group-data-[state=open]:rotate-90" aria-hidden />
+                            Payload and attempts
+                          </Button>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent>
+                          <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all">{JSON.stringify(d.payload, null, 2)}</pre>
+                          <ul className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
+                            {d.log.map((a) => (
+                              <li key={a.at}>
+                                {new Date(a.at).toLocaleString()}: {a.statusCode ?? "no answer"}
+                                {a.error && ` (${a.error})`}, {a.durationMs} ms
+                              </li>
+                            ))}
+                          </ul>
+                        </CollapsibleContent>
+                      </Collapsible>
+                      {isAdmin && d.status !== "pending" && (
+                        <Button size="sm" variant="ghost" className="mt-1 px-0" onClick={() => redeliver(d.id)}>
+                          Send again
+                        </Button>
+                      )}
+                    </CardContent>
+                  </Card>
+                );
+              })}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {timeAgo(d.createdAt)} · {d.attempts} {d.attempts === 1 ? "attempt" : "attempts"}
-              {last && ` · last: ${last.statusCode ?? "no answer"}${last.error ? ` (${last.error})` : ""}, ${last.durationMs} ms`}
-              {d.nextAttemptAt && ` · next try ${new Date(d.nextAttemptAt).toLocaleTimeString()}`}
-            </p>
-            <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-muted-foreground">Payload and attempts</summary>
-              <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted p-2 font-mono text-xs whitespace-pre-wrap break-all">{JSON.stringify(d.payload, null, 2)}</pre>
-              <ul className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
-                {d.log.map((a) => (
-                  <li key={a.at}>
-                    {new Date(a.at).toLocaleString()}: {a.statusCode ?? "no answer"}
-                    {a.error && ` (${a.error})`}, {a.durationMs} ms
-                  </li>
-                ))}
-              </ul>
-            </details>
-            {isAdmin && d.status !== "pending" && (
-              <Button size="sm" variant="ghost" className="mt-1 px-0" onClick={() => redeliver(d.id)}>
-                Send again
-              </Button>
-            )}
-          </div>
-        );
-      })}
+          )
+        }
+      </Skullet>
       {cursor && (
         <Button size="sm" variant="outline" onClick={() => void load(cursor)}>
           Load more
@@ -603,13 +737,13 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
     setError(undefined);
     try {
       if (sheet.mode === "rotate") {
-        const created = await api<CreatedWebhookEndpoint>(`/developer/webhooks/${sheet.endpoint.id}/rotate-secret`, { method: "POST", body: { keepOldForHours: Number(keepOld) } });
+        const created = await api<CreatedWebhookEndpoint>(`/developer/webhooks/${sheet.endpoint.id}/rotate-secret`, { method: "POST", body: { keepOldForHours: Number(keepOld) }, toast: "Signing secret rotated" });
         setSheet({ mode: "secret", created });
       } else if (sheet.mode === "create") {
-        const created = await api<CreatedWebhookEndpoint>("/developer/webhooks", { method: "POST", body: { url, description, workspaceId, events } });
+        const created = await api<CreatedWebhookEndpoint>("/developer/webhooks", { method: "POST", body: { url, description, workspaceId, events }, toast: "Webhook endpoint added" });
         setSheet({ mode: "secret", created });
       } else {
-        await api(`/developer/webhooks/${sheet.endpoint.id}`, { method: "PATCH", body: { url, description, events } });
+        await api(`/developer/webhooks/${sheet.endpoint.id}`, { method: "PATCH", body: { url, description, events }, toast: "Webhook endpoint saved" });
         setSheet(null);
       }
       endpoints.reload();
@@ -621,8 +755,8 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
   };
 
   const sendTest = (endpoint: WebhookEndpointInfo) => {
-    setNotice(`Sending a test event to ${endpoint.url}…`);
-    api<WebhookDeliveryRecord>(`/developer/webhooks/${endpoint.id}/test`, { method: "POST" }).then(
+    setNotice(undefined);
+    api<WebhookDeliveryRecord>(`/developer/webhooks/${endpoint.id}/test`, { method: "POST", toast: { loading: "Sending test event…", success: "Test event sent" } }).then(
       (d) => {
         const last = d.log.at(-1);
         setNotice(
@@ -632,15 +766,19 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
         );
         endpoints.reload();
       },
-      (err: unknown) => {
-        setNotice(undefined);
-        setError(errorOf(err));
+      () => {
+        // The toast in useApi shows why it failed.
       },
     );
   };
 
   const setEnabled = (endpoint: WebhookEndpointInfo, enabled: boolean) =>
-    api(`/developer/webhooks/${endpoint.id}`, { method: "PATCH", body: { enabled } }).then(endpoints.reload, (err: unknown) => setError(errorOf(err)));
+    api(`/developer/webhooks/${endpoint.id}`, { method: "PATCH", body: { enabled }, toast: enabled ? "Webhook endpoint turned on" : "Webhook endpoint turned off" }).then(
+      endpoints.reload,
+      () => {
+        // The toast in useApi shows why it failed.
+      },
+    );
 
   const remove = (endpoint: WebhookEndpointInfo) =>
     setConfirm({
@@ -649,7 +787,9 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
       confirmLabel: "Delete endpoint",
       onConfirm: () => {
         setConfirm(null);
-        api(`/developer/webhooks/${endpoint.id}`, { method: "DELETE" }).then(endpoints.reload, (err: unknown) => setError(errorOf(err)));
+        api(`/developer/webhooks/${endpoint.id}`, { method: "DELETE", toast: "Webhook endpoint deleted" }).then(endpoints.reload, () => {
+          // The toast in useApi shows why it failed.
+        });
       },
     });
 
@@ -664,80 +804,81 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
           {isAdmin && <Button onClick={() => open({ mode: "create" })}>Add endpoint</Button>}
         </CardHeader>
         <CardContent>
-          {error && !sheet && (
-            <p role="alert" className="mb-3 text-sm text-destructive">
-              {error}
-            </p>
-          )}
           {notice && (
-            <p role="status" className="mb-3 text-sm text-muted-foreground">
-              {notice}
-            </p>
+            <Alert role="status" className="mb-3">
+              <AlertDescription>{notice}</AlertDescription>
+            </Alert>
           )}
           {endpoints.error ? (
             <ErrorState message={endpoints.error.message} onRetry={endpoints.reload} />
-          ) : !endpoints.data ? (
-            <LoadingState rows={2} />
-          ) : endpoints.data.length === 0 ? (
-            <EmptyState icon={Webhook} title="No endpoints yet" description="Add an https address to receive conversation, workflow and call events." />
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Address</TableHead>
-                    <TableHead>Workspace</TableHead>
-                    <TableHead>Events</TableHead>
-                    <TableHead>Last 7 days</TableHead>
-                    <TableHead>On</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {endpoints.data.map((e) => (
-                    <TableRow key={e.id}>
-                      <TableCell>
-                        <span className="block max-w-72 truncate font-mono text-xs">{e.url}</span>
-                        {e.description && <span className="block text-xs text-muted-foreground">{e.description}</span>}
-                        {e.previousSecretUntil && (
-                          <span className="block text-xs text-muted-foreground">Old secret also signs until {new Date(e.previousSecretUntil).toLocaleString()}</span>
-                        )}
-                      </TableCell>
-                      <TableCell>{e.workspaceName}</TableCell>
-                      <TableCell className="text-sm">{e.events.length === WEBHOOK_EVENTS.length ? "All" : e.events.length}</TableCell>
-                      <TableCell className="text-sm">
-                        {e.failed > 0 && <Badge variant="destructive">{e.failed} failed</Badge>} {e.pending > 0 && <Badge variant="outline">{e.pending} retrying</Badge>}
-                        {e.failed === 0 && e.pending === 0 && <span className="text-muted-foreground">No problems</span>}
-                      </TableCell>
-                      <TableCell>
-                        <Switch checked={e.enabled} disabled={!isAdmin} onCheckedChange={(on) => setEnabled(e, on)} aria-label={`Send events to ${e.url}`} />
-                      </TableCell>
-                      <TableCell className="text-right whitespace-nowrap">
-                        <Button size="sm" variant="ghost" onClick={() => open({ mode: "log", endpoint: e })}>
-                          Deliveries
-                        </Button>
-                        {isAdmin && (
-                          <>
-                            <Button size="sm" variant="ghost" onClick={() => sendTest(e)}>
-                              Send test
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => open({ mode: "edit", endpoint: e })}>
-                              Edit
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => open({ mode: "rotate", endpoint: e })}>
-                              Rotate secret
-                            </Button>
-                            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => remove(e)}>
-                              Delete
-                            </Button>
-                          </>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+            <Skullet data={endpoints.data} sample={SAMPLE_ENDPOINTS} id="webhook-endpoints" label="Loading webhook endpoints">
+              {(data) =>
+                data.length === 0 ? (
+                  <EmptyState icon={Webhook} title="No endpoints yet" description="Add an https address to receive conversation, workflow and call events." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Address</TableHead>
+                          <TableHead>Workspace</TableHead>
+                          <TableHead>Events</TableHead>
+                          <TableHead>Last 7 days</TableHead>
+                          <TableHead>On</TableHead>
+                          <TableHead className="text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {data.map((e) => (
+                          <TableRow key={e.id}>
+                            <TableCell>
+                              <span className="block max-w-72 truncate font-mono text-xs">{e.url}</span>
+                              {e.description && <span className="block text-xs text-muted-foreground">{e.description}</span>}
+                              {e.previousSecretUntil && (
+                                <span className="block text-xs text-muted-foreground">Old secret also signs until {new Date(e.previousSecretUntil).toLocaleString()}</span>
+                              )}
+                            </TableCell>
+                            <TableCell>{e.workspaceName}</TableCell>
+                            <TableCell>
+                              <ShortList items={e.events} label="Events" />
+                            </TableCell>
+                            <TableCell className="text-sm">
+                              {e.failed > 0 && <Badge variant="destructive">{e.failed} failed</Badge>} {e.pending > 0 && <Badge variant="outline">{e.pending} retrying</Badge>}
+                              {e.failed === 0 && e.pending === 0 && <span className="text-muted-foreground">No problems</span>}
+                            </TableCell>
+                            <TableCell>
+                              <Switch checked={e.enabled} disabled={!isAdmin} onCheckedChange={(on) => setEnabled(e, on)} aria-label={`Send events to ${e.url}`} />
+                            </TableCell>
+                            <TableCell className="text-right whitespace-nowrap">
+                              <Button size="sm" variant="ghost" onClick={() => open({ mode: "log", endpoint: e })}>
+                                Deliveries
+                              </Button>
+                              {isAdmin && (
+                                <>
+                                  <Button size="sm" variant="ghost" onClick={() => sendTest(e)}>
+                                    Send test
+                                  </Button>
+                                  <Button size="sm" variant="ghost" onClick={() => open({ mode: "edit", endpoint: e })}>
+                                    Edit
+                                  </Button>
+                                  <Button size="sm" variant="ghost" onClick={() => open({ mode: "rotate", endpoint: e })}>
+                                    Rotate secret
+                                  </Button>
+                                  <Button size="sm" variant="ghost" className="text-destructive" onClick={() => remove(e)}>
+                                    Delete
+                                  </Button>
+                                </>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )
+              }
+            </Skullet>
           )}
         </CardContent>
       </Card>
@@ -808,9 +949,10 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
                 <p className="text-xs text-muted-foreground">Meanwhile each request carries two signatures; either secret verifies it.</p>
               </div>
               {error && (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
+                <Alert variant="destructive">
+                  <CircleAlert aria-hidden />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
               )}
               <Button type="submit" disabled={saving}>
                 {saving ? "Working…" : "Rotate secret"}
@@ -837,9 +979,10 @@ export function Webhooks({ isAdmin }: { isAdmin: boolean }) {
                 <Choices all={WEBHOOK_EVENTS} labels={WEBHOOK_EVENT_LABELS} value={events} onChange={setEvents} idPrefix="event" />
               </div>
               {error && (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
+                <Alert variant="destructive">
+                  <CircleAlert aria-hidden />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
               )}
               <Button type="submit" disabled={saving || events.length === 0 || (sheet?.mode === "create" && !workspaceId)}>
                 {saving ? "Saving…" : sheet?.mode === "edit" ? "Save" : "Add endpoint"}

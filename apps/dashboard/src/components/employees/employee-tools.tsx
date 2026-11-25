@@ -71,7 +71,6 @@ function ToolsForm({
   const api = useApi();
   const [draft, setDraft] = useState(initial);
   const [errors, setErrors] = useState<Partial<Record<ToolName, string>>>({});
-  const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const changed = JSON.stringify(draft) !== JSON.stringify(initial);
 
@@ -87,13 +86,12 @@ function ToolsForm({
       }),
     );
     setErrors(invalid);
-    setError(undefined);
     if (Object.keys(invalid).length > 0) return;
     setSaving(true);
     try {
-      onSaved(await api<EmployeeTool[]>(path, { method: "PUT", body: { tools } }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+      onSaved(await api<EmployeeTool[]>(path, { method: "PUT", body: { tools }, toast: "Tools saved" }));
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setSaving(false);
     }
@@ -170,11 +168,6 @@ function ToolsForm({
           );
         })}
       </ul>
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">Changes apply to the next message; they are not part of a version.</p>
         {canEdit && (

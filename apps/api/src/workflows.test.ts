@@ -14,6 +14,7 @@ import {
   validateWorkflow,
   type ApiError,
   type EmployeeDetail,
+  type LiveEvent,
   type WorkflowDefinition,
   type WorkflowDependencies,
   type WorkflowDetail,
@@ -27,6 +28,7 @@ import type { TelephonyProvider } from "@workforce/telephony";
 import { localTime } from "@workforce/tools";
 import type { TTSProvider } from "@workforce/tts";
 import { buildApp } from "./app.ts";
+import { liveBus } from "./live.ts";
 import { adminOf, deleteOrgs, headerAuth, memberOf, newOrg } from "./testing.ts";
 
 const TZ = "Asia/Kolkata";
@@ -36,6 +38,7 @@ let app: Awaited<ReturnType<typeof buildApp>>;
 let ws: string;
 let wsB: string;
 let ava: string; // published, has a phone number and the calendar tool
+const bus = liveBus();
 
 /** The model: yes/no questions get `answer`; everything else (employee turns, memory) gets "OK". */
 let answer = "YES";
@@ -143,6 +146,7 @@ before(async () => {
       limits: { idleMs: 60_000, maxCallMs: 600_000 },
     },
     workflows: { intervalMs: 20, callPollMs: 50 },
+    live: bus,
   });
   const workspaceOf = async (org: string) => (await inject("GET", "/workspaces", undefined, adminOf(org))).json<Workspace[]>()[0]?.id ?? "";
   ws = await workspaceOf(orgA);
@@ -374,6 +378,34 @@ test("an AI employee step and a human handoff that waits for a person", async ()
   const done = await settle(started.id);
   assert.equal(done.status, "COMPLETED");
   assert.equal((done.steps.find((s) => s.nodeId === "review")?.output as { resumedBy: string }).resumedBy, "user_admin");
+});
+
+test("a workflow handing a conversation to people alerts the team, like a handoff in a chat", async () => {
+  const events: LiveEvent[] = [];
+  const stop = bus.subscribe(ws, (e) => events.push(e));
+  try {
+    const { id } = await createWorkflow(
+      line(
+        { id: "ask", type: "ai_employee", config: { employeeId: ava, message: "Summarise the lead {{trigger.name}}", customer: "{{trigger.email}}" } },
+        { id: "review", type: "human_handoff", config: { note: "Call {{trigger.name}} back", conversationId: "{{steps.ask.conversationId}}" } },
+      ),
+    );
+    await publish(id);
+    const started = await run(id, { name: "Mia", email: "mia@example.com" });
+    const waiting = await settle(started.id, ["WAITING"], "review");
+    const { conversationId } = waiting.steps.find((s) => s.nodeId === "ask")?.output as { conversationId: string };
+    const alert = events.find((e) => e.type === "handoff" && e.conversationId === conversationId);
+    assert.deepEqual(alert && { ...alert, employeeName: alert.type === "handoff" && alert.employeeName.length > 0 }, {
+      type: "handoff",
+      conversationId,
+      employeeName: true,
+      reason: "Configured condition. Workflow: Call Mia back",
+      reminder: false,
+      waitingMinutes: 0,
+    });
+  } finally {
+    stop();
+  }
 });
 
 test("roles, isolation and the webhook token", async () => {

@@ -6,6 +6,7 @@ const envFile = new URL("../../.env", import.meta.url);
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins:["192.168.1.43"],
   cacheComponents: true,
   partialPrefetching: true,
   // Workspace packages ship TypeScript source, so Next.js must compile them.

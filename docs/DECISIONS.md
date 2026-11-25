@@ -24,6 +24,12 @@ problem re-discovered.
 - **Root tsconfig covers API, packages and workers**; the dashboard has its own. Stub packages
   need only `package.json` and `src/index.ts`.
 - **Zod schemas live in `@workforce/shared`** so the form and the API validate identically.
+- **Loading skeletons use `skullet` (pinned 0.0.3)**, the owner's choice and the one exception to "shadcn only".
+  Each page wraps its real content in `<Skullet data sample>` (imported as `Skeleton as Skullet` from
+  `skullet/react`) with a typed module-level `SAMPLE`, so the skeleton has the page's shape. Content
+  that fetches or mutates by id renders only for real data (`data === SAMPLE ? null : …`). Colours and
+  the flex/gap pass-through for its wrapper divs are in `globals.css`. `LoadingState` remains a
+  generic fallback.
 - **OpenRouter is the default AI provider** (owner's choice), default model `openrouter/auto`, which
   lets OpenRouter choose per request; pin one with `AI_MODEL`. It is called with `fetch`, no SDK.
   Anthropic remains selectable with `AI_PROVIDER=anthropic` (default `claude-opus-5-5`); nothing

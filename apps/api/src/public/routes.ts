@@ -28,7 +28,7 @@ import { toolRegistry, type ToolExecutor } from "@workforce/tools";
 import { WorkflowStartError, type WorkflowEngine } from "@workforce/workflows";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
-import type { HandoffNotice } from "@workforce/agent-runtime";
+import type { HandoffNotice, HeldNotice } from "@workforce/agent-runtime";
 import { httpError } from "../auth.ts";
 import type { EmployeeActions, Scope } from "../employees.ts";
 import { resolveConversation } from "../inbox.ts";
@@ -61,6 +61,7 @@ type Deps = {
     tools: ToolExecutor;
     timeoutMs: number;
     onHandoff?: (notice: HandoffNotice) => void;
+    onHeld?: (notice: HeldNotice) => void;
     planLimits?: UsageLimiter;
   };
   engine: Pick<WorkflowEngine, "start">;
@@ -173,6 +174,7 @@ function handlers({ ai, engine, employees, knowledge }: Deps): Handlers {
       timeoutMs: ai.timeoutMs,
       signal,
       onHandoff: ai.onHandoff,
+      onHeld: ai.onHeld,
       planLimits: ai.planLimits,
     });
     return (async function* (): AsyncGenerator<StreamEvent> {

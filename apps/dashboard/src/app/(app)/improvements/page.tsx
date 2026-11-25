@@ -6,14 +6,32 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { StageBadge } from "@/components/improvements/meta";
 import { timeAgo } from "@/components/inbox/meta";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
+import { TablePager, usePaged } from "@/components/table-pager";
 
 /** How long the list is refreshed after asking for an analysis (it runs in the background). */
 const WATCH_MS = 60_000;
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: ImprovementSummary[] = Array.from({ length: 4 }, (_, i) => ({
+  id: `sample-${i}`,
+  employee: { id: "sample-employee", name: "Support assistant" },
+  baseVersion: 3,
+  proposedVersion: 4,
+  dimension: "grounding",
+  title: "Answer delivery questions from the shipping policy",
+  kpi: "pass_rate",
+  stage: "tested",
+  approval: "pending",
+  failures: 12,
+  createdAt: "2026-01-01T00:00:00.000Z",
+}));
 
 export default withWorkspace(function ImprovementsPage({ workspace }) {
   const isAdmin = useIsAdmin();
@@ -21,7 +39,6 @@ export default withWorkspace(function ImprovementsPage({ workspace }) {
   const path = `/workspaces/${workspace.id}/improvements`;
   const { data, error, reload } = useApiQuery<ImprovementSummary[]>(path);
   const [watching, setWatching] = useState(false);
-  const [actionError, setActionError] = useState<string>();
 
   useEffect(() => {
     if (!watching) return;
@@ -31,12 +48,11 @@ export default withWorkspace(function ImprovementsPage({ workspace }) {
   }, [watching, reload]);
 
   const analyze = async () => {
-    setActionError(undefined);
     try {
-      await api(`${path}/analyze`, { method: "POST" });
+      await api(`${path}/analyze`, { method: "POST", toast: "Analysis started" });
       setWatching(true);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+    } catch {
+      // The toast in useApi shows why it failed.
     }
   };
 
@@ -54,23 +70,34 @@ export default withWorkspace(function ImprovementsPage({ workspace }) {
         )}
       </PageHeader>
       {watching && (
-        <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-          Looking for evaluators that keep failing on live versions. New suggestions appear here as they are written; this also runs every morning.
-        </p>
+        <Alert role="status">
+          <AlertDescription>
+            Looking for evaluators that keep failing on live versions. New suggestions appear here as they are written; this also runs every morning.
+          </AlertDescription>
+        </Alert>
       )}
-      {actionError && <ErrorState message={actionError} />}
 
       {error && !data ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState rows={4} />
-      ) : data.length === 0 ? (
+      ) : (
+        <Skullet data={data} sample={SAMPLE} id="improvements-list" label="Loading improvements">
+          {(data) => <SuggestionList data={data} />}
+        </Skullet>
+      )}
+    </div>
+  );
+});
+
+function SuggestionList({ data }: { data: ImprovementSummary[] }) {
+  const suggestions = usePaged(data, 20);
+  return data.length === 0 ? (
         <EmptyState
           icon={Lightbulb}
           title="No suggestions yet"
           description="A suggestion is written when an evaluator fails at least 3 conversations (and 20% of them) on an employee's live version in the last 14 days."
         />
       ) : (
+      <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -82,7 +109,7 @@ export default withWorkspace(function ImprovementsPage({ workspace }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.map((s) => (
+            {suggestions.rows.map((s) => (
               <TableRow key={s.id}>
                 <TableCell>
                   <Link href={`/improvements/${s.id}`} className="font-medium underline-offset-2 hover:underline">
@@ -106,7 +133,7 @@ export default withWorkspace(function ImprovementsPage({ workspace }) {
             ))}
           </TableBody>
         </Table>
-      )}
-    </div>
-  );
-});
+        <TablePager {...suggestions.pager} />
+      </>
+      );
+}

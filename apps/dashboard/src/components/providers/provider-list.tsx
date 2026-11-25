@@ -16,6 +16,7 @@ import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { CopyBlock } from "@/components/employees/employee-channels";
 import { timeAgo } from "@/components/inbox/meta";
 import { ConnectionSheet, type SheetRequest } from "@/components/providers/connection-sheet";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,7 +29,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useApi } from "@/lib/api";
 
-const message = (err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
 
 const WEBHOOK_LABELS: Record<string, string> = { voice: "Incoming call URL", status: "Status callback URL", webhook: "Webhook URL" };
 const WEBHOOK_HELP: Partial<Record<ProviderType, string>> = {
@@ -44,12 +44,12 @@ export const platformNames = (type: ProviderType, ids: string[]) =>
 type Action = "test" | "default" | "status" | "delete" | "configure" | "rotate";
 
 /** What happened the last time an admin pressed a button on a connection. */
-type Outcome = { test?: TestConnectionResult; error?: string };
+type Outcome = { test?: TestConnectionResult };
 
 function TestResult({ result }: { result: TestConnectionResult }) {
   const models = result.models ?? [];
   return (
-    <div role="status" className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3 text-sm">
+    <Alert role="status" className="flex flex-col gap-2 bg-muted/30 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={result.ok ? "secondary" : "destructive"}>{result.ok ? "Connection works" : "Test failed"}</Badge>
         <span className="text-muted-foreground">
@@ -73,7 +73,7 @@ function TestResult({ result }: { result: TestConnectionResult }) {
           {models.length > 8 && ` and ${models.length - 8} more`}
         </p>
       )}
-    </div>
+    </Alert>
   );
 }
 
@@ -146,11 +146,6 @@ function ConnectionRow({
           </div>
         )}
       </div>
-      {outcome?.error && (
-        <p role="alert" className="text-sm text-destructive">
-          {outcome.error}
-        </p>
-      )}
       {outcome?.test && <TestResult result={outcome.test} />}
       {c.webhookUrls && Object.keys(c.webhookUrls).length > 0 && (
         <div className="flex flex-col gap-2">
@@ -190,8 +185,8 @@ export function ProviderList({
       const test = (await action()) ?? undefined;
       setOutcomes((o) => ({ ...o, [c.id]: { test } }));
       reload();
-    } catch (err) {
-      setOutcomes((o) => ({ ...o, [c.id]: { error: message(err) } }));
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(undefined);
     }
@@ -200,24 +195,29 @@ export function ProviderList({
   const act = (c: ProviderConnectionInfo, meta: ProviderMeta) => (action: Action) => {
     const path = `/providers/connections/${c.id}`;
     if (action === "configure" || action === "rotate") return setSheet({ mode: action, meta, connection: c });
-    if (action === "test") return void run(c, () => api<TestConnectionResult>(`${path}/test`, { method: "POST" }));
-    if (action === "default") return void run(c, () => api(`${path}/default`, { method: "POST" }).then(() => undefined));
+    if (action === "test") return void run(c, () => api<TestConnectionResult>(`${path}/test`, { method: "POST", toast: { loading: `Testing ${c.displayName}…`, success: `${c.displayName} tested` } }));
+    if (action === "default") return void run(c, () => api(`${path}/default`, { method: "POST", toast: `${c.displayName} set as default` }).then(() => undefined));
     if (action === "status")
-      return void run(c, () => api(`${path}/status`, { method: "POST", body: { status: c.status === "active" ? "disabled" : "active" } }).then(() => undefined));
+      return void run(c, () => api(`${path}/status`, {
+              method: "POST",
+              body: { status: c.status === "active" ? "disabled" : "active" },
+              toast: c.status === "active" ? `${c.displayName} disabled` : `${c.displayName} enabled`,
+            }).then(() => undefined));
     setConfirm({
       title: `Delete "${c.displayName}"?`,
       description: "Its credentials are erased from the server. Employees, workflows, numbers and channels that use it must be changed first.",
       confirmLabel: "Delete connection",
-      onConfirm: () => void run(c, () => api(path, { method: "DELETE" }).then(() => undefined)),
+      onConfirm: () => void run(c, () => api(path, { method: "DELETE", toast: `${c.displayName} deleted` }).then(() => undefined)),
     });
   };
 
   return (
     <div className="flex flex-col gap-4">
       {isAdmin && !settings.canStoreKeys && (
-        <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-          New connections cannot be added yet: the server has no AI_CREDENTIALS_KEY to seal credentials with.
-        </p>
+        <Alert role="status">
+          <AlertDescription>New connections cannot be added yet: the server has no AI_CREDENTIALS_KEY to seal credentials with.</AlertDescription>
+        </Alert>
+
       )}
       <div className="grid items-start gap-4 lg:grid-cols-2">
         {entries.map((meta) => {

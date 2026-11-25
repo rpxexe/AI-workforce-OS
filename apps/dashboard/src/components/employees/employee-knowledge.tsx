@@ -23,7 +23,6 @@ export function EmployeeKnowledge({
   const all = useApiQuery<KnowledgeSource[]>(`/workspaces/${workspaceId}/knowledge/sources`);
   const attached = useApiQuery<KnowledgeSource[]>(attachedPath);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string>();
 
   const loadError = all.error ?? attached.error;
   if (loadError) return <p className="text-sm text-destructive">{loadError.message}</p>;
@@ -40,14 +39,16 @@ export function EmployeeKnowledge({
     );
 
   const attachedIds = new Set(attached.data.map((s) => s.id));
-  const toggle = async (sourceId: string, on: boolean) => {
+  const toggle = async (source: KnowledgeSource, on: boolean) => {
+    const sourceId = source.id;
     setSaving(true);
-    setError(undefined);
     const sourceIds = [...attachedIds].filter((id) => id !== sourceId).concat(on ? [sourceId] : []);
     try {
-      attached.setData(await api<KnowledgeSource[]>(attachedPath, { method: "PUT", body: { sourceIds } }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+      attached.setData(
+        await api<KnowledgeSource[]>(attachedPath, { method: "PUT", body: { sourceIds }, toast: `${source.name} ${on ? "attached" : "detached"}` }),
+      );
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setSaving(false);
     }
@@ -68,16 +69,11 @@ export function EmployeeKnowledge({
               id={`source-${source.id}`}
               checked={attachedIds.has(source.id)}
               disabled={!canEdit || saving}
-              onCheckedChange={(on) => toggle(source.id, on)}
+              onCheckedChange={(on) => toggle(source, on)}
             />
           </li>
         ))}
       </ul>
-      {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
       <p className="text-xs text-muted-foreground">Changes apply to the next message; they are not part of a version.</p>
     </div>
   );

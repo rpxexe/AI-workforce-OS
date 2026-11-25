@@ -1,19 +1,78 @@
 "use client";
 
-import { EVAL_DIMENSION_LABELS, EVALUATOR_KIND_LABELS, type EvaluationRecord, type EvaluatorVersionInfo } from "@workforce/shared";
+import { EVAL_DIMENSION_LABELS, EVALUATOR_KIND_LABELS, type EvaluationRecord, type EvaluatorInput, type EvaluatorVersionInfo } from "@workforce/shared";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { timeAgo } from "@/components/inbox/meta";
 import { EvaluatorForm } from "@/components/quality/evaluator-form";
 import { formatScore, Provenance, ResultBadge } from "@/components/quality/meta";
-import { ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { ErrorState, PageHeader } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 type Detail = { id: string; key: string | null; enabled: boolean; current: EvaluatorVersionInfo; versions: EvaluatorVersionInfo[]; evaluations: EvaluationRecord[] };
+
+const SAMPLE_DATE = "2026-01-01T00:00:00.000Z";
+
+const SAMPLE_VERSION: EvaluatorVersionInfo = {
+  id: "sample-version",
+  number: 3,
+  createdBy: "system",
+  createdAt: SAMPLE_DATE,
+  name: "Answer is grounded in knowledge",
+  description: "Checks that every fact in a reply comes from the attached knowledge sources.",
+  dimension: "grounding",
+  passScore: 70,
+  kind: "llm",
+  config: { rubric: "The answer only states facts found in the attached knowledge sources and says so when it does not know." },
+};
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: Detail = {
+  id: "sample-evaluator",
+  key: null,
+  enabled: true,
+  current: SAMPLE_VERSION,
+  versions: [3, 2, 1].map((number) => ({ ...SAMPLE_VERSION, id: `sample-version-${number}`, number })),
+  evaluations: Array.from({ length: 4 }, (_, i) => ({
+    id: `sample-${i}`,
+    conversationId: `sample-${i}`,
+    conversationTitle: "Customer asked about a delayed refund",
+    employee: { id: "sample-employee", name: "Priya Support" },
+    employeeVersion: 3,
+    provider: "openai",
+    model: "gpt-4o-mini",
+    workflow: null,
+    trigger: "auto",
+    status: "COMPLETED",
+    score: 78,
+    passed: true,
+    failures: 0,
+    messageCount: 12,
+    error: null,
+    createdAt: SAMPLE_DATE,
+    completedAt: SAMPLE_DATE,
+    results: [
+      {
+        id: `sample-result-${i}`,
+        evaluatorId: "sample-evaluator",
+        evaluatorName: "Answer is grounded in knowledge",
+        evaluatorVersion: 3,
+        dimension: "grounding",
+        kind: "llm",
+        status: "scored",
+        score: 78,
+        passed: true,
+        reason: "Every fact in the reply matches the refund policy document.",
+        findings: [],
+      },
+    ],
+  })),
+};
 
 export default withWorkspace(function EvaluatorPage({ workspace }) {
   const { id } = useParams<{ id: string }>();
@@ -23,9 +82,24 @@ export default withWorkspace(function EvaluatorPage({ workspace }) {
   const { data, error, reload } = useApiQuery<Detail>(path);
 
   if (error && !data) return <ErrorState message={error.message} onRetry={reload} />;
-  if (!data) return <LoadingState rows={6} />;
-  const { current } = data;
+  return (
+    <Skullet data={data} sample={SAMPLE} id="evaluator-detail" label="Loading evaluator">
+      {(data) => (
+        <EvaluatorView
+          data={data}
+          isAdmin={isAdmin}
+          onSave={async (body) => {
+            await api(path, { method: "PUT", body, toast: `${body.name} saved` });
+            reload();
+          }}
+        />
+      )}
+    </Skullet>
+  );
+});
 
+function EvaluatorView({ data, isAdmin, onSave }: { data: Detail; isAdmin: boolean; onSave: (body: EvaluatorInput) => Promise<void> }) {
+  const { current } = data;
   return (
     <div className="flex flex-col gap-6">
       <Link href="/quality" className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
@@ -50,10 +124,7 @@ export default withWorkspace(function EvaluatorPage({ workspace }) {
               initial={current}
               disabled={!isAdmin}
               submitLabel="Save as a new version"
-              onSubmit={async (body) => {
-                await api(path, { method: "PUT", body });
-                reload();
-              }}
+              onSubmit={onSave}
             />
           </CardContent>
         </Card>
@@ -114,4 +185,4 @@ export default withWorkspace(function EvaluatorPage({ workspace }) {
       </Card>
     </div>
   );
-});
+}

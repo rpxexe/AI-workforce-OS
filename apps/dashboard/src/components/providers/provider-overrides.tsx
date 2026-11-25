@@ -9,9 +9,12 @@ import {
   type ProviderOverrides,
   type ProviderSettings,
 } from "@workforce/shared";
+import { CircleAlert } from "lucide-react";
 import { useState } from "react";
 import { platformNames } from "@/components/providers/provider-list";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -105,7 +108,7 @@ function OverridesForm({
     if (!parsed.success) return;
     setSaving(true);
     try {
-      onSaved(await api<ProviderOverrides>(path, { method: "PUT", body: parsed.data }));
+      onSaved(await api<ProviderOverrides>(path, { method: "PUT", body: parsed.data, toast: "Providers saved" }));
     } catch (err) {
       if (err instanceof ApiRequestError) setErrors(Object.fromEntries(err.issues.map((i) => [i.path, i.message])));
       setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
@@ -197,9 +200,10 @@ function OverridesForm({
         })}
       </ul>
       {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">Changes apply from the next conversation or run; they are not part of a version.</p>

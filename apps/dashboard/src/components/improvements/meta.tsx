@@ -1,6 +1,8 @@
 import { KPI_LABELS, type KpiComparison, type RolloutInfo, type SuggestionStage } from "@workforce/shared";
 import { CircleCheck, CircleMinus, CircleX, FlaskConical, Hourglass, Loader, Percent, Rocket, Undo2, type LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Item } from "@/components/ui/item";
+import { Spinner } from "@/components/ui/spinner";
 
 const STAGES: Record<SuggestionStage, { label: string; icon: LucideIcon; variant?: "destructive" | "secondary" }> = {
   proposed: { label: "Proposed", icon: FlaskConical, variant: "secondary" },
@@ -17,7 +19,7 @@ export function StageBadge({ stage }: { stage: SuggestionStage }) {
   const { label, icon: Icon, variant } = STAGES[stage];
   return (
     <Badge variant={variant ?? "outline"} className="gap-1 font-normal">
-      <Icon className={stage === "testing" ? "size-3 animate-spin motion-reduce:animate-none" : "size-3"} aria-hidden />
+      {stage === "testing" ? <Spinner className="size-3 motion-reduce:animate-none" aria-hidden /> : <Icon className="size-3" aria-hidden />}
       {label}
     </Badge>
   );
@@ -52,11 +54,11 @@ export function KpiResult({ result }: { result: KpiComparison }) {
             ["Difference", result.difference === null ? "—" : `${result.difference > 0 ? "+" : ""}${Math.round(result.difference)}${unit}`, "new minus current"],
           ] as const
         ).map(([term, v, hint]) => (
-          <div key={term} className="flex flex-col gap-0.5 rounded-md border p-2.5">
+          <Item key={term} variant="outline" className="flex-col items-stretch gap-0.5 p-2.5">
             <dt className="text-xs text-muted-foreground">{term}</dt>
             <dd className="text-lg font-semibold tabular-nums">{v}</dd>
             <dd className="text-xs text-muted-foreground">{hint}</dd>
-          </div>
+          </Item>
         ))}
       </dl>
       <p className="text-xs text-muted-foreground">

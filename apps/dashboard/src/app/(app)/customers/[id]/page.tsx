@@ -12,15 +12,20 @@ import { ArrowLeft, Brain, Download, Eraser, MessagesSquare, Pencil, Trash2 } fr
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState, type FormEvent } from "react";
+import { toast } from "sonner";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { formatDate } from "@/components/employees/meta";
 import { CHANNEL_LABELS, ConversationStatusBadge, timeAgo } from "@/components/inbox/meta";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Item } from "@/components/ui/item";
+import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
@@ -32,7 +37,43 @@ const CATEGORY_LABELS: Record<MemoryCategory, string> = {
   follow_up: "Follow-up",
 };
 
-const messageOf = (err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: CustomerDetail = {
+  id: "sample",
+  externalId: "customer@example.com",
+  name: "Sample customer",
+  email: "customer@example.com",
+  phone: "+919876543210",
+  company: "Sample Traders Pvt Ltd",
+  lastSeenAt: "2026-01-01T00:00:00.000Z",
+  memories: (
+    [
+      ["identity", "full_name", "Sample customer"],
+      ["preference", "contact_time", "Weekday evenings after 6 pm"],
+      ["fact", "city", "Bengaluru"],
+      ["lead", "budget", "50000"],
+    ] satisfies [MemoryCategory, string, string][]
+  ).map(([category, key, value], i) => ({
+    id: `sample-${i}`,
+    category,
+    key,
+    value,
+    confidence: 0.9,
+    conversationId: "sample",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  })),
+  conversations: Array.from({ length: 3 }, (_, i) => ({
+    id: `sample-${i}`,
+    employeeId: "sample-employee",
+    channel: "web",
+    status: "RESOLVED",
+    title: "Question about an order",
+    summary: "The customer asked when their order would arrive and was given the courier's delivery date.",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  })),
+};
+
+const messageOf =(err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
 
 /** One remembered fact; admins edit the value in place. */
 function MemoryRow({ memory, base, isAdmin, onSaved, onDelete }: {
@@ -55,7 +96,7 @@ function MemoryRow({ memory, base, isAdmin, onSaved, onDelete }: {
     setSaving(true);
     setError(undefined);
     try {
-      await api(`${base}/memories/${memory.id}`, { method: "PATCH", body: parsed.data });
+      await api(`${base}/memories/${memory.id}`, { method: "PATCH", body: parsed.data, toast: `${memory.key} updated` });
       setDraft(null);
       onSaved();
     } catch (err) {
@@ -78,9 +119,9 @@ function MemoryRow({ memory, base, isAdmin, onSaved, onDelete }: {
           <span className="break-words">{memory.value}</span>
         ) : (
           <form onSubmit={save} className="flex flex-col gap-1.5">
-            <label htmlFor={inputId} className="sr-only">
+            <Label htmlFor={inputId} className="sr-only">
               Value of {memory.key}
-            </label>
+            </Label>
             <Input
               id={inputId}
               value={draft}
@@ -123,19 +164,28 @@ function MemoryRow({ memory, base, isAdmin, onSaved, onDelete }: {
       {isAdmin && (
         <TableCell>
           <span className="flex justify-end gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Edit ${memory.key}`}
-              title="Edit"
-              disabled={draft !== null}
-              onClick={() => setDraft(memory.value)}
-            >
-              <Pencil aria-hidden />
-            </Button>
-            <Button variant="ghost" size="icon" aria-label={`Delete ${memory.key}`} title="Delete" onClick={onDelete}>
-              <Trash2 aria-hidden />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Edit ${memory.key}`}
+                  disabled={draft !== null}
+                  onClick={() => setDraft(memory.value)}
+                >
+                  <Pencil aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Edit</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label={`Delete ${memory.key}`} onClick={onDelete}>
+                  <Trash2 aria-hidden />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Delete</TooltipContent>
+            </Tooltip>
           </span>
         </TableCell>
       )}
@@ -151,184 +201,185 @@ export default withWorkspace(function CustomerPage({ workspace }) {
   const { data, error, reload } = useApiQuery<CustomerDetail>(base);
   const { data: employees } = useApiQuery<EmployeeSummary[]>(`/workspaces/${workspace.id}/employees`);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
-  const [actionError, setActionError] = useState<string>();
   const [exporting, setExporting] = useState(false);
 
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
-  if (!data) return <LoadingState rows={6} />;
+  const view = (data: CustomerDetail) => {
+    const title = data.name ?? data.externalId;
+    const employeeName = (employeeId: string) => employees?.find((e) => e.id === employeeId)?.name ?? "AI employee";
 
-  const title = data.name ?? data.externalId;
-  const employeeName = (employeeId: string) => employees?.find((e) => e.id === employeeId)?.name ?? "AI employee";
+    const run = async (action: () => Promise<unknown>) => {
+      try {
+        await action();
+        reload();
+      } catch {
+        // The toast in useApi shows why it failed.
+      }
+    };
 
-  const run = async (action: () => Promise<unknown>) => {
-    setActionError(undefined);
-    try {
-      await action();
-      reload();
-    } catch (err) {
-      setActionError(messageOf(err));
-    }
+    const download = async () => {
+      setExporting(true);
+      try {
+        const file = await api<CustomerExport>(`${base}/export`);
+        const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }));
+        const link = Object.assign(document.createElement("a"), { href: url, download: `customer-${data.id}.json` });
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        // A GET, so useApi does not toast it.
+        toast.error(messageOf(err));
+      } finally {
+        setExporting(false);
+      }
+    };
+
+    const profile: [string, string | null][] = [
+      ["Name", data.name],
+      ["Email", data.email],
+      ["Phone", data.phone],
+      ["Company", data.company],
+      ["Channel id", data.externalId],
+      ["Last seen", timeAgo(data.lastSeenAt)],
+    ];
+
+    return (
+      <div className="flex flex-col gap-6">
+        <Link href="/customers" className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="size-4" aria-hidden />
+          Customers
+        </Link>
+
+        <PageHeader title={title} description="What AI employees know about this customer and recall in every conversation, on any channel.">
+          {isAdmin && (
+            <>
+              <Button variant="outline" onClick={download} disabled={exporting}>
+                <Download aria-hidden />
+                {exporting ? "Exporting" : "Export JSON"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={data.memories.length === 0 && data.conversations.every((c) => !c.summary)}
+                onClick={() =>
+                  setConfirm({
+                    title: `Clear memory for ${title}?`,
+                    description:
+                      "Every remembered fact, the profile built from them and all conversation summaries are deleted. AI employees will no longer recall them. Conversations and their messages stay. This cannot be undone.",
+                    confirmLabel: "Clear memory",
+                    onConfirm: () => run(() => api(`${base}/memories`, { method: "DELETE", toast: "Memory cleared" })),
+                  })
+                }
+              >
+                <Eraser aria-hidden />
+                Clear memory
+              </Button>
+            </>
+          )}
+        </PageHeader>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Profile</CardTitle>
+            <CardDescription>Kept in step with the identity facts below.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+              {profile.map(([label, value]) => (
+                <div key={label} className="min-w-0">
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="truncate">{value ?? "—"}</dd>
+                </div>
+              ))}
+            </dl>
+          </CardContent>
+        </Card>
+
+        <section className="flex flex-col gap-3" aria-labelledby="memories-heading">
+          <h2 id="memories-heading" className="font-medium">
+            Memories
+          </h2>
+          {data.memories.length === 0 ? (
+            <EmptyState icon={Brain} title="Nothing remembered" description="Facts the customer states in conversations, like their budget or preferred contact time, appear here." />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Key</TableHead>
+                  <TableHead>Value</TableHead>
+                  <TableHead className="hidden sm:table-cell">Confidence</TableHead>
+                  <TableHead className="hidden md:table-cell">Source</TableHead>
+                  <TableHead className="hidden lg:table-cell">Updated</TableHead>
+                  {isAdmin && (
+                    <TableHead className="w-24">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  )}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.memories.map((m) => (
+                  <MemoryRow
+                    key={m.id}
+                    memory={m}
+                    base={base}
+                    isAdmin={isAdmin}
+                    onSaved={reload}
+                    onDelete={() =>
+                      setConfirm({
+                        title: `Delete ${m.key}?`,
+                        description: `AI employees will no longer recall “${m.value}”. They may learn it again if the customer says it.`,
+                        confirmLabel: "Delete",
+                        onConfirm: () => run(() => api(`${base}/memories/${m.id}`, { method: "DELETE", toast: `${m.key} deleted` })),
+                      })
+                    }
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </section>
+
+        <section className="flex flex-col gap-3" aria-labelledby="conversations-heading">
+          <h2 id="conversations-heading" className="font-medium">
+            Conversations
+          </h2>
+          {data.conversations.length === 0 ? (
+            <EmptyState icon={MessagesSquare} title="No conversations" description="This customer's conversations on every channel appear here." />
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {data.conversations.map((c) => (
+                <li key={c.id}>
+                  <Item variant="outline" asChild className="flex-col items-stretch gap-1.5 bg-card p-4">
+                    <Link href={`/conversations/${c.id}`}>
+                      <span className="flex flex-wrap items-center gap-2 text-sm">
+                        <Badge variant="secondary" className="font-normal">
+                          {CHANNEL_LABELS[c.channel] ?? c.channel}
+                        </Badge>
+                        <span className="min-w-0 truncate font-medium">{c.title}</span>
+                        <ConversationStatusBadge status={c.status} />
+                      </span>
+                      <span className="text-sm text-muted-foreground">
+                        {c.summary || "No summary yet."}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {employeeName(c.employeeId)} · {formatDate(c.updatedAt)}
+                      </span>
+                    </Link>
+                  </Item>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
+      </div>
+    );
   };
-
-  const download = async () => {
-    setExporting(true);
-    setActionError(undefined);
-    try {
-      const file = await api<CustomerExport>(`${base}/export`);
-      const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: "application/json" }));
-      const link = Object.assign(document.createElement("a"), { href: url, download: `customer-${data.id}.json` });
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setActionError(messageOf(err));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const profile: [string, string | null][] = [
-    ["Name", data.name],
-    ["Email", data.email],
-    ["Phone", data.phone],
-    ["Company", data.company],
-    ["Channel id", data.externalId],
-    ["Last seen", timeAgo(data.lastSeenAt)],
-  ];
 
   return (
-    <div className="flex flex-col gap-6">
-      <Link href="/customers" className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeft className="size-4" aria-hidden />
-        Customers
-      </Link>
-
-      <PageHeader title={title} description="What AI employees know about this customer and recall in every conversation, on any channel.">
-        {isAdmin && (
-          <>
-            <Button variant="outline" onClick={download} disabled={exporting}>
-              <Download aria-hidden />
-              {exporting ? "Exporting" : "Export JSON"}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={data.memories.length === 0 && data.conversations.every((c) => !c.summary)}
-              onClick={() =>
-                setConfirm({
-                  title: `Clear memory for ${title}?`,
-                  description:
-                    "Every remembered fact, the profile built from them and all conversation summaries are deleted. AI employees will no longer recall them. Conversations and their messages stay. This cannot be undone.",
-                  confirmLabel: "Clear memory",
-                  onConfirm: () => run(() => api(`${base}/memories`, { method: "DELETE" })),
-                })
-              }
-            >
-              <Eraser aria-hidden />
-              Clear memory
-            </Button>
-          </>
-        )}
-      </PageHeader>
-
-      {actionError && <ErrorState message={actionError} />}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Profile</CardTitle>
-          <CardDescription>Kept in step with the identity facts below.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-            {profile.map(([label, value]) => (
-              <div key={label} className="min-w-0">
-                <dt className="text-muted-foreground">{label}</dt>
-                <dd className="truncate">{value ?? "—"}</dd>
-              </div>
-            ))}
-          </dl>
-        </CardContent>
-      </Card>
-
-      <section className="flex flex-col gap-3" aria-labelledby="memories-heading">
-        <h2 id="memories-heading" className="font-medium">
-          Memories
-        </h2>
-        {data.memories.length === 0 ? (
-          <EmptyState icon={Brain} title="Nothing remembered" description="Facts the customer states in conversations, like their budget or preferred contact time, appear here." />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Type</TableHead>
-                <TableHead>Key</TableHead>
-                <TableHead>Value</TableHead>
-                <TableHead className="hidden sm:table-cell">Confidence</TableHead>
-                <TableHead className="hidden md:table-cell">Source</TableHead>
-                <TableHead className="hidden lg:table-cell">Updated</TableHead>
-                {isAdmin && (
-                  <TableHead className="w-24">
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.memories.map((m) => (
-                <MemoryRow
-                  key={m.id}
-                  memory={m}
-                  base={base}
-                  isAdmin={isAdmin}
-                  onSaved={reload}
-                  onDelete={() =>
-                    setConfirm({
-                      title: `Delete ${m.key}?`,
-                      description: `AI employees will no longer recall “${m.value}”. They may learn it again if the customer says it.`,
-                      confirmLabel: "Delete",
-                      onConfirm: () => run(() => api(`${base}/memories/${m.id}`, { method: "DELETE" })),
-                    })
-                  }
-                />
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </section>
-
-      <section className="flex flex-col gap-3" aria-labelledby="conversations-heading">
-        <h2 id="conversations-heading" className="font-medium">
-          Conversations
-        </h2>
-        {data.conversations.length === 0 ? (
-          <EmptyState icon={MessagesSquare} title="No conversations" description="This customer's conversations on every channel appear here." />
-        ) : (
-          <ul className="flex flex-col gap-3">
-            {data.conversations.map((c) => (
-              <li key={c.id}>
-                <Link
-                  href={`/conversations/${c.id}`}
-                  className="flex flex-col gap-1.5 rounded-xl border bg-card p-4 hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                >
-                  <span className="flex flex-wrap items-center gap-2 text-sm">
-                    <Badge variant="secondary" className="font-normal">
-                      {CHANNEL_LABELS[c.channel] ?? c.channel}
-                    </Badge>
-                    <span className="min-w-0 truncate font-medium">{c.title}</span>
-                    <ConversationStatusBadge status={c.status} />
-                  </span>
-                  <span className="text-sm text-muted-foreground">
-                    {c.summary || "No summary yet."}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {employeeName(c.employeeId)} · {formatDate(c.updatedAt)}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
-    </div>
+    <Skullet data={data} sample={SAMPLE} id="customer-detail" label="Loading customer">
+      {view}
+    </Skullet>
   );
 });

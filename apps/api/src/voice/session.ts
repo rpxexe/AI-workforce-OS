@@ -3,7 +3,7 @@
 //
 //   phone audio -> STT -> caller turn -> runTurn (LLM, tools) -> text -> Speaker (TTS) -> phone
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { runTurn, type HandoffNotice } from "@workforce/agent-runtime";
+import { runTurn, type HandoffNotice, type HeldNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -40,6 +40,7 @@ export type SessionDeps = {
   tools: ToolExecutor;
   timeoutMs: number;
   onHandoff?: (notice: HandoffNotice) => void;
+  onHeld?: (notice: HeldNotice) => void;
   planLimits?: UsageLimiter;
   /** Where the provider reaches us (no trailing slash): the transfer result webhook is built from it. */
   publicUrl: string;
@@ -331,6 +332,7 @@ async function startCall(event: Extract<MediaEvent, { type: "start" }>, socket: 
       timeoutMs: deps.timeoutMs,
       signal: current.abort.signal,
       onHandoff: deps.onHandoff,
+      onHeld: deps.onHeld,
       planLimits: deps.planLimits,
     })) {
       if (result.type === "text") {

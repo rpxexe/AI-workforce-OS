@@ -68,6 +68,8 @@ export const agentMessageSchema = z.object({
   text: z.string().trim().min(1, "Write a message").max(4000),
   /** The Copilot suggestion the message started from, if any. */
   suggestionId: z.string().min(1).optional(),
+  /** The agent's name, shown to the customer in the web chat widget. */
+  name: z.string().trim().max(80).optional(),
 });
 
 export const analyticsQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) });
@@ -153,3 +155,16 @@ export type HandoffAnalytics = {
   byAgent: { agentId: string; handoffs: number; resolved: number; firstResponse: DurationStats }[];
   suggestions: { total: number; used: number };
 };
+
+/**
+ * What the dashboard's live stream (GET /workspaces/:workspaceId/events) sends. `handoff` with `reminder`
+ * repeats an unanswered handoff after the employee's reminder time; `inbox_changed` asks for fresh counts.
+ */
+export type LiveEvent =
+  | { type: "handoff"; conversationId: string; employeeName: string; reason: string; reminder: boolean; waitingMinutes: number }
+  | { type: "customer_message"; conversationId: string; assignedTo: string | null; preview: string }
+  | { type: "assigned"; conversationId: string; assignedTo: string; by: string }
+  | { type: "inbox_changed" };
+
+/** An agent typing a reply; the name is shown to the customer in the web chat widget. */
+export const agentTypingSchema = z.object({ name: z.string().trim().max(80) });

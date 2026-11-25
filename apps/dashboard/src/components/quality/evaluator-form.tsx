@@ -13,9 +13,11 @@ import {
   type EvaluatorInput,
   type EvaluatorKind,
 } from "@workforce/shared";
-import { Plus, Trash2 } from "lucide-react";
+import { CircleAlert, Plus, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -163,29 +165,31 @@ export function EvaluatorForm({
             </div>
             <p className="text-xs text-muted-foreground">Phrases match whole words, ignoring case. Separate them with commas. The score is the share of rules that held.</p>
             {rules.map((r, i) => (
-              <div key={i} className="grid gap-2 rounded-lg border p-3 sm:grid-cols-[1fr_9rem_auto]">
-                <Input aria-label={`Rule ${i + 1} name`} placeholder="Rule name" value={r.label} onChange={(e) => setRule(i, { label: e.target.value })} />
-                <Select value={r.match} onValueChange={(v) => setRule(i, { match: v as Rule["match"] })}>
-                  <SelectTrigger aria-label={`Rule ${i + 1} kind`} className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="forbid">Must not say</SelectItem>
-                    <SelectItem value="require">Must say</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button type="button" variant="ghost" size="icon" onClick={() => setRules(rules.filter((_, j) => j !== i))} disabled={rules.length === 1} aria-label={`Remove rule ${i + 1}`}>
-                  <Trash2 aria-hidden />
-                </Button>
-                <Textarea
-                  aria-label={`Rule ${i + 1} phrases`}
-                  placeholder="guaranteed, I promise"
-                  value={r.phrases}
-                  onChange={(e) => setRule(i, { phrases: e.target.value })}
-                  rows={2}
-                  className="sm:col-span-3"
-                />
-              </div>
+              <Card key={i} size="sm">
+                <CardContent className="grid gap-2 sm:grid-cols-[1fr_9rem_auto]">
+                    <Input aria-label={`Rule ${i + 1} name`} placeholder="Rule name" value={r.label} onChange={(e) => setRule(i, { label: e.target.value })} />
+                    <Select value={r.match} onValueChange={(v) => setRule(i, { match: v as Rule["match"] })}>
+                      <SelectTrigger aria-label={`Rule ${i + 1} kind`} className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="forbid">Must not say</SelectItem>
+                        <SelectItem value="require">Must say</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" variant="ghost" size="icon" onClick={() => setRules(rules.filter((_, j) => j !== i))} disabled={rules.length === 1} aria-label={`Remove rule ${i + 1}`}>
+                      <Trash2 aria-hidden />
+                    </Button>
+                    <Textarea
+                      aria-label={`Rule ${i + 1} phrases`}
+                      placeholder="guaranteed, I promise"
+                      value={r.phrases}
+                      onChange={(e) => setRule(i, { phrases: e.target.value })}
+                      rows={2}
+                      className="sm:col-span-3"
+                    />
+                </CardContent>
+              </Card>
             ))}
             <Button type="button" variant="outline" className="w-fit" onClick={() => setRules([...rules, { label: "", match: "forbid", phrases: "" }])} disabled={rules.length >= 20}>
               <Plus aria-hidden />
@@ -228,11 +232,16 @@ export function EvaluatorForm({
       </fieldset>
 
       {errors.length > 0 && (
-        <ul role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
-          {errors.map((e) => (
-            <li key={e}>{e}</li>
-          ))}
-        </ul>
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden />
+          <AlertDescription>
+            <ul>
+              {errors.map((e) => (
+                <li key={e}>{e}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
       )}
       {!disabled && (
         <Button type="submit" className="w-fit" disabled={saving}>

@@ -1,21 +1,57 @@
 "use client";
 
-import { LIMIT_LABELS, USAGE_KIND_LABELS, type BillingOverview, type LimitUsage, type PlanId } from "@workforce/shared";
+import { LIMIT_KEYS, LIMIT_LABELS, PLAN_IDS, PLANS, USAGE_KIND_LABELS, USAGE_KINDS, type BillingOverview, type LimitUsage, type PlanId } from "@workforce/shared";
 import { useSearchParams } from "next/navigation";
+import { DollarSign } from "lucide-react";
 import { Suspense, useState } from "react";
-import { ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { ErrorState, PageHeader, StatTile } from "@/components/states";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useApi, useApiQuery } from "@/lib/api";
+import { useApi, useApiQuery, type ToastOption } from "@/lib/api";
 import { useIsAdmin } from "@/lib/workspace";
+import { TablePager, usePaged } from "@/components/table-pager";
 
 const usd = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const date = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "—");
 const amount = (cents: number, currency: string) => `${(cents / 100).toLocaleString("en-US", { style: "currency", currency: currency.toUpperCase() })}`;
 const number = (n: number) => (Number.isInteger(n) ? n.toLocaleString("en-US") : n.toLocaleString("en-US", { maximumFractionDigits: 2 }));
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: BillingOverview = {
+  stripe: true,
+  enforced: true,
+  plan: "starter",
+  status: "active",
+  period: { start: "2026-01-01T00:00:00.000Z", end: "2026-02-01T00:00:00.000Z" },
+  cancelAtPeriodEnd: false,
+  hasSubscription: true,
+  limits: LIMIT_KEYS.map((key) => ({ key, label: LIMIT_LABELS[key], used: 40, limit: PLANS.starter.limits[key] })),
+  usage: {
+    from: "2026-01-01T00:00:00.000Z",
+    to: "2026-02-01T00:00:00.000Z",
+    byKind: USAGE_KINDS.map((kind) => ({ kind, quantity: 1250, events: 320 })),
+    amountUsd: 18.4,
+    recent: Array.from({ length: 5 }, (_, i) => ({
+      id: `sample-${i}`,
+      kind: "message",
+      quantity: 12,
+      amountUsd: 0.36,
+      sourceType: "conversation",
+      sourceId: "cm0sampleconversation000000",
+      workspaceId: null,
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      detail: null,
+    })),
+  },
+  invoices: [],
+  plans: PLAN_IDS.map((id) => ({ id, ...PLANS[id] })),
+};
 
 /** One limit: used of allowed, with a bar that turns red at the limit. */
 function LimitRow({ l }: { l: LimitUsage }) {
@@ -28,9 +64,7 @@ function LimitRow({ l }: { l: LimitUsage }) {
           {l.key === "aiUsageUsd" ? `${usd(l.used)} of ${usd(l.limit)}` : `${number(l.used)} of ${number(l.limit)}`}
         </span>
       </div>
-      <div className="h-2 rounded-r-[4px] bg-muted" aria-hidden>
-        <div className={`h-full rounded-r-[4px] ${share >= 1 ? "bg-destructive" : "bg-primary"}`} style={{ width: `${share * 100}%` }} />
-      </div>
+      <Progress value={share * 100} className={share >= 1 ? "h-2 *:data-[slot=progress-indicator]:bg-destructive" : "h-2"} aria-hidden />
     </li>
   );
 }
@@ -41,45 +75,62 @@ function Billing() {
   const isAdmin = useIsAdmin();
   const search = useSearchParams();
   const [busy, setBusy] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
 
-  const go = async (key: string, path: string, body?: unknown) => {
+  const go = async (key: string, path: string, toast: ToastOption, body?: unknown) => {
     setBusy(key);
-    setActionError(null);
     try {
-      const { url } = await api<{ url: string | null }>(path, { method: "POST", body });
+      const { url } = await api<{ url: string | null }>(path, { method: "POST", body, toast });
       if (url) window.location.assign(url);
       else reload();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Something went wrong");
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(null);
     }
   };
-  const choose = (plan: PlanId) => go(plan, "/billing/checkout", { plan });
+  const choose = (plan: PlanId) =>
+    go(plan, "/billing/checkout", { loading: "Contacting Stripe…", success: `Switch to ${PLANS[plan].name} started` }, { plan });
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Billing" description="Your plan, what this period has used, invoices, and the limits that apply.">
         {data?.hasSubscription && isAdmin && (
-          <Button variant="outline" disabled={busy !== null} onClick={() => go("portal", "/billing/portal")}>
+          <Button variant="outline" disabled={busy !== null} onClick={() => go("portal", "/billing/portal", { loading: "Opening the billing portal…", success: "Billing portal opened" })}>
             Manage payment and invoices
           </Button>
         )}
       </PageHeader>
 
-      {search.get("checkout") === "success" && <p className="rounded-lg border p-3 text-sm">Thanks. Your plan updates here as soon as Stripe confirms the payment.</p>}
-      {actionError && (
-        <p role="alert" className="rounded-lg border border-destructive/50 p-3 text-sm text-destructive">
-          {actionError}
-        </p>
+      {search.get("checkout") === "success" && (
+        <Alert role="status">
+          <AlertDescription>Thanks. Your plan updates here as soon as Stripe confirms the payment.</AlertDescription>
+        </Alert>
       )}
 
       {error && !data ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState rows={4} />
       ) : (
+        <Skullet data={data} sample={SAMPLE} id="billing" label="Loading billing">
+          {(data) => <BillingTabs data={data} isAdmin={isAdmin} busy={busy} choose={choose} />}
+        </Skullet>
+      )}
+    </div>
+  );
+}
+
+function BillingTabs({
+  data,
+  isAdmin,
+  busy,
+  choose,
+}: {
+  data: BillingOverview;
+  isAdmin: boolean;
+  busy: string | null;
+  choose: (plan: PlanId) => void;
+}) {
+  const usage = usePaged(data.usage.recent, 20);
+  return (
         <Tabs defaultValue="plan">
           <TabsList>
             <TabsTrigger value="plan">Plan</TabsTrigger>
@@ -138,10 +189,7 @@ function Billing() {
 
           <TabsContent value="usage" className="flex flex-col gap-4">
             <section aria-label="This period" className="grid gap-3 sm:grid-cols-3">
-              <div className="flex flex-col gap-1 rounded-lg border p-4">
-                <span className="text-sm text-muted-foreground">Usage billed this period</span>
-                <span className="text-2xl font-semibold tabular-nums">{usd(data.usage.amountUsd)}</span>
-              </div>
+              <StatTile label="Usage billed this period" icon={DollarSign} value={usd(data.usage.amountUsd)} />
             </section>
             <Card>
               <CardHeader>
@@ -176,6 +224,7 @@ function Billing() {
                 {data.usage.recent.length === 0 ? (
                   <p className="text-sm text-muted-foreground">Nothing recorded this period yet.</p>
                 ) : (
+                <>
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -187,7 +236,7 @@ function Billing() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.usage.recent.map((e) => (
+                      {usage.rows.map((e) => (
                         <TableRow key={e.id}>
                           <TableCell className="whitespace-nowrap">{new Date(e.occurredAt).toLocaleString()}</TableCell>
                           <TableCell>{USAGE_KIND_LABELS[e.kind]}</TableCell>
@@ -200,6 +249,8 @@ function Billing() {
                       ))}
                     </TableBody>
                   </Table>
+                  <TablePager {...usage.pager} />
+                </>
                 )}
               </CardContent>
             </Card>
@@ -266,8 +317,6 @@ function Billing() {
             </Card>
           </TabsContent>
         </Tabs>
-      )}
-    </div>
   );
 }
 

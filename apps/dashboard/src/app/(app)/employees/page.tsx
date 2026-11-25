@@ -1,14 +1,19 @@
 "use client";
 
 import type { EmployeeDetail, EmployeeSummary } from "@workforce/shared";
-import { Archive, Bot, Copy, Ellipsis, Eye, Pencil, Plus, Undo2 } from "lucide-react";
+import { Archive, Bot, Copy, Ellipsis, Eye, Pencil, Plus, Search, SearchX, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
+import { matchesSearch, summarizeEmployees } from "@/components/employees/helpers.ts";
 import { EmployeeAvatar, StatusBadge, formatDate, versionLabel } from "@/components/employees/meta";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,6 +26,21 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LANGUAGES } from "@workforce/shared";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
+import { TablePager, usePaged } from "@/components/table-pager";
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
+  id: `sample-${i}`,
+  name: "Sample employee",
+  role: "Customer support agent",
+  description: "",
+  avatar: "bot",
+  language: "en",
+  status: "ACTIVE",
+  latestVersion: 2,
+  publishedVersion: 1,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+}));
 
 export default withWorkspace(function EmployeesPage({ workspace }) {
   const isAdmin = useIsAdmin();
@@ -29,25 +49,32 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
   const base = `/workspaces/${workspace.id}/employees`;
 
   const [archived, setArchived] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const { data, error, loading, reload } = useApiQuery<EmployeeSummary[]>(`${base}?archived=${archived}`);
-  const [actionError, setActionError] = useState<string>();
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
+  const nameOf = (id: string) => data?.find((e) => e.id === id)?.name ?? "Employee";
 
-  /** Runs a row action, then refreshes the list or reports why it failed. */
+  /** Runs a row action, then refreshes the list. */
   const run = async (action: () => Promise<unknown>) => {
-    setActionError(undefined);
     try {
       await action();
       reload();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+    } catch {
+      // The toast in useApi shows why it failed.
     }
   };
   const setStatus = (id: string, status: "PAUSED" | "ARCHIVED") =>
-    run(() => api(`${base}/${id}/status`, { method: "PATCH", body: { status } }));
+    run(() =>
+      api(`${base}/${id}/status`, {
+        method: "PATCH",
+        body: { status },
+        toast: `${nameOf(id)} ${status === "ARCHIVED" ? "archived" : "restored"}`,
+      }),
+    );
   const duplicate = (id: string) =>
     run(async () => {
-      const copy = await api<EmployeeDetail>(`${base}/${id}/duplicate`, { method: "POST" });
+      const copy = await api<EmployeeDetail>(`${base}/${id}/duplicate`, { method: "POST", toast: `${nameOf(id)} duplicated` });
       router.push(`/employees/${copy.id}`);
     });
 
@@ -66,20 +93,102 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
         {newButton}
       </PageHeader>
 
-      <Tabs value={archived ? "archived" : "current"} onValueChange={(v) => setArchived(v === "archived")}>
+      <Tabs value={archived ? "archived" : "current"} onValueChange={(v) => {
+          setArchived(v === "archived");
+          setQuery("");
+        }}
+      >
         <TabsList>
           <TabsTrigger value="current">Current</TabsTrigger>
           <TabsTrigger value="archived">Archived</TabsTrigger>
         </TabsList>
       </Tabs>
 
-      {actionError && <ErrorState message={actionError} />}
+      {!error && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <InputGroup className="sm:max-w-xs">
+            <InputGroupAddon>
+              <Search aria-hidden />
+            </InputGroupAddon>
+            <InputGroupInput
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or role"
+              aria-label="Search by name or role"
+            />
+          </InputGroup>
+          {data && !archived && <Counts data={data} />}
+        </div>
+      )}
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState />
-      ) : data.length === 0 ? (
+      ) : (
+        <Skullet data={data} sample={SAMPLE} id="employees-list" label="Loading employees">
+          {(data) => (
+            <EmployeeList
+              data={data}
+              archived={archived}
+              query={query}
+              clearQuery={() => {
+                setQuery("");
+                // The Clear button unmounts with the empty state; keep keyboard focus in the search box.
+                searchRef.current?.focus();
+              }}
+              isAdmin={isAdmin}
+              loading={loading}
+              newButton={newButton}
+              duplicate={duplicate}
+              setStatus={setStatus}
+              setConfirm={setConfirm}
+            />
+          )}
+        </Skullet>
+      )}
+
+      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
+    </div>
+  );
+});
+
+function Counts({ data }: { data: EmployeeSummary[] }) {
+  const { active, paused, draft } = summarizeEmployees(data);
+  return (
+    <div className="flex flex-wrap gap-2">
+      <Badge variant="outline">{active} active</Badge>
+      <Badge variant="outline">{paused} paused</Badge>
+      <Badge variant="outline">{draft} draft</Badge>
+    </div>
+  );
+}
+
+function EmployeeList({
+  data,
+  archived,
+  query,
+  clearQuery,
+  isAdmin,
+  loading,
+  newButton,
+  duplicate,
+  setStatus,
+  setConfirm,
+}: {
+  data: EmployeeSummary[];
+  archived: boolean;
+  query: string;
+  clearQuery: () => void;
+  isAdmin: boolean;
+  loading: boolean;
+  newButton: ReactNode;
+  duplicate: (id: string) => void;
+  setStatus: (id: string, status: "PAUSED" | "ARCHIVED") => void;
+  setConfirm: (confirm: Confirmation) => void;
+}) {
+  const matches = data.filter((e) => matchesSearch(e, query));
+  const employees = usePaged(matches, 20, `${archived}:${query}`);
+  return data.length === 0 ? (
         archived ? (
           <EmptyState icon={Archive} title="No archived employees" description="Employees you archive are kept here and can be restored." />
         ) : (
@@ -95,8 +204,14 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
             {newButton}
           </EmptyState>
         )
+      ) : matches.length === 0 ? (
+        <EmptyState icon={SearchX} title={`No employees match "${query.trim()}"`} description="Try another name or role.">
+          <Button variant="outline" onClick={clearQuery}>
+            Clear search
+          </Button>
+        </EmptyState>
       ) : (
-        <div className={`rounded-lg border ${loading ? "opacity-60" : ""}`} aria-busy={loading}>
+        <Card className={`gap-0 py-0 ${loading ? "opacity-60" : ""}`} aria-busy={loading}>
           <Table>
             <TableHeader>
               <TableRow>
@@ -111,7 +226,7 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((e) => (
+              {employees.rows.map((e) => (
                 <TableRow key={e.id}>
                   <TableCell>
                     <Link href={`/employees/${e.id}`} className="group flex min-w-0 items-center gap-3">
@@ -126,8 +241,15 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
                     <StatusBadge status={e.status} />
                   </TableCell>
                   <TableCell className="hidden md:table-cell">{LANGUAGES[e.language]}</TableCell>
-                  <TableCell className="hidden text-muted-foreground tabular-nums sm:table-cell">
-                    {versionLabel(e.latestVersion, e.publishedVersion)}
+                  <TableCell className="hidden sm:table-cell">
+                    <span className="flex flex-wrap gap-1.5" title={versionLabel(e.latestVersion, e.publishedVersion)}>
+                      {e.publishedVersion !== null && <Badge className="tabular-nums">Live v{e.publishedVersion}</Badge>}
+                      {e.latestVersion !== e.publishedVersion && (
+                        <Badge variant="secondary" className="tabular-nums">
+                          Draft v{e.latestVersion}
+                        </Badge>
+                      )}
+                    </span>
                   </TableCell>
                   <TableCell className="hidden text-muted-foreground lg:table-cell">{formatDate(e.updatedAt)}</TableCell>
                   <TableCell>
@@ -188,10 +310,7 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
               ))}
             </TableBody>
           </Table>
-        </div>
-      )}
-
-      <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
-    </div>
-  );
-});
+          <TablePager {...employees.pager} className="px-4 pb-3" />
+        </Card>
+      );
+}

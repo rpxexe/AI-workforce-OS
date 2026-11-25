@@ -11,6 +11,8 @@ import { Hand, Play, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { EmptyState, ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -18,9 +20,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { RunStatusBadge, formatTime } from "@/components/workflows/meta";
 import { WorkflowCanvas } from "@/components/workflows/workflow-canvas";
 import { useApi, useApiQuery } from "@/lib/api";
+import { TablePager, usePaged } from "@/components/table-pager";
 
 const ACTIVE = ["QUEUED", "RUNNING", "WAITING"];
-const message = (err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
 
 /** Reloads every 2 seconds while `active`. */
 function usePolling(active: boolean, reload: () => void) {
@@ -44,18 +46,21 @@ function RunDetail({ workspaceId, executionId, isAdmin }: { workspaceId: string;
   const api = useApi();
   const path = `/workspaces/${workspaceId}/workflow-executions/${executionId}`;
   const { data, error, reload, setData } = useApiQuery<WorkflowExecutionDetail>(path);
-  const [actionError, setActionError] = useState<string>();
   usePolling(data !== undefined && ACTIVE.includes(data.status), reload);
 
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   if (!data) return <Skeleton className="h-64 w-full" />;
 
   const act = async (action: "retry" | "resume") => {
-    setActionError(undefined);
     try {
-      setData(await api<WorkflowExecutionDetail>(`${path}/${action}`, { method: "POST" }));
-    } catch (err) {
-      setActionError(message(err));
+      setData(
+        await api<WorkflowExecutionDetail>(`${path}/${action}`, {
+          method: "POST",
+          toast: action === "retry" ? "Run retried from the failed step" : "Run continued",
+        }),
+      );
+    } catch {
+      // The toast in useApi shows why it failed.
     }
   };
   // The latest attempt at each node decides its colour on the canvas.
@@ -88,36 +93,39 @@ function RunDetail({ workspaceId, executionId, isAdmin }: { workspaceId: string;
         </div>
       </div>
       {data.error && <ErrorState message={data.error} />}
-      {actionError && <ErrorState message={actionError} />}
       <WorkflowCanvas definition={data.definition} statuses={statuses} readOnly className="h-[320px]" />
       <ol className="flex flex-col gap-2">
         {data.steps.map((step) => (
-          <li key={step.id} className="rounded-lg border p-3">
-            <details>
-              <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
-                <span className="font-medium">{names.get(step.nodeId) ?? step.nodeId}</span>
-                <span className="text-muted-foreground">{NODE_LABELS[step.nodeType]}</span>
-                {step.attempt > 1 && <span className="text-muted-foreground">attempt {step.attempt}</span>}
-                <span className="ml-auto">
-                  <RunStatusBadge status={step.status} />
-                </span>
-              </summary>
-              <div className="mt-3 flex flex-col gap-2 text-xs">
-                {step.error && <p className="text-destructive">{step.error}</p>}
-                {step.input !== null && (
-                  <>
-                    <span className="text-muted-foreground">Settings used</span>
-                    <Json value={step.input} />
-                  </>
-                )}
-                {step.output !== null && (
-                  <>
-                    <span className="text-muted-foreground">Result</span>
-                    <Json value={step.output} />
-                  </>
-                )}
-              </div>
-            </details>
+          <li key={step.id}>
+            <Card size="sm">
+              <CardContent>
+                <Collapsible>
+                  <CollapsibleTrigger className="flex w-full cursor-pointer flex-wrap items-center gap-2 rounded-sm text-left text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+                    <span className="font-medium">{names.get(step.nodeId) ?? step.nodeId}</span>
+                    <span className="text-muted-foreground">{NODE_LABELS[step.nodeType]}</span>
+                    {step.attempt > 1 && <span className="text-muted-foreground">attempt {step.attempt}</span>}
+                    <span className="ml-auto">
+                      <RunStatusBadge status={step.status} />
+                    </span>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-3 flex flex-col gap-2 text-xs">
+                    {step.error && <p className="text-destructive">{step.error}</p>}
+                    {step.input !== null && (
+                      <>
+                        <span className="text-muted-foreground">Settings used</span>
+                        <Json value={step.input} />
+                      </>
+                    )}
+                    {step.output !== null && (
+                      <>
+                        <span className="text-muted-foreground">Result</span>
+                        <Json value={step.output} />
+                      </>
+                    )}
+                  </CollapsibleContent>
+                </Collapsible>
+              </CardContent>
+            </Card>
           </li>
         ))}
       </ol>
@@ -134,6 +142,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
   const api = useApi();
   const path = `/workspaces/${workspaceId}/workflows/${workflow.id}/executions`;
   const { data, error, reload } = useApiQuery<WorkflowExecutionSummary[]>(path);
+  const runs = usePaged(data ?? [], 20);
   const [input, setInput] = useState("{\n}");
   const [selected, setSelected] = useState<string>();
   const [runError, setRunError] = useState<string>();
@@ -150,11 +159,11 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
     }
     setStarting(true);
     try {
-      const run = await api<WorkflowExecutionSummary>(path, { method: "POST", body: { input: parsed } });
+      const run = await api<WorkflowExecutionSummary>(path, { method: "POST", body: { input: parsed }, toast: "Run started" });
       setSelected(run.id);
       reload();
-    } catch (err) {
-      setRunError(message(err));
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setStarting(false);
     }
@@ -164,22 +173,24 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
     <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
       <div className="flex flex-col gap-4">
         {isAdmin && (
-          <div className="flex flex-col gap-2 rounded-lg border p-4">
-            <Label htmlFor="run-input">Trigger data (JSON)</Label>
-            <Textarea id="run-input" rows={5} className="font-mono text-xs" value={input} onChange={(e) => setInput(e.target.value)} />
-            <p className="text-xs text-muted-foreground">
-              {workflow.status === "ACTIVE"
-                ? `Runs the published version (v${workflow.publishedVersion}).`
-                : workflow.status === "PAUSED"
-                  ? "The workflow is paused. Resume it to run it."
-                  : "Publish the workflow to run it."}
-            </p>
-            {runError && <p className="text-sm text-destructive">{runError}</p>}
-            <Button className="w-fit" onClick={start} disabled={starting || workflow.status !== "ACTIVE"}>
-              <Play aria-hidden />
-              Run now
-            </Button>
-          </div>
+          <Card>
+            <CardContent className="flex flex-col gap-2">
+              <Label htmlFor="run-input">Trigger data (JSON)</Label>
+              <Textarea id="run-input" rows={5} className="font-mono text-xs" value={input} onChange={(e) => setInput(e.target.value)} />
+              <p className="text-xs text-muted-foreground">
+                {workflow.status === "ACTIVE"
+                  ? `Runs the published version (v${workflow.publishedVersion}).`
+                  : workflow.status === "PAUSED"
+                    ? "The workflow is paused. Resume it to run it."
+                    : "Publish the workflow to run it."}
+              </p>
+              {runError && <p className="text-sm text-destructive">{runError}</p>}
+              <Button className="w-fit" onClick={start} disabled={starting || workflow.status !== "ACTIVE"}>
+                <Play aria-hidden />
+                Run now
+              </Button>
+            </CardContent>
+          </Card>
         )}
         {error ? (
           <ErrorState message={error.message} onRetry={reload} />
@@ -188,7 +199,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
         ) : data.length === 0 ? (
           <EmptyState icon={Play} title="No runs yet" description="Runs appear here when the workflow is started." />
         ) : (
-          <div className="rounded-lg border">
+          <Card className="py-0">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -198,12 +209,12 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.map((run) => (
+                {runs.rows.map((run) => (
                   <TableRow key={run.id} data-state={run.id === selected ? "selected" : undefined} className="cursor-pointer" onClick={() => setSelected(run.id)}>
                     <TableCell>
-                      <button type="button" className="text-left hover:underline" onClick={() => setSelected(run.id)}>
+                      <Button type="button" variant="link" className="h-auto p-0 font-normal text-foreground" onClick={() => setSelected(run.id)}>
                         {formatTime(run.createdAt)}
-                      </button>
+                      </Button>
                       <span className="block text-xs text-muted-foreground">{run.startedBy === "webhook" ? "Webhook" : run.startedBy.startsWith("api:") ? "API" : "Manual"}</span>
                     </TableCell>
                     <TableCell>
@@ -214,8 +225,10 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
                 ))}
               </TableBody>
             </Table>
-          </div>
+            <TablePager {...runs.pager} className="px-4 pb-3" />
+          </Card>
         )}
+
       </div>
       <div>
         {selected ? (

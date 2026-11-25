@@ -1,8 +1,10 @@
 "use client";
 
 import { checkFields, type ModelInfo, type ProviderConnectionInfo, type ProviderField, type ProviderMeta } from "@workforce/shared";
+import { CircleAlert } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { ModelsEditor, toModels, toRow, type ModelRow } from "@/components/ai/models-editor";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -78,10 +80,13 @@ function ConnectionForm({ request, canStoreKeys, onSaved, onCancel }: { request:
 
   if (showSecrets && !canStoreKeys)
     return (
-      <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-        Credentials cannot be stored yet: the server has no AI_CREDENTIALS_KEY, the key it seals secrets with. Add it to the server&apos;s .env and
-        restart the API, then connect {meta.name} here.
-      </p>
+      <Alert role="status">
+        <AlertDescription>
+          Credentials cannot be stored yet: the server has no AI_CREDENTIALS_KEY, the key it seals secrets with. Add it to the server&apos;s .env and
+          restart the API, then connect {meta.name} here.
+        </AlertDescription>
+      </Alert>
+
     );
 
   const credentials = Object.fromEntries(
@@ -107,10 +112,15 @@ function ConnectionForm({ request, canStoreKeys, onSaved, onCancel }: { request:
         await api("/providers/connections", {
           method: "POST",
           body: { providerType: meta.type, providerId: meta.id, displayName: draft.displayName.trim(), credentials, configuration },
+          toast: { loading: `Connecting ${meta.name}…`, success: `${meta.name} connected` },
         });
       else if (mode === "configure")
-        await api(`/providers/connections/${connection?.id}`, { method: "PATCH", body: { displayName: draft.displayName.trim(), configuration } });
-      else await api(`/providers/connections/${connection?.id}/rotate`, { method: "POST", body: { credentials } });
+        await api(`/providers/connections/${connection?.id}`, {
+          method: "PATCH",
+          body: { displayName: draft.displayName.trim(), configuration },
+          toast: `${draft.displayName.trim()} saved`,
+        });
+      else await api(`/providers/connections/${connection?.id}/rotate`, { method: "POST", body: { credentials }, toast: `${connection?.displayName ?? meta.name} credentials rotated` });
       onSaved();
     } catch (err) {
       const fieldIssues = err instanceof ApiRequestError ? err.issues : [];
@@ -220,9 +230,10 @@ function ConnectionForm({ request, canStoreKeys, onSaved, onCancel }: { request:
       )}
 
       {error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
       <div className="flex gap-2">
         <Button type="submit" disabled={saving}>

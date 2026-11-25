@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { runTurn, toMessage, type HandoffNotice } from "@workforce/agent-runtime";
+import { runTurn, toMessage, type HandoffNotice, type HeldNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -43,6 +43,7 @@ export function conversationRoutes(
     tools: ToolExecutor;
     timeoutMs: number;
     onHandoff?: (notice: HandoffNotice) => void;
+    onHeld?: (notice: HeldNotice) => void;
     planLimits?: UsageLimiter;
   },
 ) {
@@ -150,6 +151,7 @@ export function conversationRoutes(
       timeoutMs: ai.timeoutMs,
       signal: gone.signal,
       onHandoff: ai.onHandoff,
+      onHeld: ai.onHeld,
       planLimits: ai.planLimits,
     });
     const events = async function* () {

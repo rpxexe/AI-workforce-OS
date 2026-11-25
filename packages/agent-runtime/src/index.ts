@@ -66,6 +66,8 @@ export type TurnInput = {
   signal?: AbortSignal;
   /** Called (not awaited) after a turn hands the conversation to people. */
   onHandoff?: (notice: HandoffNotice) => void;
+  /** Called (not awaited) when a customer writes while people have the conversation, so they can be told. */
+  onHeld?: (notice: HeldNotice) => void;
   /** Plan limits (Phase 16): checked before the model is called; a refusal ends the turn with a `limit` error and saves nothing. */
   planLimits?: UsageLimiter;
 };
@@ -82,6 +84,19 @@ export type HandoffNotice = {
   reason: string;
   /** The employee's escalation contact; empty when none is set. */
   contactEmail: string;
+  /** Minutes after which to remind people when nobody has taken the conversation; 0 means never. */
+  reminderMinutes: number;
+};
+
+/** Told when a customer writes while people have the conversation. */
+export type HeldNotice = {
+  organizationId: string;
+  workspaceId: string;
+  employeeId: string;
+  conversationId: string;
+  /** The person handling it; null while it waits in the queue. */
+  assignedTo: string | null;
+  message: string;
 };
 
 export type TurnEvent =
@@ -183,6 +198,11 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
     });
     const [message] = saved.messages;
     if (!message) throw new Error("Saved message is missing");
+    try {
+      input.onHeld?.({ ...tenant, conversationId: id, assignedTo: saved.assignedTo, message: userMessage });
+    } catch {
+      // A failed notification must not lose the message.
+    }
     return { type: "held", conversation: toSummary(saved), message: toMessage(message) };
   };
 
@@ -279,6 +299,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
           handoffId: started.id,
           ...handoff,
           contactEmail: escalation.contactEmail,
+          reminderMinutes: escalation.reminderMinutes,
         });
       } catch {
         // A failed notification must not lose the reply.
