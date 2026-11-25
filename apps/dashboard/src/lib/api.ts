@@ -3,6 +3,7 @@
 import { useAuth } from "@clerk/nextjs";
 import type { ApiError } from "@workforce/shared";
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -17,11 +18,43 @@ export class ApiRequestError extends Error {
   }
 }
 
-/** `file` sends the file itself as the request body (uploads); otherwise `body` is sent as JSON. */
-type Init = { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; file?: File };
+/**
+ * What a change announces as a toast. A string is the success message; `loading` also shows a spinner
+ * toast while the request runs, which then turns into the success or error. `false` stays silent,
+ * for changes the page already shows as they happen (a chat message appearing, a toggle flipping).
+ */
+export type ToastOption = string | { loading?: string; success: string } | false;
+
+/**
+ * `file` sends the file itself as the request body (uploads); otherwise `body` is sent as JSON.
+ * Changes (anything but GET) show a toast when they fail, and a success toast when `toast` names one.
+ */
+type Init = { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; file?: File; toast?: ToastOption };
 
 /** Calls the API as the signed-in user. The Clerk session token carries the active organization. */
 export function useApi() {
+  const request = useRequest();
+  return useCallback(
+    async <T>(path: string, init: Init = {}): Promise<T> => {
+      const { method = "GET", toast: option } = init;
+      if (method === "GET" || option === false) return request<T>(path, init);
+      const { loading, success } = typeof option === "string" ? { loading: undefined, success: option } : (option ?? {});
+      const id = loading ? toast.loading(loading) : undefined;
+      try {
+        const data = await request<T>(path, init);
+        if (success) toast.success(success, { id });
+        else if (id !== undefined) toast.dismiss(id);
+        return data;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Something went wrong. Try again.", { id });
+        throw err;
+      }
+    },
+    [request],
+  );
+}
+
+function useRequest() {
   const { getToken } = useAuth();
   return useCallback(
     async <T>(path: string, { method = "GET", body, file }: Init = {}): Promise<T> => {

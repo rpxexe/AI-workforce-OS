@@ -1,7 +1,8 @@
 import { EVAL_DIMENSION_LABELS, type EvaluationRecord, type EvaluationResultRecord } from "@workforce/shared";
-import { CircleAlert, CircleCheck, CircleMinus, CircleX, Loader } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleMinus, CircleX } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 
 export const formatScore = (score: number | null) => (score === null ? "—" : String(Math.round(score)));
 export const formatRate = (rate: number | null) => (rate === null ? "—" : `${Math.round(rate * 100)}%`);
@@ -22,7 +23,7 @@ export function ResultBadge({ passed, status }: { passed: boolean | null; status
     );
   return passed ? (
     <Badge variant="outline" className="gap-1 font-normal">
-      <CircleCheck className="size-3 text-emerald-600 dark:text-emerald-400" aria-hidden /> Pass
+      <CircleCheck className="size-3 text-success" aria-hidden /> Pass
     </Badge>
   ) : (
     <Badge variant="destructive" className="gap-1 font-normal">
@@ -35,7 +36,7 @@ export function EvaluationStatus({ evaluation }: { evaluation: Pick<EvaluationRe
   if (evaluation.status === "PENDING" || evaluation.status === "RUNNING")
     return (
       <Badge variant="outline" className="gap-1 font-normal">
-        <Loader className="size-3 animate-spin motion-reduce:animate-none" aria-hidden /> {evaluation.status === "PENDING" ? "Queued" : "Grading"}
+        <Spinner className="size-3 motion-reduce:animate-none" aria-hidden /> {evaluation.status === "PENDING" ? "Queued" : "Grading"}
       </Badge>
     );
   if (evaluation.status === "FAILED")

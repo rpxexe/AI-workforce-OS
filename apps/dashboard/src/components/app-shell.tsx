@@ -1,6 +1,6 @@
 "use client";
 
-import { OrganizationList, OrganizationSwitcher, UserButton, useAuth } from "@clerk/nextjs";
+import { OrganizationList, OrganizationSwitcher, useAuth } from "@clerk/nextjs";
 import {
   BookOpen,
   Bot,
@@ -9,7 +9,6 @@ import {
   ChevronsUpDown,
   CreditCard,
   FileChartColumn,
-  Laptop,
   LayoutDashboard,
   Lightbulb,
   MessagesSquare,
@@ -26,17 +25,18 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import type { ReactNode } from "react";
+import { NavUser } from "@/components/nav-user";
 import { ErrorState } from "@/components/states";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -49,6 +49,7 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -57,6 +58,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { LiveNotifications, useWaitingCount } from "@/lib/live";
 import { WorkspaceProvider, useWorkspaces } from "@/lib/workspace";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
@@ -94,52 +96,61 @@ const SETTINGS: NavItem = { href: "/settings", label: "Settings", icon: Settings
 const BILLING: NavItem = { href: "/billing", label: "Billing", icon: CreditCard };
 const NAV = [...NAV_GROUPS.flatMap((group) => group.items), BILLING, SETTINGS];
 
-const THEMES = [
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
-  { value: "system", label: "System", icon: Laptop },
-] as const;
 
 const isActive = (pathname: string, href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+
+// Active item is solid primary in light mode and a gray fill in dark mode, as in the shadcn Mail example.
+const NAV_ITEM_CLASS =
+  "h-8 font-medium data-[active=true]:bg-primary data-[active=true]:text-primary-foreground data-[active=true]:hover:bg-primary/90 data-[active=true]:hover:text-primary-foreground dark:data-[active=true]:bg-sidebar-accent dark:data-[active=true]:text-sidebar-accent-foreground dark:data-[active=true]:hover:bg-sidebar-accent";
 
 function NavLink({ href, label, icon: Icon }: NavItem) {
   const pathname = usePathname();
   const { setOpenMobile } = useSidebar();
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton asChild isActive={isActive(pathname, href)} tooltip={label}>
+      <SidebarMenuButton asChild isActive={isActive(pathname, href)} tooltip={label} className={NAV_ITEM_CLASS}>
         <Link href={href} onClick={() => setOpenMobile(false)}>
           <Icon aria-hidden />
           <span>{label}</span>
         </Link>
       </SidebarMenuButton>
+      {href === "/conversations" && <WaitingBadge />}
     </SidebarMenuItem>
   );
 }
 
-function Brand({ subtitle }: { subtitle: string }) {
+/** Conversations waiting for a person, unassigned; updated live. */
+function WaitingBadge() {
+  const waiting = useWaitingCount();
+  if (waiting === 0) return null;
+  return (
+    <SidebarMenuBadge className="bg-warning/20 text-foreground peer-data-[active=true]/menu-button:text-foreground" aria-label={`${waiting} waiting for a person`}>
+      {waiting > 99 ? "99+" : waiting}
+    </SidebarMenuBadge>
+  );
+}
+
+// Single-line select-style box, like the account picker at the top of the shadcn Mail example.
+function Brand({ name }: { name: string }) {
   return (
     <>
-      <span className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-        <Bot className="size-4" aria-hidden />
-      </span>
-      <span className="grid flex-1 text-left text-sm leading-tight">
-        <span className="truncate font-semibold">AI Workforce OS</span>
-        <span className="truncate text-xs text-muted-foreground">{subtitle}</span>
-      </span>
+      <Bot aria-hidden />
+      <span className="truncate font-medium">{name}</span>
     </>
   );
 }
+
+const SWITCHER_CLASS = "h-9 data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground";
 
 function WorkspaceSwitcher() {
   const state = useWorkspaces();
   const { isMobile } = useSidebar();
   if (!state.workspace) {
-    if (state.loading) return <Skeleton className="h-12 w-full" />;
+    if (state.loading) return <Skeleton className="h-9 w-full" />;
     return (
-      <SidebarMenuButton size="lg" asChild>
+      <SidebarMenuButton variant="outline" className={SWITCHER_CLASS} tooltip="AI Workforce OS" asChild>
         <Link href="/">
-          <Brand subtitle="No workspace" />
+          <Brand name="No workspace" />
         </Link>
       </SidebarMenuButton>
     );
@@ -150,11 +161,11 @@ function WorkspaceSwitcher() {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <SidebarMenuButton
-          size="lg"
-          className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+          variant="outline"
+          className={SWITCHER_CLASS}
           aria-label={`Workspace: ${workspace.name}. Switch workspace`}
         >
-          <Brand subtitle={workspace.name} />
+          <Brand name={workspace.name} />
           <ChevronsUpDown className="ml-auto" aria-hidden />
         </SidebarMenuButton>
       </DropdownMenuTrigger>
@@ -167,9 +178,10 @@ function WorkspaceSwitcher() {
         <DropdownMenuLabel className="text-xs text-muted-foreground">Workspaces</DropdownMenuLabel>
         {workspaces.map((w) => (
           <DropdownMenuItem key={w.id} onSelect={() => select(w.id)}>
-            <span className="flex size-6 items-center justify-center rounded-md border text-xs font-medium" aria-hidden>
-              {w.name.charAt(0).toUpperCase()}
-            </span>
+            <Avatar size="sm" className="rounded-md after:rounded-md" aria-hidden>
+              <AvatarFallback className="rounded-md bg-transparent font-medium text-foreground">{w.name.charAt(0).toUpperCase()}</AvatarFallback>
+            </Avatar>
+
             <span className="truncate">{w.name}</span>
             {w.id === workspace.id && <Check className="ml-auto" aria-label="Current" />}
           </DropdownMenuItem>
@@ -183,40 +195,31 @@ function WorkspaceSwitcher() {
   );
 }
 
-function ThemeMenu() {
-  const { theme, setTheme } = useTheme();
-  const { isMobile } = useSidebar();
+/** One click flips light and dark. The label is fixed: resolvedTheme is unknown on the server, so a label built from it would not hydrate. */
+function ThemeToggle() {
+  const { resolvedTheme, setTheme } = useTheme();
+  const dark = resolvedTheme === "dark";
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <SidebarMenuButton tooltip="Theme">
-          {/* Picked by the html class, not by `theme`, so the server render already shows the right icon. */}
-          <Sun className="dark:hidden" aria-hidden />
-          <Moon className="hidden dark:block" aria-hidden />
-          <span>Theme</span>
-        </SidebarMenuButton>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side={isMobile ? "top" : "right"} sideOffset={4} className="min-w-40">
-        <DropdownMenuRadioGroup value={theme} onValueChange={setTheme}>
-          {THEMES.map(({ value, label, icon: Icon }) => (
-            <DropdownMenuRadioItem key={value} value={value}>
-              <Icon aria-hidden />
-              {label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={() => setTheme(dark ? "light" : "dark")}
+      aria-label="Toggle light and dark mode"
+      className="[&_svg]:transition-transform hover:[&_svg]:rotate-12"
+    >
+      {/* Picked by the html class, not by `resolvedTheme`, so the server render already shows the right icon. */}
+      <Moon className="dark:hidden" aria-hidden />
+      <Sun className="hidden dark:block" aria-hidden />
+    </Button>
   );
 }
 
 function AppSidebar() {
-  const { state, isMobile } = useSidebar();
-
   return (
-    <Sidebar collapsible="icon" variant="inset">
-      <SidebarHeader>
+    <Sidebar collapsible="icon">
+      {/* h-14 matches the page header, so both bottom borders form one line. */}
+      <SidebarHeader className="h-14 justify-center border-b">
         <SidebarMenu>
           <SidebarMenuItem>
             <WorkspaceSwitcher />
@@ -224,13 +227,13 @@ function AppSidebar() {
         </SidebarMenu>
       </SidebarHeader>
 
-      <SidebarContent>
+      <SidebarContent className="gap-0">
         {NAV_GROUPS.map((group) => (
           <SidebarGroup key={group.label} className="py-0.5">
-            {/* -mt-7 matches h-7 so the hidden label takes no space when collapsed. */}
-            <SidebarGroupLabel className="h-7 group-data-[collapsible=icon]:-mt-7">{group.label}</SidebarGroupLabel>
+            {/* -mt-6 matches h-6 so the hidden label takes no space when collapsed. */}
+            <SidebarGroupLabel className="h-6 group-data-[collapsible=icon]:-mt-6">{group.label}</SidebarGroupLabel>
             <SidebarGroupContent>
-              <SidebarMenu>
+              <SidebarMenu className="gap-0.5">
                 {group.items.map((item) => (
                   <NavLink key={item.href} {...item} />
                 ))}
@@ -240,17 +243,12 @@ function AppSidebar() {
         ))}
       </SidebarContent>
 
-      <SidebarFooter>
+      <SidebarFooter className="border-t">
         <SidebarMenu>
           <NavLink {...BILLING} />
           <NavLink {...SETTINGS} />
-          <SidebarMenuItem>
-            <ThemeMenu />
-          </SidebarMenuItem>
-          <SidebarMenuItem className="flex h-10 items-center px-1.5 group-data-[collapsible=icon]:px-0">
-            <UserButton showName={state === "expanded" || isMobile} />
-          </SidebarMenuItem>
         </SidebarMenu>
+        <NavUser />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
@@ -284,17 +282,19 @@ export function AppShell({ children, defaultOpen }: { children: ReactNode; defau
   // Keyed by organization: switching it discards every piece of the previous tenant's data.
   return (
     <WorkspaceProvider key={orgId ?? ""} orgId={orgId ?? null}>
+      <LiveNotifications>
       <TooltipProvider>
         <SidebarProvider defaultOpen={defaultOpen}>
           <AppSidebar />
           {/* min-w-0: lets truncated text shrink instead of widening the page past the viewport. */}
           <SidebarInset className="min-w-0">
-            <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur md:rounded-t-xl">
+            <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
               <SidebarTrigger className="-ml-1" />
               <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
               <span className="text-sm font-medium">{title}</span>
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-2">
                 <OrganizationSwitcher hidePersonal afterSelectOrganizationUrl="/" afterCreateOrganizationUrl="/" />
+                <ThemeToggle />
               </div>
             </header>
             <div className="mx-auto w-full max-w-6xl flex-1 p-4 md:p-6">
@@ -303,6 +303,7 @@ export function AppShell({ children, defaultOpen }: { children: ReactNode; defau
           </SidebarInset>
         </SidebarProvider>
       </TooltipProvider>
+      </LiveNotifications>
     </WorkspaceProvider>
   );
 }

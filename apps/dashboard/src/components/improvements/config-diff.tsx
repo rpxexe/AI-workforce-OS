@@ -38,14 +38,14 @@ export function ConfigDiff({ before, after }: { before: EmployeeConfig; after: E
       {changed.map(({ key, label }) => (
         <section key={key} className="flex flex-col gap-1.5">
           <h3 className="text-sm font-medium">{label}</h3>
-          <pre className="max-h-96 overflow-auto rounded-md border font-mono text-xs leading-relaxed">
+          <pre className="max-h-96 overflow-auto rounded-md border shadow-sm dark:shadow-none font-mono text-xs leading-relaxed">
             {diffLines(asText(before, key), asText(after, key)).map((line, i) => (
               <div
                 key={i}
                 className={cn(
                   "flex gap-2 px-2 whitespace-pre-wrap",
-                  line.kind === "added" && "bg-emerald-500/10 text-emerald-900 dark:text-emerald-200",
-                  line.kind === "removed" && "bg-destructive/10 text-red-900 line-through decoration-red-900/40 dark:text-red-200",
+                  line.kind === "added" && "bg-success/10",
+                  line.kind === "removed" && "bg-destructive/10 line-through decoration-destructive/40",
                 )}
               >
                 <span className="select-none text-muted-foreground" aria-hidden>

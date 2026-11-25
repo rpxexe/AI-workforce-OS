@@ -37,7 +37,7 @@ import { stripeClient, stripeFromEnv, type StripeConfig } from "./billing/stripe
 import { employeeRoutes } from "./employees.ts";
 import { improvementRoutes } from "./improvements.ts";
 import { inboxRoutes } from "./inbox.ts";
-import type { HandoffNotice } from "@workforce/agent-runtime";
+import type { HandoffNotice, HeldNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
 import { developerRoutes } from "./public/manage.ts";
@@ -49,6 +49,7 @@ import { toolRoutes } from "./tools.ts";
 import { voiceRoutes, type VoiceConfig } from "./voice/routes.ts";
 import { workflowRoutes } from "./workflows.ts";
 import { workspaceRoutes } from "./workspaces.ts";
+import { agentPresence, liveBus, liveRoutes, type LiveBus } from "./live.ts";
 
 /** Advance-then-sleep rounds one workflow/run.due job runs before leaving the rest to the sweep (Inngest caps steps per run). */
 const WORKFLOW_ROUNDS = 300;
@@ -89,6 +90,8 @@ export async function buildApp(
      * definitions. Defaults to Inngest when INNGEST_EVENT_KEY or INNGEST_DEV is set (never for test apps).
      */
     jobs?: "inngest" | "inline" | ((definitions: JobDefinitions, schedules: Schedule[]) => Jobs);
+    /** The live event bus behind GET /workspaces/:workspaceId/events; tests pass one to see what was published. */
+    live?: LiveBus;
     /** The workflow runner: how often it looks for due runs, and how often a Voice Call step checks its call. Tests that give this get a runner. */
     workflows?: { intervalMs?: number; callPollMs?: number };
     /**
@@ -258,9 +261,34 @@ export async function buildApp(
     onError: (err, tool) => app.log.error({ err, tool }, "Tool failed unexpectedly"),
     planLimits,
   });
-  /** Emails the employee's escalation contact about a handoff (test mode without Resend: logged only). */
+  // Live notifications for people in the dashboard (live.ts), and who answers each conversation in the widget.
+  const live = options.live ?? liveBus();
+  const presence = agentPresence();
+  liveRoutes(app, authenticate, live);
+
+  /** Tells the dashboard, emails the escalation contact (test mode without Resend: logged only) and schedules the reminder. */
   const onHandoff = (n: HandoffNotice) => {
     app.log.info({ conversationId: n.conversationId, trigger: n.trigger }, "Conversation handed to people");
+    live.publish(n.workspaceId, {
+      type: "handoff",
+      conversationId: n.conversationId,
+      employeeName: n.employeeName,
+      reason: `${HANDOFF_TRIGGER_LABELS[n.trigger]}. ${n.reason}`,
+      reminder: false,
+      waitingMinutes: 0,
+    });
+    if (n.reminderMinutes > 0)
+      send("handoff/reminder.due", {
+        handoffId: n.handoffId,
+        organizationId: n.organizationId,
+        workspaceId: n.workspaceId,
+        employeeId: n.employeeId,
+        employeeName: n.employeeName,
+        conversationId: n.conversationId,
+        contactEmail: n.contactEmail,
+        minutes: n.reminderMinutes,
+        dueAt: new Date(Date.now() + n.reminderMinutes * 60_000).toISOString(),
+      }).catch((err: unknown) => app.log.error({ err, conversationId: n.conversationId }, "Handoff reminder could not be scheduled"));
     if (!n.contactEmail) return;
     const email = {
       to: n.contactEmail,
@@ -299,6 +327,9 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     tools,
     timeoutMs,
     onHandoff,
+    /** A customer wrote while people have the conversation: tell the dashboard (the assignee gets an alert). */
+    onHeld: (n: HeldNotice) =>
+      live.publish(n.workspaceId, { type: "customer_message", conversationId: n.conversationId, assignedTo: n.assignedTo, preview: n.message.slice(0, 140) }),
     planLimits,
   };
   conversationRoutes(app, authenticate, ai);
@@ -333,8 +364,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     platform: { ...providers.platform, llm: platform.kind },
     publicUrl: options.publicUrl ?? (process.env.PUBLIC_URL || null),
   });
-  webChatRoutes(app, channels);
-  inboxRoutes(app, authenticate, ai, channels);
+  webChatRoutes(app, channels, presence);
+  inboxRoutes(app, authenticate, ai, channels, { live, presence });
   qualityRoutes(app, authenticate, send);
   improvementRoutes(app, authenticate, send);
   const evaluation: EvaluationDeps = { provider: ai.provider, embedder: getEmbedder, timeoutMs: ai.timeoutMs };
@@ -403,6 +434,37 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       orderedBy: "queueKey",
       retries: 1, // only a message still RECEIVED is answered, so a retry after a crash does not answer twice
       handler: ({ messageId }) => channels.answerRecorded(messageId),
+    },
+    "handoff/reminder.due": {
+      retries: 1,
+      async handler(r, step) {
+        await step.sleepUntil("wait", r.dueAt);
+        const waiting = await step.run("check", async () => {
+          const handoff = await prisma.handoff.findUnique({ where: { id: r.handoffId }, select: { acceptedAt: true, endedAt: true } });
+          return Boolean(handoff && !handoff.acceptedAt && !handoff.endedAt);
+        });
+        if (!waiting) return;
+        live.publish(r.workspaceId, {
+          type: "handoff",
+          conversationId: r.conversationId,
+          employeeName: r.employeeName,
+          reason: `Nobody has taken it for ${r.minutes} minutes`,
+          reminder: true,
+          waitingMinutes: r.minutes,
+        });
+        if (!r.contactEmail) return;
+        await step.run("email", () =>
+          mailer.send(
+            {
+              to: r.contactEmail,
+              subject: `Still waiting: a conversation ${r.employeeName} handed to your team`,
+              text: `Nobody has taken this conversation for ${r.minutes} minutes.\n\nOpen it in the inbox: ${dashboardOrigin}/conversations/${r.conversationId}`,
+              idempotencyKey: `handoff-reminder:${r.handoffId}`,
+            },
+            { organizationId: r.organizationId, workspaceId: r.workspaceId, employeeId: r.employeeId },
+          ),
+        );
+      },
     },
     "workflow/run.due": {
       retries: 2, // a run is claimed in Postgres, so a retried or duplicate job never runs a step twice

@@ -3,6 +3,7 @@
 import {
   NODE_LABELS,
   NODE_TYPES,
+  leadFollowUpWorkflow,
   validateWorkflow,
   type EmployeeSummary,
   type NodeType,
@@ -16,21 +17,26 @@ import { ArrowLeft, CircleAlert, Copy, History, Pause, Play, Plug, Rocket, Save,
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
+import { toast } from "sonner";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/employees/meta";
 import { ProviderOverridesForm } from "@/components/providers/provider-overrides";
-import { ErrorState, LoadingState } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { ErrorState } from "@/components/states";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { NODE_ICONS } from "@/components/workflows/meta";
 import { NEW_NODE_CONFIG, NodeSettings } from "@/components/workflows/node-settings";
 import { WorkflowCanvas } from "@/components/workflows/workflow-canvas";
 import { WorkflowRuns } from "@/components/workflows/workflow-runs";
-import { ApiRequestError, useApi, useApiQuery } from "@/lib/api";
+import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 /** A node of `type` placed under the selected node, or under the lowest one. */
@@ -47,11 +53,25 @@ function newNode(definition: WorkflowDefinition, type: NodeType, below?: Workflo
   };
 }
 
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: WorkflowDetail = {
+  id: "sample",
+  name: "New lead follow-up",
+  description: "Call new leads and book a meeting",
+  status: "ACTIVE",
+  latestVersion: 3,
+  publishedVersion: 3,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  deletedAt: null,
+  versions: [1, 2, 3].map((number) => ({ number, createdBy: "sample-user", createdAt: "2026-01-01T00:00:00.000Z" })),
+  version: 3,
+  definition: leadFollowUpWorkflow("sample-employee"),
+  issues: [],
+  hookUrl: null,
+};
+
 export default withWorkspace(function WorkflowPage({ workspace }) {
   const { id } = useParams<{ id: string }>();
-  const isAdmin = useIsAdmin();
-  const api = useApi();
-  const router = useRouter();
   const base = `/workspaces/${workspace.id}`;
   const [version, setVersion] = useState<number>();
   const path = `${base}/workflows/${id}${version ? `?version=${version}` : ""}`;
@@ -59,16 +79,53 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
   const employees = useApiQuery<EmployeeSummary[]>(`${base}/employees`);
   const tools = useApiQuery<ToolInfo[]>(`${base}/tools`);
 
+  if (error) return <ErrorState message={error.message} onRetry={reload} />;
+  return (
+    <Skullet data={data} sample={SAMPLE} id="workflow-editor" label="Loading workflow">
+      {(data) => (
+        // Keyed so editor state never carries between the sample render and the real workflow.
+        <WorkflowEditor
+          key={data === SAMPLE ? "sample" : data.id}
+          workspaceId={workspace.id}
+          id={id}
+          data={data}
+          setData={setData}
+          setVersion={setVersion}
+          employees={employees.data ?? []}
+          tools={tools.data ?? []}
+        />
+      )}
+    </Skullet>
+  );
+});
+
+function WorkflowEditor({
+  workspaceId,
+  id,
+  data,
+  setData,
+  setVersion,
+  employees,
+  tools,
+}: {
+  workspaceId: string;
+  id: string;
+  data: WorkflowDetail;
+  setData: (data: WorkflowDetail) => void;
+  setVersion: (version: number | undefined) => void;
+  employees: EmployeeSummary[];
+  tools: ToolInfo[];
+}) {
+  const isAdmin = useIsAdmin();
+  const api = useApi();
+  const router = useRouter();
+  const base = `/workspaces/${workspaceId}`;
   // Unsaved edits; null while showing what the server has.
   const [draft, setDraft] = useState<WorkflowDefinition | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<{ message: string; issues: string[] }>();
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
-
-  if (error) return <ErrorState message={error.message} onRetry={reload} />;
-  if (!data) return <LoadingState rows={6} />;
 
   const definition = draft ?? data.definition;
   const dirty = draft !== null || (name !== null && name !== data.name);
@@ -78,17 +135,13 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
   const readOnly = !isAdmin;
   const isLatest = data.version === data.latestVersion;
 
-  /** Runs `action` with the buttons disabled and shows what went wrong. */
+  /** Runs `action` with the buttons disabled. */
   const act = async (action: () => Promise<void>) => {
     setBusy(true);
-    setActionError(undefined);
     try {
       await action();
-    } catch (err) {
-      setActionError({
-        message: err instanceof Error ? err.message : "Something went wrong. Try again.",
-        issues: err instanceof ApiRequestError ? err.issues.map((i) => i.message) : [],
-      });
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(false);
     }
@@ -103,13 +156,21 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
     });
   const duplicate = () =>
     act(async () => {
-      const copy = await api<WorkflowDetail>(`${base}/workflows/${id}/duplicate`, { method: "POST", body: { version: data.version } });
+      const copy = await api<WorkflowDetail>(`${base}/workflows/${id}/duplicate`, {
+        method: "POST",
+        body: { version: data.version },
+        toast: `${data.name} v${data.version} duplicated`,
+      });
       router.push(`/workflows/${copy.id}`);
     });
   // Shows what deleting affects (runs it stops, a webhook that stops working) before asking.
   const remove = () =>
     act(async () => {
-      const deps = await api<WorkflowDependencies>(`${base}/workflows/${id}/dependencies`);
+      // A GET shows no toast of its own, so say why the delete could not start.
+      const deps = await api<WorkflowDependencies>(`${base}/workflows/${id}/dependencies`).catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : "Something went wrong. Try again.");
+        throw err;
+      });
       const runs = deps.activeRuns === 1 ? "1 run" : `${deps.activeRuns} runs`;
       setConfirm({
         title: `Delete ${data.name}?`,
@@ -123,7 +184,7 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
         confirmLabel: deps.activeRuns > 0 ? `Delete and stop ${runs}` : "Delete",
         onConfirm: () =>
           act(async () => {
-            await api(`${base}/workflows/${id}${deps.activeRuns > 0 ? "?stopRuns=true" : ""}`, { method: "DELETE" });
+            await api(`${base}/workflows/${id}${deps.activeRuns > 0 ? "?stopRuns=true" : ""}`, { method: "DELETE", toast: `${data.name} deleted` });
             router.push("/workflows");
           }),
       });
@@ -133,6 +194,7 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
       api<WorkflowDetail>(`${base}/workflows/${id}`, {
         method: "PUT",
         body: { name: name ?? data.name, description: data.description, definition },
+        toast: `Saved as version ${data.latestVersion + 1}`,
       }),
     );
   const publish = () =>
@@ -143,10 +205,10 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
           ? "The workflow goes live and can be run."
           : `New runs will use version ${data.version} instead of version ${data.publishedVersion}. Runs already started keep their version.`,
       confirmLabel: "Publish",
-      onConfirm: () => run(() => api<WorkflowDetail>(`${base}/workflows/${id}/publish`, { method: "POST", body: { version: data.version } })),
+      onConfirm: () => run(() => api<WorkflowDetail>(`${base}/workflows/${id}/publish`, { method: "POST", body: { version: data.version }, toast: `Version ${data.version} published` })),
     });
   const setStatus = (status: "ACTIVE" | "PAUSED") =>
-    run(() => api<WorkflowDetail>(`${base}/workflows/${id}/status`, { method: "PATCH", body: { status } }));
+    run(() => api<WorkflowDetail>(`${base}/workflows/${id}/status`, { method: "PATCH", body: { status }, toast: status === "PAUSED" ? "Workflow paused" : "Workflow resumed" }));
   const edit = (next: WorkflowDefinition) => setDraft(next);
   const updateNode = (node: WorkflowNode) => edit({ ...definition, nodes: definition.nodes.map((n) => (n.id === node.id ? node : n)) });
   const deleteNode = (nodeId: string) => {
@@ -240,10 +302,15 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
                     Resume
                   </Button>
                 )}
-                <Button variant="outline" onClick={duplicate} disabled={busy} title={`Copy version ${data.version} into a new workflow`}>
-                  <Copy aria-hidden />
-                  Duplicate
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="outline" onClick={duplicate} disabled={busy}>
+                      <Copy aria-hidden />
+                      Duplicate
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{`Copy version ${data.version} into a new workflow`}</TooltipContent>
+                </Tooltip>
                 <Button variant="outline" onClick={remove} disabled={busy} className="text-destructive">
                   <Trash2 aria-hidden />
                   Delete
@@ -253,29 +320,19 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
           </div>
         </div>
         {(dirty || !isLatest || data.publishedVersion !== data.version) && (
-          <p className="rounded-lg border bg-muted/50 px-4 py-2.5 text-sm" role="status">
-            {dirty
-              ? "You have unsaved changes. Saving adds a new version; runs keep using the published one."
-              : !isLatest
-                ? `You are looking at version ${data.version}. Restoring it saves it as a new latest version; publish that to make it live.`
-                : data.publishedVersion === null
-                  ? "This workflow has never been published, so it cannot run yet."
-                  : `Version ${data.version} is not live. Runs use version ${data.publishedVersion}.`}
-          </p>
+          <Alert role="status">
+            <AlertDescription>
+              {dirty
+                ? "You have unsaved changes. Saving adds a new version; runs keep using the published one."
+                : !isLatest
+                  ? `You are looking at version ${data.version}. Restoring it saves it as a new latest version; publish that to make it live.`
+                  : data.publishedVersion === null
+                    ? "This workflow has never been published, so it cannot run yet."
+                    : `Version ${data.version} is not live. Runs use version ${data.publishedVersion}.`}
+            </AlertDescription>
+          </Alert>
         )}
         {data.status === "PAUSED" && <p className="text-sm text-muted-foreground">Paused: runs in progress hold where they are and new runs are refused.</p>}
-        {actionError && (
-          <div className="flex flex-col gap-1">
-            <ErrorState message={actionError.message} />
-            {actionError.issues.length > 0 && (
-              <ul className="list-disc pl-6 text-sm text-destructive">
-                {actionError.issues.map((issue, i) => (
-                  <li key={i}>{issue}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
       </div>
 
       <Tabs defaultValue="editor">
@@ -300,69 +357,77 @@ export default withWorkspace(function WorkflowPage({ workspace }) {
             </div>
             <aside className="flex w-full flex-col gap-4 lg:w-80">
               {selected ? (
-                <div className="rounded-lg border p-4">
-                  <NodeSettings
-                    key={selected.id}
-                    node={selected}
-                    onChange={updateNode}
-                    onDelete={() => deleteNode(selected.id)}
-                    employees={employees.data ?? []}
-                    tools={tools.data ?? []}
-                    hookUrl={data.hookUrl}
-                    readOnly={readOnly}
-                  />
-                </div>
+                <Card>
+                  <CardContent>
+                    <NodeSettings
+                      key={selected.id}
+                      node={selected}
+                      onChange={updateNode}
+                      onDelete={() => deleteNode(selected.id)}
+                      employees={employees}
+                      tools={tools}
+                      hookUrl={data.hookUrl}
+                      readOnly={readOnly}
+                    />
+                  </CardContent>
+                </Card>
               ) : (
                 isAdmin && (
-                  <div className="rounded-lg border p-4">
-                    <p className="mb-3 text-sm font-medium">Add a step</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {NODE_TYPES.map((type) => {
-                        const Icon = NODE_ICONS[type];
-                        return (
-                          <Button key={type} variant="outline" size="sm" className="justify-start" onClick={() => addNode(type)}>
-                            <Icon aria-hidden />
-                            {NODE_LABELS[type]}
-                          </Button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  <Card>
+                    <CardContent>
+                      <p className="mb-3 text-sm font-medium">Add a step</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {NODE_TYPES.map((type) => {
+                          const Icon = NODE_ICONS[type];
+                          return (
+                            <Button key={type} variant="outline" size="sm" className="justify-start" onClick={() => addNode(type)}>
+                              <Icon aria-hidden />
+                              {NODE_LABELS[type]}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
                 )
               )}
-              <div className="rounded-lg border p-4">
-                <p className="mb-2 flex items-center gap-2 text-sm font-medium">
-                  Checks
-                  {issues.length === 0 ? <Badge variant="secondary">Ready to publish</Badge> : <Badge variant="destructive">{issues.length}</Badge>}
-                </p>
-                {issues.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Every step is connected and set up.</p>
-                ) : (
-                  <ul className="flex flex-col gap-1.5 text-sm">
-                    {issues.map((issue, i) => (
-                      <li key={i}>
-                        <button
-                          type="button"
-                          className="flex items-start gap-2 text-left hover:underline"
-                          onClick={() => issue.nodeId && setSelectedId(issue.nodeId)}
-                        >
-                          <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-                          {issue.message}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              <Card>
+                <CardContent>
+                  <p className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    Checks
+                    {issues.length === 0 ? <Badge variant="secondary">Ready to publish</Badge> : <Badge variant="destructive">{issues.length}</Badge>}
+                  </p>
+                  {issues.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">Every step is connected and set up.</p>
+                  ) : (
+                    <ul className="flex flex-col gap-1.5 text-sm">
+                      {issues.map((issue, i) => (
+                        <li key={i}>
+                          <Button
+                            type="button"
+                            variant="link"
+                            className="h-auto items-start justify-start gap-2 p-0 text-left font-normal whitespace-normal text-foreground"
+                            onClick={() => issue.nodeId && setSelectedId(issue.nodeId)}
+                          >
+                            <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+                            {issue.message}
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
             </aside>
+
           </div>
         </TabsContent>
         <TabsContent value="runs" className="mt-4">
-          <WorkflowRuns workspaceId={workspace.id} workflow={data} isAdmin={isAdmin} />
+          <WorkflowRuns workspaceId={workspaceId} workflow={data} isAdmin={isAdmin} />
         </TabsContent>
       </Tabs>
 
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
-});
+}

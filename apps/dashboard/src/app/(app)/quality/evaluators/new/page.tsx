@@ -24,7 +24,7 @@ export default withWorkspace(function NewEvaluatorPage({ workspace }) {
           <EvaluatorForm
             submitLabel="Create evaluator"
             onSubmit={async (body) => {
-              const { id } = await api<{ id: string }>(`/workspaces/${workspace.id}/evaluators`, { method: "POST", body });
+              const { id } = await api<{ id: string }>(`/workspaces/${workspace.id}/evaluators`, { method: "POST", body, toast: `${body.name} created` });
               router.push(`/quality/evaluators/${id}`);
             }}
           />

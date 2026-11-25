@@ -24,7 +24,6 @@ export function ConversationQuality({ workspaceId, conversationId, title }: { wo
   const [selected, setSelected] = useState<string>();
   const [datasetId, setDatasetId] = useState<string>();
   const [busy, setBusy] = useState<string>();
-  const [note, setNote] = useState<string>();
 
   const pending = data?.some((e) => e.status === "PENDING" || e.status === "RUNNING") ?? false;
   useEffect(() => {
@@ -33,28 +32,32 @@ export function ConversationQuality({ workspaceId, conversationId, title }: { wo
     return () => clearInterval(timer);
   }, [pending, reload]);
 
-  const act = async (label: string, work: () => Promise<string>) => {
+  const act = async (label: string, work: () => Promise<void>) => {
     setBusy(label);
-    setNote(undefined);
     try {
-      setNote(await work());
-    } catch (err) {
-      setNote(err instanceof Error ? err.message : "Something went wrong. Try again.");
+      await work();
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(undefined);
     }
   };
   const evaluate = () =>
     act("evaluate", async () => {
-      const queued = await api<EvaluationRecord>(path, { method: "POST" });
+      const queued = await api<EvaluationRecord>(path, {
+        method: "POST",
+        toast: { loading: "Starting the evaluation…", success: "Grading in the background" },
+      });
       setSelected(queued.id);
       reload();
-      return "Grading in the background.";
     });
   const addToDataset = () =>
     act("dataset", async () => {
-      await api(`/workspaces/${workspaceId}/datasets/${datasetId}/cases`, { method: "POST", body: { name: title.slice(0, 100) || "Conversation", conversationId } });
-      return `Added to ${datasets?.find((d) => d.id === datasetId)?.name}.`;
+      await api(`/workspaces/${workspaceId}/datasets/${datasetId}/cases`, {
+        method: "POST",
+        body: { name: title.slice(0, 100) || "Conversation", conversationId },
+        toast: `Added to ${datasets?.find((d) => d.id === datasetId)?.name ?? "dataset"}`,
+      });
     });
 
   const shown = data?.find((e) => e.id === selected) ?? data?.[0];
@@ -90,7 +93,6 @@ export function ConversationQuality({ workspaceId, conversationId, title }: { wo
         )}
       </CardHeader>
       <CardContent className="flex flex-col gap-4" aria-live="polite">
-        {note && <p className="text-sm text-muted-foreground">{note}</p>}
         {!data ? null : !shown ? (
           <p className="text-sm text-muted-foreground">
             Not graded yet. Conversations are graded automatically about 10 minutes after they go quiet. See the{" "}

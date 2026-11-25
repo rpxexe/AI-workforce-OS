@@ -6,6 +6,7 @@ import { useState, type FormEvent } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -42,8 +43,8 @@ export function EmployeePhone({
   const [newNumber, setNewNumber] = useState("");
   const [to, setTo] = useState("");
   const [busy, setBusy] = useState<"add" | "call" | string>();
+  /** Why a call's transcript did not load; failed changes show a toast instead. */
   const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [open, setOpen] = useState<CallDetail>();
 
@@ -54,11 +55,10 @@ export function EmployeePhone({
   const run = async (what: string, action: () => Promise<void>) => {
     setBusy(what);
     setError(undefined);
-    setNotice(undefined);
     try {
       await action();
-    } catch (err) {
-      setError(message(err));
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(undefined);
     }
@@ -66,8 +66,13 @@ export function EmployeePhone({
 
   const add = (event: FormEvent) => {
     event.preventDefault();
+    const number = newNumber.trim();
     void run("add", async () => {
-      await api(`${base}/phone-numbers`, { method: "POST", body: { number: newNumber.trim(), employeeId, ...(account !== ORG_DEFAULT && { connectionId: account }) } });
+      await api(`${base}/phone-numbers`, {
+        method: "POST",
+        body: { number, employeeId, ...(account !== ORG_DEFAULT && { connectionId: account }) },
+        toast: { loading: `Connecting ${number}…`, success: `${number} connected` },
+      });
       setNewNumber("");
       numbers.reload();
     });
@@ -75,8 +80,11 @@ export function EmployeePhone({
   const place = (event: FormEvent) => {
     event.preventDefault();
     void run("call", async () => {
-      const placed = await api<CallSummary>(`${base}/employees/${employeeId}/calls`, { method: "POST", body: { to: to.trim() } });
-      setNotice(`Calling ${placed.to}…`);
+      await api<CallSummary>(`${base}/employees/${employeeId}/calls`, {
+        method: "POST",
+        body: { to: to.trim() },
+        toast: { loading: "Placing call…", success: `Calling ${to.trim()}` },
+      });
       calls.reload();
     });
   };
@@ -87,17 +95,25 @@ export function EmployeePhone({
       confirmLabel: "Remove number",
       onConfirm: () =>
         void run(n.id, async () => {
-          await api(`${base}/phone-numbers/${n.id}`, { method: "DELETE" });
+          await api(`${base}/phone-numbers/${n.id}`, { method: "DELETE", toast: `${n.number} removed` });
           numbers.reload();
         }),
     });
   const reconnect = (n: PhoneNumberInfo) =>
     void run(n.id, async () => {
-      await api(`${base}/phone-numbers/${n.id}/reconnect`, { method: "POST" });
-      setNotice(`${n.number} now points at this server again.`);
+      await api(`${base}/phone-numbers/${n.id}/reconnect`, {
+        method: "POST",
+        toast: { loading: `Reconnecting ${n.number}…`, success: `${n.number} now points at this server again` },
+      });
     });
   const show = (c: CallSummary) =>
-    void run(c.id, async () => setOpen(open?.id === c.id ? undefined : await api<CallDetail>(`${base}/calls/${c.id}`)));
+    void run(c.id, async () => {
+      try {
+        setOpen(open?.id === c.id ? undefined : await api<CallDetail>(`${base}/calls/${c.id}`));
+      } catch (err) {
+        setError(message(err));
+      }
+    });
 
   return (
     <div className="flex flex-col gap-5">
@@ -187,11 +203,6 @@ export function EmployeePhone({
           {error}
         </p>
       )}
-      {notice && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {notice}
-        </p>
-      )}
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
@@ -212,34 +223,39 @@ export function EmployeePhone({
               const Icon = c.direction === "INBOUND" ? PhoneIncoming : PhoneOutgoing;
               const expanded = open?.id === c.id;
               return (
-                <li key={c.id} className="py-2">
-                  <button
-                    type="button"
-                    onClick={() => show(c)}
-                    aria-expanded={expanded}
-                    className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-md text-left text-sm hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                  >
-                    <Icon className="size-4 text-muted-foreground" aria-label={c.direction === "INBOUND" ? "Incoming" : "Outgoing"} />
-                    <span className="font-mono tabular-nums">{c.direction === "INBOUND" ? c.from : c.to}</span>
-                    <Badge variant="outline">{c.status.replace("_", " ").toLowerCase()}</Badge>
-                    <span className="text-muted-foreground tabular-nums">{seconds(c.durationSec)}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">{when(c.createdAt)}</span>
-                  </button>
-                  {c.error && <p className="mt-1 text-xs text-destructive">{c.error}</p>}
-                  {expanded && (
-                    <ol className="mt-2 flex flex-col gap-1.5 border-l pl-3 text-sm">
-                      {open.transcript.length === 0 && <li className="text-muted-foreground">Nothing was said.</li>}
-                      {open.transcript.map((t, i) => (
-                        <li key={i}>
-                          <span className="text-xs text-muted-foreground tabular-nums">{seconds(Math.round(t.offsetMs / 1000))} </span>
-                          <span className="font-medium">{t.speaker === "CUSTOMER" ? "Caller" : "Employee"}: </span>
-                          {t.text}
-                          {t.interrupted && <span className="text-xs text-muted-foreground"> (interrupted)</span>}
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                </li>
+                <Collapsible key={c.id} asChild open={expanded} onOpenChange={() => show(c)}>
+                  <li className="py-2">
+                    <CollapsibleTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-auto w-full flex-wrap justify-start gap-x-3 gap-y-1 px-0 text-left font-normal aria-expanded:bg-transparent"
+                      >
+                        <Icon className="size-4 text-muted-foreground" aria-label={c.direction === "INBOUND" ? "Incoming" : "Outgoing"} />
+                        <span className="font-mono tabular-nums">{c.direction === "INBOUND" ? c.from : c.to}</span>
+                        <Badge variant="outline">{c.status.replace("_", " ").toLowerCase()}</Badge>
+                        <span className="text-muted-foreground tabular-nums">{seconds(c.durationSec)}</span>
+                        <span className="ml-auto text-xs text-muted-foreground">{when(c.createdAt)}</span>
+                      </Button>
+                    </CollapsibleTrigger>
+                    {c.error && <p className="mt-1 text-xs text-destructive">{c.error}</p>}
+                    <CollapsibleContent>
+                      {expanded && (
+                        <ol className="mt-2 flex flex-col gap-1.5 border-l pl-3 text-sm">
+                          {open.transcript.length === 0 && <li className="text-muted-foreground">Nothing was said.</li>}
+                          {open.transcript.map((t, i) => (
+                            <li key={i}>
+                              <span className="text-xs text-muted-foreground tabular-nums">{seconds(Math.round(t.offsetMs / 1000))} </span>
+                              <span className="font-medium">{t.speaker === "CUSTOMER" ? "Caller" : "Employee"}: </span>
+                              {t.text}
+                              {t.interrupted && <span className="text-xs text-muted-foreground"> (interrupted)</span>}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </CollapsibleContent>
+                  </li>
+                </Collapsible>
               );
             })}
           </ul>

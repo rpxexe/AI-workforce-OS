@@ -3,11 +3,11 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const DOTS: Record<ConversationStatus, string> = {
-  AI_ACTIVE: "bg-sky-500",
-  WAITING_FOR_HUMAN: "bg-amber-500",
-  HUMAN_ACTIVE: "bg-emerald-500",
+  AI_ACTIVE: "bg-info",
+  WAITING_FOR_HUMAN: "bg-warning",
+  HUMAN_ACTIVE: "bg-success",
   RESOLVED: "bg-muted-foreground/40",
-  REOPENED: "bg-violet-500",
+  REOPENED: "bg-chart-3",
 };
 
 /** The dot is decoration; the label carries the state. */

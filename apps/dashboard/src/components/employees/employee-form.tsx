@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ApiRequestError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -140,28 +141,28 @@ export function EmployeeForm({
           <span id="avatar-label" className="text-sm font-medium">
             Icon
           </span>
-          <div role="radiogroup" aria-labelledby="avatar-label" className="flex flex-wrap gap-2">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            aria-labelledby="avatar-label"
+            value={form.avatar}
+            onValueChange={(v) => v && set("avatar", v as EmployeeConfig["avatar"])}
+            className="flex-wrap"
+          >
             {AVATARS.map((avatar) => {
               const Icon = AVATAR_ICONS[avatar];
-              const selected = form.avatar === avatar;
               return (
-                <button
+                <ToggleGroupItem
                   key={avatar}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
+                  value={avatar}
                   aria-label={AVATAR_LABELS[avatar]}
-                  onClick={() => set("avatar", avatar)}
-                  className={cn(
-                    "flex size-10 items-center justify-center rounded-lg border transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-                    selected ? "border-primary bg-primary text-primary-foreground" : "bg-background hover:bg-muted",
-                  )}
+                  className="size-10 data-[state=on]:border-primary data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
                 >
                   <Icon className="size-5" aria-hidden />
-                </button>
+                </ToggleGroupItem>
               );
             })}
-          </div>
+          </ToggleGroup>
         </div>
 
         <div className="grid gap-5 sm:grid-cols-2">
@@ -545,6 +546,25 @@ export function EmployeeForm({
                 onChange={(e) => setEscalation({ afterFailedAttempts: Number(e.target.value) || 0 })}
                 className="w-24"
                 {...invalid("afterFailedAttempts", issues["escalation.afterFailedAttempts"])}
+              />
+            </Field>
+
+            <Field
+              id="reminderMinutes"
+              label="Remind if nobody takes it after (minutes)"
+              hint="Alerts the team again, and emails the contact, when a handed-off conversation is still waiting. 0 turns reminders off."
+              error={issues["escalation.reminderMinutes"]}
+              className="sm:max-w-sm"
+            >
+              <Input
+                id="reminderMinutes"
+                type="number"
+                min={0}
+                max={240}
+                value={form.escalation.reminderMinutes}
+                onChange={(e) => setEscalation({ reminderMinutes: Number(e.target.value) || 0 })}
+                className="w-24"
+                {...invalid("reminderMinutes", issues["escalation.reminderMinutes"])}
               />
             </Field>
 

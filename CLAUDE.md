@@ -32,3 +32,13 @@ pnpm inngest:dev  # Inngest dev server for durable background jobs (with INNGEST
 - On Windows run `pnpm add` from the repo root with `--filter`, or from a `D:\` (upper-case) path.
 - Read `apps/dashboard/AGENTS.md` before writing Next.js code: version 16 differs from older ones.
 - Only build what the current phase asks for. Later-phase features stay as placeholders.
+- UI is shadcn/ui only. Every shadcn component is installed in `apps/dashboard/src/components/ui/`;
+  check there before writing any markup, and build every dashboard component from it
+  (bordered boxes: Card/Item, notices: Alert, empty views: Empty, bars: Progress/Chart,
+  spinners: Spinner, filters: ToggleGroup, hints: Tooltip, show/hide: Collapsible).
+  Reuse `EmptyState`, `ErrorState`, `LoadingState`, `StatTile` from `components/states.tsx`.
+  If a primitive is missing, add it with `pnpm dlx shadcn@latest add <name>` (run in
+  `apps/dashboard`). Never hand-write a replacement, use raw `<button>`/`<input>`/`<select>`/
+  `<label>`/`<table>`, or add another UI library (MUI, Chakra, Headless UI, etc.).
+  Icons: lucide-react only. Styling: Tailwind plus the theme tokens in `globals.css`
+  (incl. `success`, `warning`, `info`, `chart-1..5`); no hard-coded colors.

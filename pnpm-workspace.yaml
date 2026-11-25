@@ -3,11 +3,13 @@ packages:
   - packages/*
   - workers/*
 
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
+
 onlyBuiltDependencies:
   - "@prisma/engines"
   - esbuild
   - prisma
-
-ignoredBuiltDependencies:
-  - sharp
-  - unrs-resolver
+patchedDependencies:
+  skullet@0.0.3: patches/skullet@0.0.3.patch

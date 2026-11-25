@@ -34,10 +34,10 @@ export const NODE_ICONS: Record<NodeType, LucideIcon> = {
 
 const RUN_STATUS: Record<WorkflowExecutionStatus | "SUCCEEDED", { label: string; dot: string }> = {
   QUEUED: { label: "Queued", dot: "bg-muted-foreground/50" },
-  RUNNING: { label: "Running", dot: "bg-sky-500" },
-  WAITING: { label: "Waiting", dot: "bg-amber-500" },
-  COMPLETED: { label: "Completed", dot: "bg-emerald-500" },
-  SUCCEEDED: { label: "Succeeded", dot: "bg-emerald-500" },
+  RUNNING: { label: "Running", dot: "bg-info" },
+  WAITING: { label: "Waiting", dot: "bg-warning" },
+  COMPLETED: { label: "Completed", dot: "bg-success" },
+  SUCCEEDED: { label: "Succeeded", dot: "bg-success" },
   FAILED: { label: "Failed", dot: "bg-destructive" },
 };
 

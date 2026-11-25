@@ -46,8 +46,8 @@ export function EmployeeAvatar({ avatar, className }: { avatar: EmployeeConfig["
 
 const STATUS: Record<EmployeeStatus, { label: string; dot: string }> = {
   DRAFT: { label: "Draft", dot: "bg-muted-foreground/50" },
-  ACTIVE: { label: "Active", dot: "bg-emerald-500" },
-  PAUSED: { label: "Paused", dot: "bg-amber-500" },
+  ACTIVE: { label: "Active", dot: "bg-success" },
+  PAUSED: { label: "Paused", dot: "bg-warning" },
   ARCHIVED: { label: "Archived", dot: "bg-muted-foreground/30" },
 };
 

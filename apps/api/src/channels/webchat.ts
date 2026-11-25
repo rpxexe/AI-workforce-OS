@@ -16,6 +16,7 @@ import { channelConfigSchemas, chatMessageSchema, chatSessionSchema, normalizeCu
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { httpError } from "../auth.ts";
+import type { Presence } from "../live.ts";
 import { liveEmployee, overLimit, recordMessage, updateMessage, RATE_LIMIT_PER_MINUTE, type ChannelService } from "./service.ts";
 
 const WIDGET = readFileSync(new URL("./widget.js", import.meta.url), "utf8");
@@ -49,7 +50,7 @@ const readSession = (secret: string, channelId: string, header: string | undefin
 const frame = (event: ChatStreamEvent) => `data: ${JSON.stringify(event)}\n\n`;
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-export function webChatRoutes(app: FastifyInstance, service: ChannelService) {
+export function webChatRoutes(app: FastifyInstance, service: ChannelService, presence: Presence) {
   /** The enabled web chat channel with this key, if the page asking is allowed to show it. */
   const channelFor = async (req: FastifyRequest) => {
     const { key } = keyParams.parse(req.params);
@@ -135,7 +136,7 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
     if (!session) throw httpError(401, "Your chat session has expired. Reload the page to continue.");
     const { after } = z.object({ after: z.iso.datetime() }).parse(req.query);
     const conversationId = await service.findConversation(channel, session.u);
-    if (!conversationId) return { status: "AI_ACTIVE", messages: [] };
+    if (!conversationId) return { status: "AI_ACTIVE", messages: [], agent: null };
     const [conversation, messages] = await Promise.all([
       prisma.conversation.findUnique({ where: { id: conversationId }, select: { status: true } }),
       prisma.conversationMessage.findMany({
@@ -145,7 +146,8 @@ Each visitor is anonymous unless your website vouches for them.</p></main>
         select: { role: true, content: true, createdAt: true },
       }),
     ]);
-    return { status: conversation?.status ?? "AI_ACTIVE", messages };
+    // The person answering (first name and whether they are typing), once they have written or typed in the inbox.
+    return { status: conversation?.status ?? "AI_ACTIVE", messages, agent: presence.of(conversationId) };
   });
 
   // One visitor message; the reply streams back as server-sent events, like test chat.

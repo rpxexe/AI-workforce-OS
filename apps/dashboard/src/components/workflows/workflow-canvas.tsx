@@ -30,7 +30,7 @@ function Step({ data, selected }: NodeProps<StepNode>) {
   return (
     <div
       className={cn(
-        "w-56 rounded-lg border bg-card px-3 py-2 text-card-foreground shadow-sm",
+        "w-56 rounded-lg border bg-card px-3 py-2 text-card-foreground shadow-sm dark:shadow-none",
         selected && "ring-2 ring-ring",
         hasIssue && "border-destructive",
       )}
@@ -162,7 +162,7 @@ export function WorkflowCanvas({
   };
 
   return (
-    <div className={cn("h-[560px] w-full overflow-hidden rounded-lg border bg-muted/30", className)}>
+    <div className={cn("h-[560px] w-full overflow-hidden rounded-lg border bg-muted/30 shadow-sm dark:shadow-none", className)}>
       <ReactFlow
         nodes={nodes}
         edges={edges}

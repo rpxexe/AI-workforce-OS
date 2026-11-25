@@ -34,7 +34,8 @@ import { ApiKeys, Webhooks } from "@/components/developer/developer-api";
 import { formatDate } from "@/components/employees/meta";
 import { AuditLog, ProviderMetrics } from "@/components/providers/provider-activity";
 import { ProviderList, platformNames } from "@/components/providers/provider-list";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -66,7 +67,7 @@ function Workspaces() {
     setError(undefined);
     setSaving(true);
     try {
-      const created = await api<Workspace>("/workspaces", { method: "POST", body: parsed.data });
+      const created = await api<Workspace>("/workspaces", { method: "POST", body: parsed.data, toast: `Workspace "${parsed.data.name}" created` });
       setName("");
       reload();
       select(created.id);
@@ -86,25 +87,28 @@ function Workspaces() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
-        <ul className="flex flex-col divide-y rounded-lg border">
-          {workspaces.map((w) => (
-            <li key={w.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium">{w.name}</span>
-                <span className="text-sm text-muted-foreground">Created {formatDate(w.createdAt)}</span>
-              </span>
-              {w.id === current.id ? (
-                <Badge variant="secondary">Current</Badge>
-              ) : (
-                <Button variant="outline" size="sm" onClick={() => select(w.id)}>
-                  Switch
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
+        <Card className="gap-0 py-0">
+          <ul className="flex flex-col divide-y">
+            {workspaces.map((w) => (
+              <li key={w.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">{w.name}</span>
+                  <span className="text-sm text-muted-foreground">Created {formatDate(w.createdAt)}</span>
+                </span>
+                {w.id === current.id ? (
+                  <Badge variant="secondary">Current</Badge>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={() => select(w.id)}>
+                    Switch
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Card>
 
         {isAdmin ? (
+
           <form onSubmit={create} noValidate className="flex flex-col gap-1.5">
             <Label htmlFor="workspace-name">New workspace</Label>
             <div className="flex max-w-md gap-2">
@@ -199,11 +203,21 @@ function SectionHeading({ title, description }: { title: string; description: st
 
 type ProvidersQuery = { data?: ProviderSettings; error?: { message: string }; reload: () => void };
 
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE_PROVIDERS: ProviderSettings = {
+  connections: [],
+  platform: { llm: ["OpenAI"], stt: ["Deepgram"], tts: ["ElevenLabs"], telephony: ["Twilio"], messaging: ["Meta WhatsApp"], email: ["Resend"], storage: ["Amazon S3"] },
+  canStoreKeys: true,
+};
+
 /** Renders `children` once the organization's provider settings have loaded. */
 function WithProviders({ query, children }: { query: ProvidersQuery; children: (settings: ProviderSettings) => ReactNode }) {
   if (query.error && !query.data) return <ErrorState message={query.error.message} onRetry={query.reload} />;
-  if (!query.data) return <LoadingState rows={4} />;
-  return children(query.data);
+  return (
+    <Skullet data={query.data} sample={SAMPLE_PROVIDERS} id="settings-providers" label="Loading providers">
+      {(settings) => children(settings)}
+    </Skullet>
+  );
 }
 
 function ProviderOverview({ settings }: { settings: ProviderSettings }) {
@@ -330,7 +344,8 @@ function CredentialsAudit({ settings, isAdmin }: { settings: ProviderSettings; i
           </ul>
         </CardContent>
       </Card>
-      {isAdmin ? <AuditLog settings={settings} /> : <p className="text-sm text-muted-foreground">Only organization admins can see the audit log.</p>}
+      {/* The audit log fetches on mount, so the skeleton's sample render leaves it out. */}
+      {isAdmin ? settings === SAMPLE_PROVIDERS ? null : <AuditLog settings={settings} /> : <p className="text-sm text-muted-foreground">Only organization admins can see the audit log.</p>}
     </div>
   );
 }
@@ -505,8 +520,8 @@ function SectionMenu({ section }: { section: SectionId }) {
     <nav
       aria-label="Settings sections"
       className={cn(
-        "hidden shrink-0 flex-col gap-1 overflow-hidden rounded-xl border bg-card p-2 transition-[width] duration-200 lg:sticky lg:top-16 lg:flex",
-        collapsed ? "w-[3.25rem]" : "w-52",
+        "hidden shrink-0 flex-col gap-1 overflow-hidden rounded-lg border bg-card p-2 shadow-sm dark:shadow-none transition-[width] duration-200 lg:sticky lg:top-16 lg:flex",
+        collapsed ? "w-14" : "w-56",
       )}
     >
       <div className={cn("flex items-center", collapsed ? "justify-center" : "justify-between pl-2")}>
@@ -528,11 +543,11 @@ function SectionMenu({ section }: { section: SectionId }) {
         </Tooltip>
       </div>
       {GROUPS.map((group, index) => (
-        <div key={group.label} role="group" aria-label={group.label} className="flex flex-col gap-0.5">
+        <div key={group.label} role="group" aria-label={group.label} className="flex flex-col gap-px">
           {collapsed ? (
             index > 0 && <span aria-hidden className="mx-auto my-1.5 h-px w-6 bg-border" />
           ) : (
-            <span className="px-2 pt-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{group.label}</span>
+            <span className="px-2 pt-2 pb-1 text-xs font-medium text-muted-foreground">{group.label}</span>
           )}
           {group.ids.map((id) => {
             const { label, icon: Icon } = SECTIONS.find((s) => s.id === id)!;
@@ -543,7 +558,8 @@ function SectionMenu({ section }: { section: SectionId }) {
                 aria-current={id === section ? "page" : undefined}
                 aria-label={collapsed ? label : undefined}
                 className={cn(
-                  "flex h-8 items-center gap-2 rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-muted aria-[current=page]:font-medium aria-[current=page]:text-foreground",
+                  // Same look as the main sidebar: solid primary when current in light mode, gray fill in dark mode.
+                  "flex h-8 items-center gap-2 rounded-md text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 aria-[current=page]:bg-primary aria-[current=page]:text-primary-foreground aria-[current=page]:hover:bg-primary/90 dark:aria-[current=page]:bg-accent dark:aria-[current=page]:text-accent-foreground",
                   collapsed ? "w-8 justify-center self-center" : "px-2",
                 )}
               >

@@ -10,15 +10,26 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { formatDate } from "@/components/employees/meta";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Item, ItemContent } from "@/components/ui/item";
 import { Label } from "@/components/ui/label";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : "Something went wrong. Try again.");
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: KnowledgeSource[] = Array.from({ length: 6 }, (_, i) => ({
+  id: `sample-${i}`,
+  name: "Pricing and plans",
+  description: "",
+  documentCount: 12,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+}));
 
 /** Shows which passages a question would retrieve, across every source in the workspace. */
 function KnowledgeSearch({ base }: { base: string }) {
@@ -26,18 +37,18 @@ function KnowledgeSearch({ base }: { base: string }) {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [result, setResult] = useState<{ query: string; matches: KnowledgeMatch[] }>();
-  const [error, setError] = useState<string>();
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
     const asked = query.trim();
     if (!asked) return;
     setSearching(true);
-    setError(undefined);
     try {
+      // No success toast: the matches appear below.
       setResult({ query: asked, matches: await api<KnowledgeMatch[]>(`${base}/search`, { method: "POST", body: { query: asked } }) });
-    } catch (err) {
-      setError(messageOf(err));
+    } catch {
+      // The toast in useApi shows why it failed; drop the old matches so they are not read as this question's.
+      setResult(undefined);
     } finally {
       setSearching(false);
     }
@@ -68,8 +79,7 @@ function KnowledgeSearch({ base }: { base: string }) {
             {searching ? "Searching" : "Search"}
           </Button>
         </form>
-        {error && <ErrorState message={error} />}
-        {result && !error && (
+        {result && (
           <div aria-live="polite" className="flex flex-col gap-3">
             {result.matches.length === 0 ? (
               <p className="text-sm text-muted-foreground">
@@ -78,19 +88,23 @@ function KnowledgeSearch({ base }: { base: string }) {
             ) : (
               <ol className="flex flex-col gap-3">
                 {result.matches.map((m) => (
-                  <li key={m.chunkId} className="rounded-lg border p-3">
-                    <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-                      <Link href={`/knowledge/${m.sourceId}`} className="font-medium text-foreground hover:underline">
-                        {m.documentName}
-                      </Link>
-                      <span>
-                        {m.sourceName}
-                        {m.page !== null && ` · page ${m.page}`}
-                      </span>
-                      <span className="tabular-nums">{Math.round(m.score * 100)}% match</span>
-                    </p>
-                    <p className="mt-1.5 line-clamp-4 text-sm whitespace-pre-wrap">{m.content}</p>
-                  </li>
+                  <Item key={m.chunkId} variant="outline" asChild>
+                    <li>
+                      <ItemContent className="gap-1.5">
+                          <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                            <Link href={`/knowledge/${m.sourceId}`} className="font-medium text-foreground hover:underline">
+                              {m.documentName}
+                            </Link>
+                            <span>
+                              {m.sourceName}
+                              {m.page !== null && ` · page ${m.page}`}
+                            </span>
+                            <span className="tabular-nums">{Math.round(m.score * 100)}% match</span>
+                          </p>
+                          <p className="line-clamp-4 text-sm whitespace-pre-wrap">{m.content}</p>
+                      </ItemContent>
+                    </li>
+                  </Item>
                 ))}
               </ol>
             )}
@@ -119,7 +133,7 @@ export default withWorkspace(function KnowledgePage({ workspace }) {
     setCreating(true);
     setCreateError(undefined);
     try {
-      const source = await api<KnowledgeSource>(`${base}/sources`, { method: "POST", body: parsed.data });
+      const source = await api<KnowledgeSource>(`${base}/sources`, { method: "POST", body: parsed.data, toast: `${parsed.data.name} created` });
       setName("");
       router.push(`/knowledge/${source.id}`);
     } catch (err) {
@@ -164,9 +178,9 @@ export default withWorkspace(function KnowledgePage({ workspace }) {
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState />
-      ) : data.length === 0 ? (
+      ) : (
+        <Skullet data={data} sample={SAMPLE} id="knowledge-sources" label="Loading knowledge sources">
+          {(data) => data.length === 0 ? (
         <EmptyState
           icon={BookOpen}
           title="No knowledge sources yet"
@@ -183,7 +197,7 @@ export default withWorkspace(function KnowledgePage({ workspace }) {
               <li key={source.id}>
                 <Link
                   href={`/knowledge/${source.id}`}
-                  className="flex h-full flex-col gap-1 rounded-xl border bg-card p-4 hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+                  className="flex h-full flex-col gap-1 rounded-lg border bg-card p-4 shadow-sm dark:shadow-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
                 >
                   <span className="truncate font-medium">{source.name}</span>
                   <span className="text-sm text-muted-foreground">
@@ -196,6 +210,8 @@ export default withWorkspace(function KnowledgePage({ workspace }) {
           </ul>
           <KnowledgeSearch base={base} />
         </>
+          )}
+        </Skullet>
       )}
     </div>
   );

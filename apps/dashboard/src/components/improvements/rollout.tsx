@@ -6,11 +6,10 @@ import { useState, type FormEvent } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { KpiResult } from "@/components/improvements/meta";
 import { timeAgo } from "@/components/inbox/meta";
-import { ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useApi } from "@/lib/api";
+import { useApi, type ToastOption } from "@/lib/api";
 
 const SHARES = [5, 10, 25, 50, 100] as const;
 
@@ -27,17 +26,15 @@ export function RolloutPanel({
   onChange: (rollout: RolloutInfo) => void;
 }) {
   const api = useApi();
-  const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const path = `/workspaces/${workspaceId}/employees/${rollout.employeeId}/rollouts/${rollout.id}`;
-  const act = async (body: object) => {
-    setError(undefined);
+  const act = async (body: object, toast: ToastOption) => {
     setBusy(true);
     try {
-      onChange(await api<RolloutInfo>(path, { method: "PATCH", body }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+      onChange(await api<RolloutInfo>(path, { method: "PATCH", body, toast }));
+    } catch {
+      // The toast in useApi shows why it failed.
     } finally {
       setBusy(false);
     }
@@ -65,7 +62,7 @@ export function RolloutPanel({
         <div className="flex flex-wrap items-end gap-2">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor={`share-${rollout.id}`}>Share of customers</Label>
-            <Select value={String(rollout.percent)} onValueChange={(v) => act({ action: "set_percent", percent: Number(v) })} disabled={busy}>
+            <Select value={String(rollout.percent)} onValueChange={(v) => act({ action: "set_percent", percent: Number(v) }, `Share set to ${v}%`)} disabled={busy}>
               <SelectTrigger id={`share-${rollout.id}`} className="w-32">
                 <SelectValue />
               </SelectTrigger>
@@ -85,7 +82,8 @@ export function RolloutPanel({
                 title: `Promote v${rollout.candidateVersion} to everyone?`,
                 description: `Version ${rollout.candidateVersion} is published and every customer is served it. You can roll back to v${rollout.controlVersion} afterwards.`,
                 confirmLabel: "Promote",
-                onConfirm: () => act({ action: "promote" }),
+                onConfirm: () =>
+                  act({ action: "promote" }, { loading: `Promoting v${rollout.candidateVersion}…`, success: `v${rollout.candidateVersion} promoted to everyone` }),
               })
             }
           >
@@ -100,7 +98,7 @@ export function RolloutPanel({
                 title: "Roll back this rollout?",
                 description: `Every customer goes back to v${rollout.controlVersion}. Version ${rollout.candidateVersion} stays saved.`,
                 confirmLabel: "Roll back",
-                onConfirm: () => act({ action: "rollback" }),
+                onConfirm: () => act({ action: "rollback" }, { loading: "Rolling back…", success: `Rolled back to v${rollout.controlVersion}` }),
               })
             }
           >
@@ -109,7 +107,6 @@ export function RolloutPanel({
           </Button>
         </div>
       )}
-      {error && <ErrorState message={error} />}
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
@@ -138,7 +135,6 @@ export function StartRollout({
   const [version, setVersion] = useState(String(defaultVersion ?? versions[0] ?? ""));
   const [percent, setPercent] = useState("10");
   const [kpi, setKpi] = useState<Kpi>(defaultKpi);
-  const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
 
@@ -149,17 +145,17 @@ export function StartRollout({
       description: `${percent}% of customers will be answered by version ${version} on every channel; the rest stay on v${liveVersion}. You can change the share, promote or roll back at any time.`,
       confirmLabel: "Start rollout",
       onConfirm: async () => {
-        setError(undefined);
         setBusy(true);
         try {
           onStarted(
             await api<RolloutInfo>(`/workspaces/${workspaceId}/employees/${employeeId}/rollouts`, {
               method: "POST",
               body: { version: Number(version), percent: Number(percent), kpi },
+              toast: { loading: "Starting rollout…", success: `Rollout of v${version} started` },
             }),
           );
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+        } catch {
+          // The toast in useApi shows why it failed.
         } finally {
           setBusy(false);
         }
@@ -220,7 +216,6 @@ export function StartRollout({
           {busy ? "Starting" : "Start rollout"}
         </Button>
       </div>
-      {error && <ErrorState message={error} />}
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </form>
   );

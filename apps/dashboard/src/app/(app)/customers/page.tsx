@@ -5,12 +5,25 @@ import { Search, Users } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { timeAgo } from "@/components/inbox/meta";
-import { EmptyState, ErrorState, LoadingState, PageHeader } from "@/components/states";
+import { Skeleton as Skullet } from "skullet/react";
+import { EmptyState, ErrorState, PageHeader } from "@/components/states";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useApiQuery } from "@/lib/api";
 import { withWorkspace } from "@/lib/workspace";
+import { TablePager, usePaged } from "@/components/table-pager";
+
+// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
+const SAMPLE: CustomerSummary[] = Array.from({ length: 6 }, (_, i) => ({
+  id: `sample-${i}`,
+  externalId: "+919876543210",
+  name: "Priya Sharma",
+  email: "priya.sharma@example.com",
+  phone: "+919876543210",
+  company: "Sharma Textiles",
+  lastSeenAt: "2026-01-01T00:00:00.000Z",
+}));
 
 export default withWorkspace(function CustomersPage({ workspace }) {
   const [query, setQuery] = useState("");
@@ -49,9 +62,19 @@ export default withWorkspace(function CustomersPage({ workspace }) {
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
-      ) : !data ? (
-        <LoadingState rows={6} />
-      ) : data.length === 0 ? (
+      ) : (
+        <Skullet data={data} sample={SAMPLE} id="customers-list" label="Loading customers">
+          {(data) => <CustomerList data={data} search={search} />}
+        </Skullet>
+      )}
+      {data?.length === 200 && <p className="text-xs text-muted-foreground">Showing the 200 most recent. Search to find others.</p>}
+    </div>
+  );
+});
+
+function CustomerList({ data, search }: { data: CustomerSummary[]; search: string }) {
+  const customers = usePaged(data, 20, search);
+  return data.length === 0 ? (
         search ? (
           <EmptyState icon={Search} title="No customers match" description={`Nobody found for “${search}”. Try part of a name, email or phone number.`} />
         ) : (
@@ -62,6 +85,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           />
         )
       ) : (
+      <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -72,7 +96,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.map((c) => (
+            {customers.rows.map((c) => (
               <TableRow key={c.id}>
                 <TableCell className="max-w-56">
                   <Link href={`/customers/${c.id}`} className="block truncate font-medium hover:underline">
@@ -89,8 +113,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
             ))}
           </TableBody>
         </Table>
-      )}
-      {data?.length === 200 && <p className="text-xs text-muted-foreground">Showing the 200 most recent. Search to find others.</p>}
-    </div>
-  );
-});
+        <TablePager {...customers.pager} />
+      </>
+      );
+}

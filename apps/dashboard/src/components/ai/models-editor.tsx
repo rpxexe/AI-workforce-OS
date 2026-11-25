@@ -4,6 +4,7 @@ import type { ModelInfo } from "@workforce/shared";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
 /** Numbers as typed; empty means unknown. */
@@ -40,10 +41,10 @@ export function ModelsEditor({ rows, onChange, legend = "Models" }: { rows: Mode
           <Input aria-label="Context tokens" inputMode="numeric" value={m.contextTokens} onChange={(e) => setModel(i, { contextTokens: e.target.value })} placeholder="Context" />
           <Input aria-label="Input price per million tokens" inputMode="decimal" value={m.inputPricePerM} onChange={(e) => setModel(i, { inputPricePerM: e.target.value })} placeholder="In $/M" />
           <Input aria-label="Output price per million tokens" inputMode="decimal" value={m.outputPricePerM} onChange={(e) => setModel(i, { outputPricePerM: e.target.value })} placeholder="Out $/M" />
-          <label className="flex h-9 items-center gap-2 text-sm">
+          <Label className="h-9 font-normal">
             <Switch checked={m.tools} onCheckedChange={(tools) => setModel(i, { tools })} aria-label="Can call tools" />
             Tools
-          </label>
+          </Label>
           <Button type="button" variant="ghost" size="icon" aria-label="Remove model" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
             <Trash2 aria-hidden />
           </Button>
