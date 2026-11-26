@@ -518,7 +518,8 @@ export function inboxRoutes(
     const since = new Date(Date.now() - days * 86_400_000);
     const tenant = { ...within(scope), ...REAL };
     const before = new Date(since.getTime() - days * 86_400_000);
-    const nowSec = Math.floor(Date.now() / 1000);
+    // The same instant `since` was taken from (fractional seconds kept), so week 0 is exactly the period's last 7 days.
+    const nowSec = since.getTime() / 1000 + days * 86_400;
     const [active, handoffs, queue, assigned, humanActive, suggestionsTotal, suggestionsUsed, replies, started, activeDaily, previousReplies, previousActive, previousHandedOff, weeks] = await Promise.all([
       // Active: at least one message in the period (updatedAt cannot be used for the previous period, it has moved on).
       activeConversations(scope, since),
@@ -568,11 +569,11 @@ export function inboxRoutes(
       // timestamps are stored as UTC without a zone, and EXTRACT(EPOCH) reads them as UTC whatever the session zone.
       prisma.$queryRaw<{ w: number; active: number; handed: number }[]>`
         SELECT w, count(DISTINCT a)::int AS active, count(DISTINCT h)::int AS handed FROM (
-          SELECT floor((${nowSec} - EXTRACT(EPOCH FROM m."createdAt")) / 604800)::int AS w, m."conversationId" AS a, NULL::text AS h
+          SELECT GREATEST(0, floor((${nowSec} - EXTRACT(EPOCH FROM m."createdAt")) / 604800))::int AS w, m."conversationId" AS a, NULL::text AS h
           FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
           WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND m."createdAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
           UNION ALL
-          SELECT floor((${nowSec} - EXTRACT(EPOCH FROM h."requestedAt")) / 604800)::int, NULL::text, h."conversationId"
+          SELECT GREATEST(0, floor((${nowSec} - EXTRACT(EPOCH FROM h."requestedAt")) / 604800))::int, NULL::text, h."conversationId"
           FROM "Handoff" h JOIN "Conversation" c ON c.id = h."conversationId"
           WHERE h."organizationId" = ${scope.organizationId} AND h."workspaceId" = ${scope.workspaceId} AND h."requestedAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
         ) t

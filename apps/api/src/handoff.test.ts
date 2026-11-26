@@ -475,4 +475,6 @@ test("dashboard: one summary that agrees with the full analytics, scoped to the 
   assert.equal((await call("PUT", `/workspaces/${ws}/attention`, { ...next, limitUsedPercent: 10 }, adminOf(orgA))).statusCode, 400);
   assert.equal((await call("PUT", `/workspaces/${ws}/attention`, next, adminOf(orgA))).statusCode, 200);
   assert.deepEqual((await call("GET", `/workspaces/${ws}/dashboard`, undefined, memberOf(orgA))).json<DashboardSummary>().attention, next);
+  assert.deepEqual((await call("GET", `/workspaces/${ws}/attention`, undefined, memberOf(orgA))).json(), next);
+  assert.equal((await call("GET", `/workspaces/${ws}/attention`, undefined, memberOf(orgB))).statusCode, 404);
 });

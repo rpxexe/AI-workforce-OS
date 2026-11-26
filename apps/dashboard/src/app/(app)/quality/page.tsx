@@ -9,6 +9,8 @@ import {
   type EvaluationRecord,
   type EvaluatorInfo,
   type QualityOverview,
+  ATTENTION_DEFAULTS,
+  type Attention,
 } from "@workforce/shared";
 import { CircleCheck, CircleX, ClipboardCheck, Database, Gauge, Plus, ShieldCheck } from "lucide-react";
 import Link from "next/link";
@@ -150,7 +152,8 @@ type TrendRow = QualityOverview["trend"][number];
 const trendRows = (trend: QualityOverview["trend"]) => trend.map((d) => ({ ...d, pass: d.passRate === null ? null : Math.round(d.passRate * 100) }));
 
 /** Gauge colour for a 0-100 score: green from 80, amber from 60, red below. */
-const scoreColor = (score: number) => (score >= 80 ? "var(--success)" : score >= 60 ? "var(--warning)" : "var(--destructive)");
+/** Gauge colour from the workspace's "quality score below" threshold: red under it, amber within 10 points above, green beyond. */
+const scoreColor = (score: number, below: number) => (score < below ? "var(--destructive)" : score < below + 10 ? "var(--warning)" : "var(--success)");
 
 /** Graded conversations split into passing and failing, from the exact counts. */
 function PassSplit({ passing, judged }: { passing: number; judged: number }) {
@@ -420,6 +423,8 @@ function FailureBars({ rows }: { rows: QualityOverview["topFailures"] }) {
 function Overview({ workspaceId }: { workspaceId: string }) {
   const [days, setDays] = useState<number>(30);
   const { data, error, reload, loading } = useApiQuery<QualityOverview>(`/workspaces/${workspaceId}/quality?days=${days}`, { keepPrevious: true });
+  // The workspace's threshold for a low score (set on the dashboard); the default until it loads.
+  const below = useApiQuery<Attention>(`/workspaces/${workspaceId}/attention`).data?.qualityScoreBelow ?? ATTENTION_DEFAULTS.qualityScoreBelow;
 
   return (
     <div className="flex flex-col gap-6">
@@ -443,7 +448,7 @@ function Overview({ workspaceId }: { workspaceId: string }) {
       ) : (
         <div className={cn("transition-opacity duration-200", loading && data !== undefined && "opacity-60")} aria-busy={loading}>
           <Skullet data={data} sample={SAMPLE_OVERVIEW} id="quality-overview" label="Loading quality overview">
-            {(data) => <OverviewContent data={data} />}
+            {(data) => <OverviewContent data={data} below={below} />}
           </Skullet>
         </div>
       )}
@@ -451,7 +456,7 @@ function Overview({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function OverviewContent({ data }: { data: QualityOverview }) {
+function OverviewContent({ data, below }: { data: QualityOverview; below: number }) {
   const dims = EVAL_DIMENSIONS.filter((d) => data.byEmployee.some((e) => e.dimensions[d] !== undefined));
   const employeeIndex = new Map(data.byEmployee.map((e, i) => [e.employeeId, i]));
   const versions = [...data.byVersion].sort((a, b) => a.name.localeCompare(b.name) || a.version - b.version);
@@ -465,7 +470,7 @@ function OverviewContent({ data }: { data: QualityOverview }) {
     <>
       <section aria-label="Summary" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile label="Quality score" icon={Gauge} value={formatScore(data.averageScore)} hint="Average of every evaluator's score, 0-100">
-          {data.averageScore !== null && <GaugeChart value={data.averageScore} color={scoreColor(data.averageScore)} />}
+          {data.averageScore !== null && <GaugeChart value={data.averageScore} color={scoreColor(data.averageScore, below)} />}
         </StatTile>
         <StatTile label="Conversations passing" icon={CircleCheck} value={formatRate(data.passRate)} hint="No evaluator failed">
           <PassSplit passing={data.passing} judged={data.judged} />
@@ -578,7 +583,7 @@ function OverviewContent({ data }: { data: QualityOverview }) {
                     {dims.map((d) => {
                       const score = e.dimensions[d];
                       return (
-                        <TableCell key={d} className={cn("text-right tabular-nums", score !== undefined && score < 70 && "text-destructive")}>
+                        <TableCell key={d} className={cn("text-right tabular-nums", score !== undefined && score < below && "text-destructive")}>
                           {formatScore(score ?? null)}
                         </TableCell>
                       );

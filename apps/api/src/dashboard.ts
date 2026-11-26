@@ -25,6 +25,11 @@ export function dashboardRoutes(app: FastifyInstance, authenticate: Authenticate
     return { ...ATTENTION_DEFAULTS, ...(stored.success ? stored.data : {}) };
   };
 
+  app.get("/workspaces/:workspaceId/attention", async (req) => {
+    const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(req.params);
+    return attentionOf(await inWorkspace(member(req), workspaceId));
+  });
+
   app.put("/workspaces/:workspaceId/attention", async (req) => {
     const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(req.params);
     const scope = await inWorkspace(admin(req), workspaceId);

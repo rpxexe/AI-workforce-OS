@@ -503,6 +503,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     },
     "insights/analyze": {
       retries: 1, // no model call; the upsert makes a retry harmless
+      // One at a time per workspace, so a sweep of 500 does not take every database connection at once.
+      orderedBy: "workspaceId",
       handler: ({ conversationId, ...scope }) => analyzeInsights(scope, [conversationId]),
     },
     "improvement/analyze": {
