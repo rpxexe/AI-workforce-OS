@@ -24,9 +24,12 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import { CommandMenu } from "@/components/command-menu";
 import { NavUser } from "@/components/nav-user";
 import { ErrorState } from "@/components/states";
+import { Spinner } from "@/components/ui/spinner";
+import { clearApiCache, useRefreshing } from "@/lib/api";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -274,10 +277,35 @@ function ChooseOrganization() {
   );
 }
 
+/** G then this letter opens the page (shown in the command menu). */
+const GO_KEYS: Record<string, string> = {
+  "/": "d",
+  "/analytics": "a",
+  "/reports": "r",
+  "/employees": "e",
+  "/conversations": "c",
+  "/customers": "u",
+  "/knowledge": "k",
+  "/workflows": "w",
+  "/quality": "q",
+  "/improvements": "i",
+  "/model-routing": "m",
+  "/billing": "b",
+  "/settings": "s",
+};
+const COMMAND_PAGES = [
+  ...NAV_GROUPS.flatMap((group) => group.items.map((item) => ({ ...item, group: group.label }))),
+  { ...BILLING, group: "Account" },
+  { ...SETTINGS, group: "Account" },
+].map((page) => ({ ...page, key: GO_KEYS[page.href] }));
+
 export function AppShell({ children, defaultOpen }: { children: ReactNode; defaultOpen: boolean }) {
-  const { isLoaded, orgId } = useAuth();
+  const { isLoaded, orgId, userId } = useAuth();
   const pathname = usePathname();
   const title = NAV.find(({ href }) => isActive(pathname, href))?.label;
+  const refreshing = useRefreshing();
+  // Cached responses belong to one user in one organization: drop them when either changes or the user signs out.
+  useEffect(() => clearApiCache, [userId, orgId]);
 
   // Keyed by organization: switching it discards every piece of the previous tenant's data.
   return (
@@ -288,11 +316,16 @@ export function AppShell({ children, defaultOpen }: { children: ReactNode; defau
           <AppSidebar />
           {/* min-w-0: lets truncated text shrink instead of widening the page past the viewport. */}
           <SidebarInset className="min-w-0">
-            <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
-              <SidebarTrigger className="-ml-1" />
-              <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
-              <span className="text-sm font-medium">{title}</span>
-              <div className="ml-auto flex items-center gap-2">
+            {/* Three columns: the page title, the search box centred, the account controls. */}
+            <header className="sticky top-0 z-10 grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-2 border-b bg-background/80 px-4 backdrop-blur md:grid-cols-[1fr_minmax(0,24rem)_1fr]">
+              <div className="flex min-w-0 items-center gap-2">
+                <SidebarTrigger className="-ml-1" />
+                <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+                <span className="truncate text-sm font-medium">{title}</span>
+              </div>
+              <div className="flex justify-center">{orgId && <CommandMenu pages={COMMAND_PAGES} />}</div>
+              <div className="flex items-center justify-end gap-2">
+                {refreshing && <Spinner className="text-muted-foreground" aria-label="Refreshing" />}
                 <OrganizationSwitcher hidePersonal afterSelectOrganizationUrl="/" afterCreateOrganizationUrl="/" />
                 <ThemeToggle />
               </div>

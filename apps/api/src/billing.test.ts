@@ -117,9 +117,9 @@ test("the ledger: one traceable row per source, metered twice without doubling, 
     prisma.aiUsage.create({ data: usage({ model: "unpriced-model" }) }),
   ]);
   const conversation = await prisma.conversation.create({
-    data: { ...scope, employeeId: ava, channel: "whatsapp", title: "Hi", createdBy: "test", messages: { create: [{ role: "USER", content: "hi" }, { role: "ASSISTANT", content: "hello" }] } },
+    data: { ...scope, employeeId: ava, channel: "whatsapp", title: "Hi", createdBy: "test", messages: { create: [{ ...scope, role: "USER", content: "hi" }, { ...scope, role: "ASSISTANT", content: "hello" }] } },
   });
-  await prisma.conversation.create({ data: { ...scope, employeeId: ava, channel: "evaluation", title: "Replay", createdBy: "test", messages: { create: [{ role: "ASSISTANT", content: "x" }] } } });
+  await prisma.conversation.create({ data: { ...scope, employeeId: ava, channel: "evaluation", title: "Replay", createdBy: "test", messages: { create: [{ ...scope, role: "ASSISTANT", content: "x" }] } } });
   const call = { ...scope, employeeId: ava, employeeVersion: 1, direction: "INBOUND" as const, status: "COMPLETED" as const, from: "+15550001", to: "+15550002", greeting: "" };
   const settled = await prisma.call.create({ data: { ...call, durationSec: 61, endedAt: new Date(Date.now() - 20 * 60_000) } });
   const fresh = await prisma.call.create({ data: { ...call, durationSec: 30, endedAt: new Date() } });
@@ -182,7 +182,7 @@ test("limits on the Free plan: employees, conversations, messages, tool calls, s
   assert.equal((await chat({ message: "Hello again", conversationId: existing.id }))?.type, "done");
 
   // Messages: 500 AI messages a period.
-  await prisma.conversationMessage.createMany({ data: Array.from({ length: 500 }, () => ({ conversationId: existing.id, role: "ASSISTANT" as const, content: "." })) });
+  await prisma.conversationMessage.createMany({ data: Array.from({ length: 500 }, () => ({ organizationId: orgA, workspaceId: wsA, conversationId: existing.id, role: "ASSISTANT" as const, content: "." })) });
   const noMore = await chat({ message: "And again", conversationId: existing.id });
   assert.match((noMore as { error: string }).error, /ai messages per period \(500\)/);
   assert.equal(await prisma.conversationMessage.count({ where: { conversationId: existing.id, content: "And again" } }), 0, "a refused turn saves nothing");
@@ -231,6 +231,8 @@ test("limits on the Free plan: employees, conversations, messages, tool calls, s
   assert.equal(limit("messages").used, 502);
   assert.equal(limit("toolCalls").used, 201);
   assert.equal(limit("voiceMinutes").used, 31);
+  assert.ok(o.usage.daily.length >= 1);
+  assert.ok(Math.abs(o.usage.daily.reduce((s, d) => s + d.amountUsd, 0) - o.usage.amountUsd) < 1e-6, "the days add up to the period");
 
   // Without billing on, nothing is limited.
   assert.equal(await billingService({ ...METER, enforced: false }, app.log).check(orgA, ["messages", "employees"]), null);

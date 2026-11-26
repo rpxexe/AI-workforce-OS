@@ -64,6 +64,9 @@ export type InsightInput = {
   handoffs: { trigger: string }[];
 } & Pick<ExtractContext, "region" | "timezone">;
 
+/** Bump whenever analyzeConversation's rules or phrase lists change: stored insights from older versions are redone. */
+export const ANALYZER_VERSION = 1;
+
 export function analyzeConversation({ messages, status, handoffs, region, timezone }: InsightInput): ConversationInsight {
   const customer = messages.map((m, index) => ({ ...m, index })).filter((m) => m.role === "USER");
   const profile = languageProfile(customer.map((m) => m.content));

@@ -32,11 +32,12 @@ import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { meterConfigFromEnv, type MeterConfig } from "./billing/meter.ts";
 import { billingRoutes } from "./billing/routes.ts";
+import { dashboardRoutes } from "./dashboard.ts";
 import { billingService } from "./billing/service.ts";
 import { stripeClient, stripeFromEnv, type StripeConfig } from "./billing/stripe.ts";
 import { employeeRoutes } from "./employees.ts";
 import { improvementRoutes } from "./improvements.ts";
-import { inboxRoutes } from "./inbox.ts";
+import { analyzeInsights, inboxRoutes, quietInsights } from "./inbox.ts";
 import type { HandoffNotice, HeldNotice } from "@workforce/agent-runtime";
 import { inlineJobs, inngestJobs, type JobDefinitions, type JobEvents, type JobName, type Jobs, type Schedule, type Steps } from "./jobs.ts";
 import { knowledgeRoutes } from "./knowledge.ts";
@@ -187,6 +188,7 @@ export async function buildApp(
   const billing = billingService({ ...(options.billing?.meter ?? meterConfigFromEnv()), enforced: options.billing?.enforced ?? stripe !== null }, app.log);
   const planLimits = billing.check;
   billingRoutes(app, authenticate, { billing, stripe, dashboardOrigin });
+  dashboardRoutes(app, authenticate, billing);
   reportRoutes(app, authenticate);
 
   workspaceRoutes(app, authenticate);
@@ -499,6 +501,12 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         }
       },
     },
+    "insights/analyze": {
+      retries: 1, // no model call; the upsert makes a retry harmless
+      // One at a time per workspace, so a sweep of 500 does not take every database connection at once.
+      orderedBy: "workspaceId",
+      handler: ({ conversationId, ...scope }) => analyzeInsights(scope, [conversationId]),
+    },
     "improvement/analyze": {
       retries: 0, // spends model calls; patterns not written are found again by the next analysis
       handler: (scope) =>
@@ -522,6 +530,12 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
     await Promise.all(ids.map((evaluationId) => send("evaluation/requested", { evaluationId })));
     return ids.length;
   };
+  /** Queues insights/analyze for conversations that went quiet with a missing or stale insight; the insights-sweep schedule, or a timer without Inngest. */
+  const sweepInsights = async (step: Pick<Steps, "run">) => {
+    const rows = await step.run("find-conversations", () => quietInsights({ idleMs: EVALUATION_IDLE_MS }));
+    await Promise.all(rows.map((row) => send("insights/analyze", row)));
+    return rows.length;
+  };
   const schedules: Schedule[] = [
     {
       id: "workflow-sweep",
@@ -534,6 +548,7 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
       },
     },
     { id: "evaluation-sweep", cron: "*/5 * * * *", handler: sweepEvaluations },
+    { id: "insights-sweep", cron: "*/5 * * * *", handler: sweepInsights },
     { id: "improvement-analysis", cron: "0 6 * * *", handler: analyzeAll },
     // The usage meter over every organization: catches what no limit check or billing page metered (3 days back, idempotent).
     { id: "usage-meter", cron: "*/5 * * * *", handler: (step) => step.run("meter", () => meterAll()) },
@@ -560,6 +575,8 @@ Open it in the inbox: ${dashboardOrigin}/conversations/${n.conversationId}`,
         sweep = sweep
           .then(() => sweepEvaluations({ run: (_id, fn) => fn() }))
           .catch((err: unknown) => app.log.error({ err }, "Evaluation sweep failed"))
+          .then(() => sweepInsights({ run: (_id, fn) => fn() }))
+          .catch((err: unknown) => app.log.error({ err }, "Insights sweep failed"))
           .then(meterAll)
           .catch((err: unknown) => app.log.error({ err }, "Usage meter failed"));
       }, 5 * 60_000)

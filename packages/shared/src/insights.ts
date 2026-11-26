@@ -100,6 +100,8 @@ export type InsightsOverview = {
   entities: { type: EntityType; count: number }[];
   resolution: Record<Resolution, number>;
   escalation: { conversations: number; rate: number | null; withSignals: number };
+  /** Sentiment of the analyzed conversations, each dated by its last activity (UTC day), oldest first; days with none are left out. */
+  sentimentDaily: ({ date: string } & Record<Sentiment, number>)[];
 };
 
 // Verhoeff check digit tables (Aadhaar numbers carry one).

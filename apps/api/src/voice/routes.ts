@@ -178,6 +178,8 @@ export function voiceRoutes(app: FastifyInstance, authenticate: Authenticate, vo
         const base = Date.now();
         await tx.conversationMessage.createMany({
           data: report.turns.map((t, i) => ({
+            organizationId: conversation.organizationId,
+            workspaceId: conversation.workspaceId,
             conversationId: conversation.id,
             role: t.speaker === "CUSTOMER" ? ("USER" as const) : ("ASSISTANT" as const),
             content: t.text,

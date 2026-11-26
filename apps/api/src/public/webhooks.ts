@@ -77,7 +77,8 @@ export function webhookService(deps: {
         WHERE c.channel <> ${EVALUATION_CHANNEL} AND c.status = 'RESOLVED' AND c."resolvedAt" >= ws.since
         UNION ALL
         SELECT t.type, m.id, t.type || ':' || m.id, c."organizationId", c."workspaceId", m."createdAt"
-        FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId" JOIN ws USING ("organizationId", "workspaceId")
+        FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
+        JOIN ws ON ws."organizationId" = c."organizationId" AND ws."workspaceId" = c."workspaceId"
         CROSS JOIN LATERAL (SELECT CASE WHEN m.role = 'USER' THEN 'message.received' ELSE 'message.sent' END AS type) t
         WHERE c.channel <> ${EVALUATION_CHANNEL} AND m."createdAt" >= ws.since
         UNION ALL

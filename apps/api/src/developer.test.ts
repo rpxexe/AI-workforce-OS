@@ -613,7 +613,8 @@ test("webhooks: secret rotation signs with both secrets, test events, catching u
 });
 
 test("the SDK's generated types match the contract", () => {
-  const file = readFileSync(new URL("../../../packages/sdk/src/types.ts", import.meta.url), "utf8");
+  // Git may check the file out with CRLF (core.autocrlf on Windows); the contract is the text, not the line endings.
+  const file = readFileSync(new URL("../../../packages/sdk/src/types.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
   assert.equal(file, renderTypes(), "run pnpm --filter @workforce/sdk generate");
 });
 

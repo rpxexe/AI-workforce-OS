@@ -20,6 +20,7 @@ import {
   type WorkflowDetail,
   type WorkflowExecutionDetail,
   type WorkflowExecutionSummary,
+  type WorkflowListItem,
   type WorkflowSummary,
   type Workspace,
 } from "@workforce/shared";
@@ -338,6 +339,10 @@ test("a failed step fails the run; retry runs it again from that step", async ()
     [["start", 1, "SUCCEEDED"], ["crm", 1, "SUCCEEDED"], ["notify", 1, "FAILED"], ["notify", 2, "SUCCEEDED"], ["done", 1, "SUCCEEDED"]],
   );
   assert.deepEqual(done.steps[3]?.output, { status: 200, body: { received: true } });
+  // The list shows the trigger, how many runs and how the latest one ended (a retry is the same run).
+  const row = (await inject("GET", `/workspaces/${ws}/workflows`)).json<WorkflowListItem[]>().find((w) => w.id === id);
+  assert.deepEqual([row?.trigger, row?.runCount, row?.lastRunStatus], ["manual", 1, "COMPLETED"]);
+  assert.ok(row?.lastRunAt);
   // Only failed runs can be retried.
   assert.equal((await inject("POST", `/workspaces/${ws}/workflow-executions/${failed.id}/retry`)).statusCode, 409);
 });
@@ -418,6 +423,11 @@ test("roles, isolation and the webhook token", async () => {
   assert.equal((await inject("GET", `/workspaces/${ws}/workflows/${id}`, undefined, adminOf(orgB))).statusCode, 404);
   assert.equal((await inject("GET", `/workspaces/${wsB}/workflows/${id}`, undefined, adminOf(orgB))).statusCode, 404);
   assert.deepEqual((await inject("GET", `/workspaces/${wsB}/workflows`, undefined, adminOf(orgB))).json(), []);
+  // A draft's trigger comes from its latest version; never run means no runs.
+  const hooked = blankWorkflow();
+  const webhook = await createWorkflow({ ...hooked, nodes: hooked.nodes.map((n) => (n.type === "trigger" ? { ...n, config: { kind: "webhook" } } : n)) });
+  const listed = (await inject("GET", `/workspaces/${ws}/workflows`)).json<WorkflowListItem[]>().find((w) => w.id === webhook.id);
+  assert.deepEqual([listed?.trigger, listed?.runCount, listed?.lastRunAt, listed?.lastRunStatus], ["webhook", 0, null, null]);
   // A wrong token is a 404; a manual-trigger workflow cannot be started by webhook.
   const path = new URL(hookUrl ?? "").pathname;
   assert.equal((await app.inject({ method: "POST", url: `${path}x`, payload: {} })).statusCode, 404);

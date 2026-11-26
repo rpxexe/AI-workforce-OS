@@ -134,12 +134,17 @@ export type InboxConversation = Omit<InboxItem, "lastMessage" | "handoff"> & {
 /** Durations are milliseconds; null when nothing was measured. */
 export type DurationStats = { count: number; average: number | null; median: number | null; p90: number | null };
 
+/** Reply-speed band edges in ms: AI replies take seconds, people take minutes. */
+export const REPLY_BANDS = { ai: [5_000, 15_000, 60_000], human: [60_000, 300_000, 900_000] } as const;
+
 export type HandoffAnalytics = {
   days: number;
   conversations: number;
   handoffs: number;
-  /** Share of conversations handed to people at least once, 0..1. */
+  /** Share of active conversations (a message in the period) handed to people at least once, 0..1. */
   handoffRate: number | null;
+  /** The same rate over the period of equal length just before this one. */
+  previousHandoffRate: number | null;
   byTrigger: { trigger: HandoffTrigger; count: number }[];
   outcomes: { resolved: number; returnedToAi: number; open: number };
   /** Now, whatever the period. */
@@ -152,8 +157,29 @@ export type HandoffAnalytics = {
   timeToResolve: DurationStats;
   /** Customer message -> the next reply, by who replied. */
   replyTime: { ai: DurationStats; human: DurationStats };
+  /** The same medians over the period of equal length just before this one; null when nothing was measured. */
+  previousReplyMedian: { ai: number | null; human: number | null };
+  /** Replies per speed band, fastest first: below REPLY_BANDS[side][0], between each pair, and at or above the last. */
+  replyBands: { ai: number[]; human: number[] };
   byAgent: { agentId: string; handoffs: number; resolved: number; firstResponse: DurationStats }[];
   suggestions: { total: number; used: number };
+  /**
+   * One row per UTC day of the period, oldest first: conversations started, handoffs requested, handoffs resolved by people,
+   * conversations with a message (`active`) and distinct conversations handed off.
+   */
+  daily: {
+    date: string;
+    conversations: number;
+    handoffs: number;
+    resolved: number;
+    active: number;
+    handedOff: number;
+  }[];
+  /**
+   * 7-day weeks counted back from now, oldest first: distinct conversations with a message and distinct conversations
+   * handed off, each counted once per week (summing `daily` would count a conversation once per day).
+   */
+  weekly: { from: string; to: string; active: number; handedOff: number }[];
 };
 
 /**

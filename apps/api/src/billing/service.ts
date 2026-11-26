@@ -114,15 +114,24 @@ export function billingService(config: MeterConfig & { enforced: boolean }, log:
   /** The ledger for a range: totals per kind, cost and amount billed, and the newest entries with their sources. */
   async function summary(organizationId: string, from: Date, to: Date): Promise<UsageSummary> {
     await meterSince(organizationId, new Date(Math.max(from.getTime(), Date.now() - READ_WINDOW_MS)));
-    const [totals, recent] = await Promise.all([
+    const [totals, recent, perDay] = await Promise.all([
       ledger(organizationId, from, to),
       prisma.usageEvent.findMany({ where: { organizationId, occurredAt: { gte: from, lt: to } }, orderBy: { occurredAt: "desc" }, take: 100 }),
+      // Timestamps are stored as UTC, so the day is the stored date.
+      prisma.$queryRaw<{ date: string; amount: number | null }[]>`
+        SELECT to_char("occurredAt", 'YYYY-MM-DD') AS date, sum("amountUsd")::float8 AS amount
+        FROM "UsageEvent" WHERE "organizationId" = ${organizationId} AND "occurredAt" >= ${from} AND "occurredAt" < ${to}
+        GROUP BY 1`,
     ]);
+    const days: string[] = [];
+    const last = Math.min(to.getTime() - 1, Date.now());
+    for (let t = Date.parse(from.toISOString().slice(0, 10)); t <= last; t += 86_400_000) days.push(new Date(t).toISOString().slice(0, 10));
     return {
       from: from.toISOString(),
       to: to.toISOString(),
       byKind: USAGE_KINDS.map((kind) => ({ kind, ...(totals.byKind.get(kind) ?? { quantity: 0, events: 0 }) })),
       amountUsd: totals.amountUsd,
+      daily: days.map((date) => ({ date, amountUsd: Number(perDay.find((d) => d.date === date)?.amount ?? 0) })),
       recent: recent.map((e) => ({
         id: e.id,
         kind: e.kind as UsageKind,

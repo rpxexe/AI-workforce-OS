@@ -1,11 +1,14 @@
 import { configOf } from "@workforce/agent-runtime";
 import { Prisma, prisma } from "@workforce/database";
 import {
+  EMPLOYEE_STATUSES,
   employeeConfigSchema,
+  listEmployeesQuery,
   publishSchema,
   setStatusSchema,
   type EmployeeConfig,
   type EmployeeDetail,
+  type EmployeePage,
   type EmployeeSummary,
   type EmployeeVersion,
   type UsageLimiter,
@@ -46,6 +49,73 @@ export const employeeParams = workspaceParams.extend({ id: z.string().min(1) });
 export type Scope = Member & { workspaceId: string };
 /** The tenant filter every employee query carries. */
 export const within = (s: { organizationId: string; workspaceId: string }) => ({ organizationId: s.organizationId, workspaceId: s.workspaceId });
+
+const summaryInclude = {
+  versions: { orderBy: { number: "desc" }, take: 1 },
+  publishedVersion: { select: { number: true } },
+} satisfies Prisma.AiEmployeeInclude;
+
+const toSummaries = (employees: Prisma.AiEmployeeGetPayload<{ include: typeof summaryInclude }>[]): EmployeeSummary[] =>
+  employees.flatMap((e) => {
+    const latest = e.versions[0];
+    if (!latest) return [];
+    const { name, role, description, avatar, language } = configOf(latest);
+    return {
+      id: e.id,
+      status: e.status,
+      name,
+      role,
+      description,
+      avatar,
+      language,
+      latestVersion: latest.number,
+      publishedVersion: e.publishedVersion?.number ?? null,
+      updatedAt: e.updatedAt.toISOString(),
+    };
+  });
+
+const statusFilter = (archived: boolean): Prisma.AiEmployeeWhereInput["status"] => (archived ? "ARCHIVED" : { not: "ARCHIVED" });
+const newestFirst = [{ updatedAt: "desc" as const }, { id: "desc" as const }];
+
+/**
+ * A workspace's employees, most recently changed first: the archived ones, or the rest (the default).
+ * The whole list: the dashboard counts it and pickers offer it. Plan limits bound the current list.
+ */
+export async function listEmployees(scope: { organizationId: string; workspaceId: string }, archived = false): Promise<EmployeeSummary[]> {
+  const employees = await prisma.aiEmployee.findMany({
+    where: { ...within(scope), status: statusFilter(archived) },
+    orderBy: newestFirst,
+    include: summaryInclude,
+  });
+  return toSummaries(employees);
+}
+
+/** One page of the list for the Employees page, with the tab's counts by status. */
+export async function pageEmployees(
+  scope: { organizationId: string; workspaceId: string },
+  { archived, q, limit, cursor }: { archived: boolean; q?: string; limit: number; cursor?: string },
+): Promise<EmployeePage> {
+  const where = { ...within(scope), status: statusFilter(archived) };
+  const like = { contains: q, mode: "insensitive" as const };
+  const [rows, byStatus] = await Promise.all([
+    prisma.aiEmployee.findMany({
+      // Any version matching narrows it in SQL; the latest version's name or role decides below.
+      where: { ...where, ...(q && { versions: { some: { OR: [{ name: like }, { role: like }] } } }) },
+      orderBy: newestFirst,
+      take: limit + 1,
+      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+      include: summaryInclude,
+    }),
+    prisma.aiEmployee.groupBy({ by: ["status"], where, _count: { _all: true } }),
+  ]);
+  const needle = q?.toLowerCase();
+  const data = toSummaries(rows.slice(0, limit)).filter(
+    (e) => !needle || e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle),
+  );
+  const counts = Object.fromEntries(EMPLOYEE_STATUSES.map((s) => [s, 0])) as EmployeePage["counts"];
+  for (const g of byStatus) counts[g.status] = g._count._all;
+  return { data, nextCursor: rows.length > limit ? rows[limit - 1]!.id : null, counts };
+}
 
 /**
  * AI Employee CRUD. Every query is scoped to the organization in the session and to a workspace
@@ -94,33 +164,11 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
     return toDetail(employee);
   };
 
-  app.get(base, async (req): Promise<EmployeeSummary[]> => {
+  app.get(base, async (req): Promise<EmployeeSummary[] | EmployeePage> => {
     const { scope } = await scoped(req, member);
-    const { archived } = z.object({ archived: z.enum(["true", "false"]).default("false") }).parse(req.query);
-    const employees = await prisma.aiEmployee.findMany({
-      where: { ...within(scope), status: archived === "true" ? "ARCHIVED" : { not: "ARCHIVED" } },
-      orderBy: { updatedAt: "desc" },
-      // shortcut: no pagination, add a cursor when a workspace nears 200 employees
-      take: 200,
-      include: { versions: { orderBy: { number: "desc" }, take: 1 }, publishedVersion: { select: { number: true } } },
-    });
-    return employees.flatMap((e) => {
-      const latest = e.versions[0];
-      if (!latest) return [];
-      const { name, role, description, avatar, language } = configOf(latest);
-      return {
-        id: e.id,
-        status: e.status,
-        name,
-        role,
-        description,
-        avatar,
-        language,
-        latestVersion: latest.number,
-        publishedVersion: e.publishedVersion?.number ?? null,
-        updatedAt: e.updatedAt.toISOString(),
-      };
-    });
+    const { archived, q, limit, cursor } = listEmployeesQuery.parse(req.query);
+    if (limit === undefined) return listEmployees(scope, archived === "true");
+    return pageEmployees(scope, { archived: archived === "true", q, limit, cursor });
   });
 
   app.post(base, async (req, reply) => {

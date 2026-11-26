@@ -1,5 +1,6 @@
 "use client";
 
+import { usePageTab } from "@/lib/tabs";
 import type { AiSettings } from "@workforce/shared";
 import Link from "next/link";
 import { Policies } from "@/components/ai/policies";
@@ -53,6 +54,7 @@ const SAMPLE: AiSettings = {
 
 /** Organization-wide: which model each kind of work uses, and what every model call cost. Keys live in Settings. */
 export default function ModelRoutingPage() {
+  const [tab, setTab] = usePageTab("/model-routing");
   const isAdmin = useIsAdmin();
   const { data, error, reload } = useApiQuery<AiSettings>("/ai/settings");
 
@@ -68,7 +70,7 @@ export default function ModelRoutingPage() {
       ) : (
         <Skullet data={data} sample={SAMPLE} id="model-routing" label="Loading model routing">
           {(data) => (
-            <Tabs defaultValue="policies" className="gap-6">
+            <Tabs value={tab} onValueChange={setTab} className="gap-6">
               <TabsList>
                 <TabsTrigger value="policies">Policies</TabsTrigger>
                 <TabsTrigger value="usage">Usage</TabsTrigger>

@@ -9,7 +9,7 @@ import {
   defaultEmployeeConfig,
   type ChatStreamEvent,
   type CustomerDetail,
-  type CustomerSummary,
+  type CustomerPage,
   type EmployeeDetail,
   type KnowledgeMatch,
   type KnowledgeSource,
@@ -148,7 +148,7 @@ test(
     let customer: CustomerDetail | undefined;
     for (let i = 0; i < 120 && !customer?.conversations[0]?.summary; i++) {
       await new Promise((r) => setTimeout(r, 250));
-      const [summary] = (await call("GET", `${ws}/customers`)).json<CustomerSummary[]>();
+      const [summary] = (await call("GET", `${ws}/customers`)).json<CustomerPage>().data;
       if (summary) customer = (await call("GET", `${ws}/customers/${summary.id}`)).json<CustomerDetail>();
     }
     const facts = Object.fromEntries((customer?.memories ?? []).map((m) => [m.key, m.value]));

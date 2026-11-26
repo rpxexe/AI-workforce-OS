@@ -150,6 +150,17 @@ export const publishSchema = z.object({ version: z.number().int().positive() });
 /** DRAFT is not settable: it only describes an employee that has never been published. */
 export const setStatusSchema = z.object({ status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED"]) });
 
+/**
+ * GET employees: without ?limit= the whole list (pickers); with it, one page newest first by last change,
+ * ?cursor= from the previous page and ?q= matching name or role.
+ */
+export const listEmployeesQuery = z.object({
+  archived: z.enum(["true", "false"]).default("false"),
+  q: z.string().trim().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: z.string().min(1).max(100).optional(),
+});
+
 // ---- API responses (dates are ISO strings) ----
 
 export type EmployeeVersion = EmployeeConfig & { number: number; createdBy: string; createdAt: string };
@@ -162,6 +173,9 @@ export type EmployeeSummary = Pick<EmployeeConfig, "name" | "role" | "descriptio
   publishedVersion: number | null;
   updatedAt: string;
 };
+
+/** One page of employees (?limit= given); counts by status cover the whole tab (current or archived), not the page or ?q=. */
+export type EmployeePage = { data: EmployeeSummary[]; nextCursor: string | null; counts: Record<EmployeeStatus, number> };
 
 export type EmployeeDetail = {
   id: string;

@@ -5,30 +5,38 @@ import {
   EVAL_DIMENSIONS,
   EVALUATOR_KIND_LABELS,
   type DatasetSummary,
+  type EvalDimension,
   type EvaluationRecord,
   type EvaluatorInfo,
   type QualityOverview,
+  ATTENTION_DEFAULTS,
+  type Attention,
 } from "@workforce/shared";
 import { CircleCheck, CircleX, ClipboardCheck, Database, Gauge, Plus, ShieldCheck } from "lucide-react";
 import Link from "next/link";
-import { Bar, BarChart, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, XAxis, YAxis } from "recharts";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { timeAgo } from "@/components/inbox/meta";
 import { formatRate, formatScore, Provenance, ResultBadge } from "@/components/quality/meta";
 import { Skeleton as Skullet } from "skullet/react";
+import { ChartMotionProvider, useGrowMotion } from "@/components/chart-motion";
+import { Gauge as GaugeChart, SplitBar } from "@/components/charts";
+import { Reveal } from "@/components/reveal";
 import { EmptyState, ErrorState, PageHeader, StatTile } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApi, useApiQuery } from "@/lib/api";
+import { usePageTab } from "@/lib/tabs";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 const PERIODS = [7, 30, 90] as const;
@@ -43,6 +51,8 @@ const SAMPLE_OVERVIEW: QualityOverview = {
   evaluations: 128,
   averageScore: 82,
   passRate: 0.86,
+  passing: 110,
+  judged: 128,
   failures: 18,
   byDimension: EVAL_DIMENSIONS.slice(0, 5).map((dimension) => ({ dimension, results: 120, averageScore: 80, passRate: 0.85 })),
   trend: Array.from({ length: 6 }, (_, i) => ({ day: `2026-01-0${i + 1}`, evaluations: 20, averageScore: 80, passRate: 0.85 })),
@@ -136,70 +146,290 @@ const SAMPLE_DATASETS: DatasetSummary[] = ["Pricing questions", "Refund requests
   },
 }));
 
-const trendConfig = { bar: { label: "Score", color: "var(--primary)" } } satisfies ChartConfig;
+const dayLabel = (day: string) => new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+type TrendRow = QualityOverview["trend"][number];
+/** Trend rows with the pass rate as 0..100, so score and pass rate share one axis. */
+const trendRows = (trend: QualityOverview["trend"]) => trend.map((d) => ({ ...d, pass: d.passRate === null ? null : Math.round(d.passRate * 100) }));
 
-/** Average score per day: one series, so no legend; hover a day to read it. */
-function Trend({ trend }: { trend: QualityOverview["trend"] }) {
-  const [active, setActive] = useState<number>();
-  const shown = active === undefined ? trend.findLast((d) => d.evaluations > 0) : trend[active];
-  const label = (day: string) => new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
-  const describe = (d: QualityOverview["trend"][number]) => (d.evaluations === 0 ? "no evaluations" : `score ${formatScore(d.averageScore)}, ${d.evaluations} graded`);
-  // A score of 0 still draws a sliver, so a graded day is told apart from a day with nothing graded.
-  const rows = trend.map((d) => ({ ...d, bar: d.averageScore === null ? 0 : Math.max(1, d.averageScore) }));
-  const ends = [trend[0]?.day, trend.at(-1)?.day].filter((d) => d !== undefined);
+/** Gauge colour for a 0-100 score: green from 80, amber from 60, red below. */
+/** Gauge colour from the workspace's "quality score below" threshold: red under it, amber within 10 points above, green beyond. */
+const scoreColor = (score: number, below: number) => (score < below ? "var(--destructive)" : score < below + 10 ? "var(--warning)" : "var(--success)");
+
+/** Graded conversations split into passing and failing, from the exact counts. */
+function PassSplit({ passing, judged }: { passing: number; judged: number }) {
+  if (judged === 0) return null;
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-sm text-muted-foreground" aria-live="polite">
-        {shown ? `${label(shown.day)}: ${shown.evaluations === 0 ? "no evaluations" : `score ${formatScore(shown.averageScore)} · ${formatRate(shown.passRate)} passed · ${shown.evaluations} graded`}` : "No evaluations yet."}
-      </p>
-      <ChartContainer config={trendConfig} className="aspect-auto h-48 w-full" aria-hidden>
-        <BarChart
-          data={rows}
-          margin={{ top: 4, right: 0, bottom: 0, left: 20 }}
-          barCategoryGap="15%"
-          onMouseMove={(state) => setActive(state.activeTooltipIndex == null ? undefined : Number(state.activeTooltipIndex))}
-          onMouseLeave={() => setActive(undefined)}
-        >
-          <XAxis dataKey="day" ticks={ends} tickFormatter={label} tickLine={false} axisLine={false} interval={0} />
-          <YAxis domain={[0, 100]} ticks={[0, 50, 100]} orientation="right" width={32} tickLine={false} axisLine={false} />
+    <SplitBar
+      segments={[
+        { key: "passed", label: "Passed", value: passing, color: "var(--success)" },
+        { key: "failed", label: "Failed a check", value: judged - passing, color: "var(--destructive)" },
+      ]}
+    />
+  );
+}
+
+const gradedConfig = { evaluations: { label: "Graded", color: "var(--chart-2)" } } satisfies ChartConfig;
+
+/**
+ * Conversations graded per day (two weeks or less) or per 7-day week counted back from today, each bar on a faint track
+ * so days with nothing graded still read as days. Hidden until at least two bars have something in them.
+ */
+function GradedBars({ trend }: { trend: QualityOverview["trend"] }) {
+  const size = trend.length <= 14 ? 1 : 7;
+  const rows: { label: string; evaluations: number }[] = [];
+  for (let end = trend.length; end > 0; end -= size) {
+    const chunk = trend.slice(Math.max(0, end - size), end);
+    const first = chunk[0]!.day;
+    const last = chunk.at(-1)!.day;
+    rows.unshift({ label: first === last ? dayLabel(first) : `${dayLabel(first)} – ${dayLabel(last)}`, evaluations: chunk.reduce((s, d) => s + d.evaluations, 0) });
+  }
+  const { rows: drawn, motion } = useGrowMotion(rows, ["evaluations"]);
+  if (rows.filter((r) => r.evaluations > 0).length < 2) return null;
+  return (
+    <ChartContainer config={gradedConfig} className="aspect-auto h-16 w-full">
+      <BarChart data={drawn} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barCategoryGap="20%">
+        <XAxis dataKey="label" hide />
+        <ChartTooltip cursor={false} content={<ChartTooltipContent hideIndicator />} />
+        <Bar dataKey="evaluations" fill="var(--color-evaluations)" background={{ fill: "var(--muted)", radius: 2 }} radius={2} {...motion} />
+      </BarChart>
+    </ChartContainer>
+  );
+}
+
+/** The checks that failed most, for the bottom of the failed-checks tile. */
+function TopFailed({ rows }: { rows: QualityOverview["topFailures"] }) {
+  if (rows.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1 text-xs">
+      {rows.slice(0, 3).map((f) => (
+        <li key={f.evaluatorId} className="flex items-center gap-2">
+          <span className="size-2 shrink-0 rounded-[2px] bg-destructive" aria-hidden />
+          <Link href={`/quality/evaluators/${f.evaluatorId}`} className="flex-1 truncate text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
+            {f.name}
+          </Link>
+          <span className="tabular-nums">{f.failures}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const trendConfig = {
+  averageScore: { label: "Score", color: "var(--chart-1)" },
+  pass: { label: "Passing %", color: "var(--success)" },
+} satisfies ChartConfig;
+
+/**
+ * Score and pass rate as two overlapping areas on a 0-100 axis. Only days with grades are plotted, so a sparse period
+ * still draws a shape instead of slivers between empty days.
+ */
+function QualityTrend({ trend }: { trend: QualityOverview["trend"] }) {
+  const describe = (d: TrendRow) => (d.evaluations === 0 ? "no evaluations" : `score ${formatScore(d.averageScore)}, ${formatRate(d.passRate)} passed, ${d.evaluations} graded`);
+  // Graded days only, placed on a real time axis: a gap of three days looks like three days.
+  const rows = trendRows(trend)
+    .filter((d) => d.evaluations > 0)
+    .map((d) => ({ ...d, t: Date.parse(`${d.day}T00:00:00Z`) }));
+  const domain = [Date.parse(`${trend[0]?.day}T00:00:00Z`), Date.parse(`${trend.at(-1)?.day}T00:00:00Z`)];
+  const tickLabel = (t: number) => dayLabel(new Date(t).toISOString().slice(0, 10));
+  const keys = Object.keys(trendConfig) as (keyof typeof trendConfig)[];
+  const { rows: drawn, motion } = useGrowMotion(rows, keys);
+  return (
+    <>
+      <ChartContainer config={trendConfig} className="aspect-auto h-64 w-full">
+        <AreaChart data={drawn} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
+          <defs>
+            {keys.map((k) => (
+              <linearGradient key={k} id={`quality-trend-${k}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={`var(--color-${k})`} stopOpacity={0.45} />
+                <stop offset="95%" stopColor={`var(--color-${k})`} stopOpacity={0.15} />
+              </linearGradient>
+            ))}
+          </defs>
+          <CartesianGrid vertical={false} />
+          <XAxis dataKey="t" type="number" scale="time" domain={domain} tickFormatter={tickLabel} tickLine={false} axisLine={false} minTickGap={32} />
+          <YAxis domain={[0, 100]} ticks={[0, 50, 100]} tickLine={false} axisLine={false} width={32} />
           <ChartTooltip
             cursor={false}
-            content={<ChartTooltipContent hideIndicator labelFormatter={(_, payload) => label(String(payload[0]?.payload.day))} formatter={(_, __, item) => describe(item.payload)} />}
+            content={
+              <ChartTooltipContent
+                indicator="dot"
+                labelFormatter={(_, payload) => {
+                  const d = payload[0]?.payload as TrendRow | undefined;
+                  return d ? `${dayLabel(d.day)} · ${d.evaluations} graded` : "";
+                }}
+              />
+            }
           />
-          <Bar dataKey="bar" fill="var(--color-bar)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-        </BarChart>
+          {keys.map((k, i) => (
+            <Area
+              key={k}
+              dataKey={k}
+              type="bumpX" strokeLinejoin="round"
+              stroke={`var(--color-${k})`}
+              fill={`url(#quality-trend-${k})`}
+              strokeWidth={2}
+              dot={rows.length < 3 ? { r: 3, fill: `var(--color-${k})` } : false}
+              animationBegin={i * 150}
+              {...motion}
+            />
+          ))}
+          <ChartLegend content={<ChartLegendContent />} />
+        </AreaChart>
       </ChartContainer>
       {/* The chart is drawn for sighted users; screen readers get every day as a list. */}
       <ul className="sr-only">
         {trend.map((d) => (
-          <li key={d.day}>{`${label(d.day)}: ${describe(d)}`}</li>
+          <li key={d.day}>{`${dayLabel(d.day)}: ${describe(d)}`}</li>
         ))}
       </ul>
-    </div>
+    </>
   );
 }
 
-function ScoreBar({ label, score, hint }: { label: string; score: number | null; hint: string }) {
+const dimensionConfig = {
+  score: { label: "Score", color: "var(--chart-1)" },
+  pass: { label: "Passing %", color: "var(--chart-2)" },
+} satisfies ChartConfig;
+
+/** Average score and pass rate per dimension: a radar when there are enough dimensions to make a shape, bars otherwise. */
+function Dimensions({ rows }: { rows: QualityOverview["byDimension"] }) {
+  const values = rows.map((d) => ({
+    label: EVAL_DIMENSION_LABELS[d.dimension],
+    score: d.averageScore ?? 0,
+    pass: d.passRate === null ? 0 : Math.round(d.passRate * 100),
+  }));
+  const { rows: data, motion } = useGrowMotion(values, ["score", "pass"], rows.map((d) => d.dimension).join("|"));
   return (
-    <li className="flex flex-col gap-1">
-      <div className="flex justify-between gap-2 text-sm">
-        <span>{label}</span>
-        <span className="tabular-nums text-muted-foreground">
-          {formatScore(score)} <span className="text-xs">· {hint}</span>
-        </span>
-      </div>
-      <Progress value={score ?? 0} className="h-2" aria-hidden />
-    </li>
+    <>
+      <ChartContainer config={dimensionConfig} className="mx-auto aspect-square max-h-72 w-full">
+        {data.length >= 3 ? (
+          <RadarChart data={data} outerRadius="70%">
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+            <PolarGrid />
+            <PolarAngleAxis dataKey="label" tick={{ fontSize: 11 }} />
+            <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
+            <Radar dataKey="score" stroke="var(--color-score)" fill="var(--color-score)" fillOpacity={0.3} strokeWidth={2} {...motion} />
+            <Radar dataKey="pass" stroke="var(--color-pass)" fill="var(--color-pass)" fillOpacity={0.1} strokeWidth={2} strokeDasharray="4 3" {...motion} />
+            <ChartLegend content={<ChartLegendContent />} />
+          </RadarChart>
+        ) : (
+          <BarChart data={data} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+            <XAxis type="number" domain={[0, 100]} hide />
+            <YAxis type="category" dataKey="label" width={120} tickLine={false} axisLine={false} />
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+            <Bar dataKey="score" fill="var(--color-score)" radius={4} {...motion} />
+            <Bar dataKey="pass" fill="var(--color-pass)" radius={4} {...motion} />
+            <ChartLegend content={<ChartLegendContent />} />
+          </BarChart>
+        )}
+      </ChartContainer>
+      <ul className="sr-only">
+        {rows.map((d) => (
+          <li key={d.dimension}>{`${EVAL_DIMENSION_LABELS[d.dimension]}: score ${formatScore(d.averageScore)}, ${formatRate(d.passRate)} passed`}</li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/**
+ * Horizontal bars of a 0-100 value per row, coloured by group (one colour per employee), labelled with the value.
+ * Clicking a bar opens its page when `href` is given.
+ */
+function RankedBars({ rows, empty }: { rows: { key: string; label: string; value: number | null; group: number; detail: string; href?: string }[]; empty: string }) {
+  const router = useRouter();
+  const { rows: data, motion } = useGrowMotion(rows.map((r) => ({ ...r, value: r.value ?? 0 })), ["value"], rows.map((r) => r.key).join("|"));
+  if (rows.length === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
+  const config = { value: { label: "Score", color: "var(--chart-1)" } } satisfies ChartConfig;
+  return (
+    <>
+      <Reveal height={rows.length * 36 + 8}>
+      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }}>
+        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 40, bottom: 0, left: 0 }}>
+          <XAxis type="number" domain={[0, 100]} hide />
+          <YAxis type="category" dataKey="label" width={150} tickLine={false} axisLine={false} interval={0} />
+          <ChartTooltip cursor={false} content={<ChartTooltipContent hideIndicator formatter={(_, __, item) => item.payload.detail} />} />
+          <Bar
+            dataKey="value"
+            radius={4}
+            className={rows.some((r) => r.href) ? "cursor-pointer" : undefined}
+            onClick={(entry: { payload?: { href?: string } }) => entry.payload?.href && router.push(entry.payload.href)}
+            label={{ position: "right", className: "fill-muted-foreground text-xs tabular-nums" }}
+            {...motion}
+          >
+            {data.map((r) => (
+              <Cell key={r.key} fill={`var(--chart-${(r.group % 5) + 1})`} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ChartContainer>
+      </Reveal>
+      <ul className="sr-only">
+        {rows.map((r) => (
+          <li key={r.key}>{`${r.label}: ${r.detail}`}</li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** Failed checks per evaluator, most first; clicking a bar opens the evaluator. */
+function FailureBars({ rows }: { rows: QualityOverview["topFailures"] }) {
+  const router = useRouter();
+  const { rows: data, motion } = useGrowMotion(
+    rows.map((f) => ({ ...f, label: f.name, href: `/quality/evaluators/${f.evaluatorId}` })),
+    ["failures"],
+    rows.map((f) => f.evaluatorId).join("|"),
+  );
+  if (rows.length === 0) return <p className="text-sm text-muted-foreground">Nothing failed in this period.</p>;
+  const config = { failures: { label: "Failures", color: "var(--destructive)" } } satisfies ChartConfig;
+  return (
+    <>
+      <Reveal height={rows.length * 36 + 8}>
+      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }}>
+        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 32, bottom: 0, left: 0 }}>
+          <XAxis type="number" dataKey="failures" hide />
+          <YAxis type="category" dataKey="label" width={180} tickLine={false} axisLine={false} interval={0} />
+          <ChartTooltip
+            cursor={false}
+            content={<ChartTooltipContent hideIndicator formatter={(_, __, item) => `${item.payload.failures} failed · ${EVAL_DIMENSION_LABELS[item.payload.dimension as EvalDimension]}`} />}
+          />
+          <Bar
+            dataKey="failures"
+            fill="var(--color-failures)"
+            fillOpacity={0.8}
+            radius={4}
+            className="cursor-pointer"
+            onClick={(entry: { payload?: { href?: string } }) => entry.payload?.href && router.push(entry.payload.href)}
+            label={{ position: "right", className: "fill-muted-foreground text-xs tabular-nums" }}
+            {...motion}
+          />
+        </BarChart>
+      </ChartContainer>
+      </Reveal>
+      <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        {rows.map((f) => (
+          <li key={f.evaluatorId}>
+            <Link href={`/quality/evaluators/${f.evaluatorId}`} className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
+              {f.name}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
 function Overview({ workspaceId }: { workspaceId: string }) {
   const [days, setDays] = useState<number>(30);
-  const { data, error, reload } = useApiQuery<QualityOverview>(`/workspaces/${workspaceId}/quality?days=${days}`);
+  const { data, error, reload, loading } = useApiQuery<QualityOverview>(`/workspaces/${workspaceId}/quality?days=${days}`, { keepPrevious: true });
+  // The workspace's threshold for a low score (set on the dashboard); the default until it loads.
+  const below = useApiQuery<Attention>(`/workspaces/${workspaceId}/attention`).data?.qualityScoreBelow ?? ATTENTION_DEFAULTS.qualityScoreBelow;
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-2">
+        {loading && data !== undefined && <Spinner className="text-muted-foreground" aria-label="Loading the new period" />}
         <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
           <SelectTrigger aria-label="Period" className="w-40">
             <SelectValue />
@@ -216,16 +446,20 @@ function Overview({ workspaceId }: { workspaceId: string }) {
       {error && !data ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data} sample={SAMPLE_OVERVIEW} id="quality-overview" label="Loading quality overview">
-          {(data) => <OverviewContent data={data} />}
-        </Skullet>
+        <div className={cn("transition-opacity duration-200", loading && data !== undefined && "opacity-60")} aria-busy={loading}>
+          <Skullet data={data} sample={SAMPLE_OVERVIEW} id="quality-overview" label="Loading quality overview">
+            {(data) => <OverviewContent data={data} below={below} />}
+          </Skullet>
+        </div>
       )}
     </div>
   );
 }
 
-function OverviewContent({ data }: { data: QualityOverview }) {
+function OverviewContent({ data, below }: { data: QualityOverview; below: number }) {
   const dims = EVAL_DIMENSIONS.filter((d) => data.byEmployee.some((e) => e.dimensions[d] !== undefined));
+  const employeeIndex = new Map(data.byEmployee.map((e, i) => [e.employeeId, i]));
+  const versions = [...data.byVersion].sort((a, b) => a.name.localeCompare(b.name) || a.version - b.version);
   return data.evaluations === 0 ? (
     <EmptyState
       icon={ShieldCheck}
@@ -234,127 +468,130 @@ function OverviewContent({ data }: { data: QualityOverview }) {
     />
   ) : (
     <>
-      <section aria-label="Summary" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Quality score" icon={Gauge} value={formatScore(data.averageScore)} hint="Average of every evaluator's score, 0-100" />
-        <StatTile label="Conversations passing" icon={CircleCheck} value={formatRate(data.passRate)} hint="No evaluator failed" />
-        <StatTile label="Conversations graded" icon={ClipboardCheck} value={String(data.evaluations)} />
-        <StatTile label="Failed checks" icon={CircleX} value={String(data.failures)} hint="See the Failures tab" />
+      <section aria-label="Summary" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile label="Quality score" icon={Gauge} value={formatScore(data.averageScore)} hint="Average of every evaluator's score, 0-100">
+          {data.averageScore !== null && <GaugeChart value={data.averageScore} color={scoreColor(data.averageScore, below)} />}
+        </StatTile>
+        <StatTile label="Conversations passing" icon={CircleCheck} value={formatRate(data.passRate)} hint="No evaluator failed">
+          <PassSplit passing={data.passing} judged={data.judged} />
+        </StatTile>
+        <StatTile label="Conversations graded" icon={ClipboardCheck} value={String(data.evaluations)} hint={`Over the last ${data.days} days`}>
+          <GradedBars trend={data.trend} />
+        </StatTile>
+        <StatTile label="Failed checks" icon={CircleX} value={String(data.failures)} hint={data.topFailures.length > 0 ? "Failed most:" : "Each one is listed in the Failures tab"}>
+          <TopFailed rows={data.topFailures} />
+        </StatTile>
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle>Quality score by day</CardTitle>
+            <CardTitle>Quality over time</CardTitle>
+            <CardDescription>Score and share passing on each day that had grades</CardDescription>
           </CardHeader>
           <CardContent>
-            <Trend trend={data.trend} />
+            <QualityTrend trend={data.trend} />
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle>By dimension</CardTitle>
+            <CardDescription>Where answers are strong and where they slip</CardDescription>
           </CardHeader>
           <CardContent>
-            <ul className="flex flex-col gap-3">
-              {data.byDimension.map((d) => (
-                <ScoreBar key={d.dimension} label={EVAL_DIMENSION_LABELS[d.dimension]} score={d.averageScore} hint={`${formatRate(d.passRate)} passed`} />
-              ))}
-            </ul>
+            <Dimensions rows={data.byDimension} />
           </CardContent>
         </Card>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Employee comparison</CardTitle>
-        </CardHeader>
-        <CardContent className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Employee</TableHead>
-                <TableHead className="text-right">Score</TableHead>
-                <TableHead className="text-right">Passing</TableHead>
-                <TableHead className="text-right">Graded</TableHead>
-                {dims.map((d) => (
-                  <TableHead key={d} className="text-right">
-                    {EVAL_DIMENSION_LABELS[d]}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data.byEmployee.map((e) => (
-                <TableRow key={e.employeeId}>
-                  <TableCell>
-                    <Link href={`/employees/${e.employeeId}`} className="font-medium underline-offset-2 hover:underline">
-                      {e.name}
-                    </Link>
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{formatScore(e.averageScore)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatRate(e.passRate)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{e.evaluations}</TableCell>
-                  {dims.map((d) => (
-                    <TableCell key={d} className="text-right tabular-nums">
-                      {formatScore(e.dimensions[d] ?? null)}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>By employee version</CardTitle>
+            <CardTitle>Employees</CardTitle>
+            <CardDescription>Average score; click a bar to open the employee</CardDescription>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Version</TableHead>
-                  <TableHead className="text-right">Score</TableHead>
-                  <TableHead className="text-right">Passing</TableHead>
-                  <TableHead className="text-right">Graded</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.byVersion.map((v) => (
-                  <TableRow key={`${v.employeeId}:${v.version}`}>
-                    <TableCell>
-                      {v.name} <span className="text-muted-foreground">v{v.version}</span>
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{formatScore(v.averageScore)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{formatRate(v.passRate)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{v.evaluations}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <RankedBars
+              empty="No employee graded in this period."
+              rows={[...data.byEmployee]
+                .sort((a, b) => (b.averageScore ?? 0) - (a.averageScore ?? 0))
+                .map((e) => ({
+                  key: e.employeeId,
+                  label: e.name,
+                  value: e.averageScore,
+                  group: employeeIndex.get(e.employeeId) ?? 0,
+                  detail: `score ${formatScore(e.averageScore)} · ${formatRate(e.passRate)} passing · ${e.evaluations} graded`,
+                  href: `/employees/${e.employeeId}`,
+                }))}
+            />
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle>Most failed checks</CardTitle>
+            <CardTitle>By employee version</CardTitle>
+            <CardDescription>Each employee in its own colour, so a new version can be compared with the last</CardDescription>
           </CardHeader>
           <CardContent>
-            {data.topFailures.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Nothing failed in this period.</p>
-            ) : (
-              <ul className="flex flex-col divide-y text-sm">
-                {data.topFailures.map((f) => (
-                  <li key={f.evaluatorId} className="flex justify-between gap-2 py-2 first:pt-0">
-                    <Link href={`/quality/evaluators/${f.evaluatorId}`} className="underline-offset-2 hover:underline">
-                      {f.name} <span className="text-muted-foreground">· {EVAL_DIMENSION_LABELS[f.dimension]}</span>
-                    </Link>
-                    <span className="tabular-nums">{f.failures}</span>
-                  </li>
+            <RankedBars
+              empty="No version graded in this period."
+              rows={versions.map((v) => ({
+                key: `${v.employeeId}:${v.version}`,
+                label: `${v.name} v${v.version}`,
+                value: v.averageScore,
+                group: employeeIndex.get(v.employeeId) ?? 0,
+                detail: `score ${formatScore(v.averageScore)} · ${formatRate(v.passRate)} passing · ${v.evaluations} graded`,
+              }))}
+            />
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Most failed checks</CardTitle>
+            <CardDescription>Click a bar to open the evaluator</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <FailureBars rows={data.topFailures} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Scores by dimension and employee</CardTitle>
+          </CardHeader>
+          <CardContent className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Employee</TableHead>
+                  {dims.map((d) => (
+                    <TableHead key={d} className="text-right">
+                      {EVAL_DIMENSION_LABELS[d]}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.byEmployee.map((e) => (
+                  <TableRow key={e.employeeId}>
+                    <TableCell>
+                      <Link href={`/employees/${e.employeeId}`} className="font-medium underline-offset-2 hover:underline">
+                        {e.name}
+                      </Link>
+                    </TableCell>
+                    {dims.map((d) => {
+                      const score = e.dimensions[d];
+                      return (
+                        <TableCell key={d} className={cn("text-right tabular-nums", score !== undefined && score < below && "text-destructive")}>
+                          {formatScore(score ?? null)}
+                        </TableCell>
+                      );
+                    })}
+                  </TableRow>
                 ))}
-              </ul>
-            )}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </div>
@@ -591,13 +828,22 @@ function Datasets({ workspaceId }: { workspaceId: string }) {
 }
 
 export default withWorkspace(function QualityPage({ workspace }) {
+  const [tab, setTab] = usePageTab("/quality");
+  // Charts animate on the first load only; after a tab switch (click, Alt+number or the command menu) they appear straight away.
+  const [shownTab, setShownTab] = useState(tab);
+  const [switched, setSwitched] = useState(false);
+  if (tab !== shownTab) {
+    setShownTab(tab);
+    setSwitched(true);
+  }
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Quality"
         description="How well AI employees answer, graded in the background after each conversation. Grades are for review only: they never change how employees answer."
       />
-      <Tabs defaultValue="overview" className="gap-6">
+      <ChartMotionProvider animate={!switched}>
+      <Tabs value={tab} onValueChange={setTab} className="gap-6">
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="failures">Failures</TabsTrigger>
@@ -617,6 +863,7 @@ export default withWorkspace(function QualityPage({ workspace }) {
           <Datasets workspaceId={workspace.id} />
         </TabsContent>
       </Tabs>
+      </ChartMotionProvider>
     </div>
   );
 });
