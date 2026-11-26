@@ -232,7 +232,7 @@ function QualityTrend({ trend }: { trend: QualityOverview["trend"] }) {
   const { rows: drawn, motion } = useGrowMotion(rows, keys);
   return (
     <>
-      <ChartContainer config={trendConfig} className="aspect-auto h-64 w-full" aria-hidden>
+      <ChartContainer config={trendConfig} className="aspect-auto h-64 w-full">
         <AreaChart data={drawn} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <defs>
             {keys.map((k) => (
@@ -298,7 +298,7 @@ function Dimensions({ rows }: { rows: QualityOverview["byDimension"] }) {
   const { rows: data, motion } = useGrowMotion(values, ["score", "pass"], rows.map((d) => d.dimension).join("|"));
   return (
     <>
-      <ChartContainer config={dimensionConfig} className="mx-auto aspect-square max-h-72 w-full" aria-hidden>
+      <ChartContainer config={dimensionConfig} className="mx-auto aspect-square max-h-72 w-full">
         {data.length >= 3 ? (
           <RadarChart data={data} outerRadius="70%">
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
@@ -341,7 +341,7 @@ function RankedBars({ rows, empty }: { rows: { key: string; label: string; value
   return (
     <>
       <Reveal height={rows.length * 36 + 8}>
-      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }} aria-hidden>
+      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }}>
         <BarChart data={data} layout="vertical" margin={{ top: 0, right: 40, bottom: 0, left: 0 }}>
           <XAxis type="number" domain={[0, 100]} hide />
           <YAxis type="category" dataKey="label" width={150} tickLine={false} axisLine={false} interval={0} />
@@ -383,7 +383,7 @@ function FailureBars({ rows }: { rows: QualityOverview["topFailures"] }) {
   return (
     <>
       <Reveal height={rows.length * 36 + 8}>
-      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }} aria-hidden>
+      <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }}>
         <BarChart data={data} layout="vertical" margin={{ top: 0, right: 32, bottom: 0, left: 0 }}>
           <XAxis type="number" dataKey="failures" hide />
           <YAxis type="category" dataKey="label" width={180} tickLine={false} axisLine={false} interval={0} />

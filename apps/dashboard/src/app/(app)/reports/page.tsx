@@ -126,7 +126,7 @@ function LatencyBars({ stats }: { stats: DurationStats }) {
     { label: "90% within", ms: stats.p90 },
   ];
   return (
-    <ChartContainer config={config} className="aspect-auto h-16 w-full" aria-hidden>
+    <ChartContainer config={config} className="aspect-auto h-16 w-full">
       <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 48, bottom: 0, left: 0 }} barCategoryGap="25%">
         <XAxis type="number" hide />
         <YAxis type="category" dataKey="label" width={72} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />

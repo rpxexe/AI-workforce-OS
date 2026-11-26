@@ -125,7 +125,7 @@ export function CommandMenu({ pages }: { pages: CommandPage[] }) {
                 <CommandItem key={`${page}:${t.value}`} value={`${owner?.label ?? page} ${t.label} tab`} onSelect={run(() => go(`${page}?tab=${t.value}`))}>
                   {owner && <owner.icon aria-hidden />}
                   {owner?.label} › {t.label}
-                  <CommandShortcut>Alt {i + 1}</CommandShortcut>
+                  <CommandShortcut>{i + 1}</CommandShortcut>
                 </CommandItem>
               ));
             })}

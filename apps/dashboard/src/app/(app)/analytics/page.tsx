@@ -175,7 +175,7 @@ function Bars({ title, rows, empty }: { title: string; rows: { label: string; co
           <p className="text-sm text-muted-foreground">{empty}</p>
         ) : (
           <>
-            <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }} aria-hidden>
+            <ChartContainer config={config} className="aspect-auto w-full" style={{ height: rows.length * 36 + 8 }}>
               <BarChart data={drawn} layout="vertical" margin={{ top: 0, right: 32, bottom: 0, left: 0 }}>
                 <XAxis type="number" dataKey="count" hide />
                 <YAxis type="category" dataKey="label" width={140} tickLine={false} axisLine={false} interval={0} />
@@ -288,7 +288,7 @@ function ReplyBands({ counts, edges }: { counts: number[]; edges: readonly numbe
   const share = (n: number) => `${Math.round((n / total) * 100)}%`;
   return (
     <div className="flex flex-col gap-2">
-      <ChartContainer config={config} className="aspect-auto h-3 w-full" aria-hidden>
+      <ChartContainer config={config} className="aspect-auto h-3 w-full">
         <BarChart data={[row]} layout="vertical" stackOffset="expand" margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
           <XAxis type="number" hide />
           <YAxis type="category" hide />

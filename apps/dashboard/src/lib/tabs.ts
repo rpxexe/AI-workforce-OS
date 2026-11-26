@@ -64,7 +64,7 @@ export function switchTabInPlace(href: string) {
 
 /**
  * The page's current tab from `?tab=` (the first tab when missing or unknown) and a setter that keeps the URL in
- * step, so a tab can be linked, bookmarked and reopened. Alt+1…9 switches to the nth tab.
+ * step, so a tab can be linked, bookmarked and reopened. Keys 1…9 (outside text fields) switch to the nth tab.
  */
 export function usePageTab<P extends TabbedPage>(page: P) {
   const tabs = PAGE_TABS[page] as readonly { value: TabOf<P>; label: string }[];
@@ -74,7 +74,9 @@ export function usePageTab<P extends TabbedPage>(page: P) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const el = e.target;
+      const typing = el instanceof HTMLElement && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || typing) return;
       const index = /^Digit([1-9])$/.exec(e.code)?.[1];
       const target = index === undefined ? undefined : tabs[Number(index) - 1];
       if (!target) return;

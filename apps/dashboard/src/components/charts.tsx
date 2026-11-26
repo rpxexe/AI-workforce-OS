@@ -19,7 +19,7 @@ export function SplitBar({ segments }: { segments: Segment[] }) {
   const row = Object.fromEntries(shown.map((s) => [s.key, s.value]));
   return (
     <div className="flex flex-col gap-2">
-      <ChartContainer config={config} className="aspect-auto h-3 w-full" aria-hidden>
+      <ChartContainer config={config} className="aspect-auto h-3 w-full">
         <BarChart data={[row]} layout="vertical" stackOffset="expand" margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
           <XAxis type="number" hide />
           <YAxis type="category" hide />
@@ -55,7 +55,7 @@ export function Gauge({ value, color }: { value: number; color: string }) {
   const motion = useChartMotion();
   const config = { value: { label: "Value", color } } satisfies ChartConfig;
   return (
-    <ChartContainer config={config} className="mx-auto aspect-auto h-16 w-32" aria-hidden>
+    <ChartContainer config={config} className="mx-auto aspect-auto h-16 w-32">
       <RadialBarChart data={[{ value }]} startAngle={180} endAngle={0} cx="50%" cy="100%" innerRadius={44} outerRadius={60}>
         <PolarAngleAxis type="number" domain={[0, 100]} tick={false} axisLine={false} />
         <RadialBar dataKey="value" fill="var(--color-value)" background={{ fill: "var(--muted)" }} cornerRadius={6} {...motion} />
