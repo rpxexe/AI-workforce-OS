@@ -161,6 +161,9 @@ type ScoreSummary = { evaluations: number; averageScore: number | null; passRate
 
 export type QualityOverview = ScoreSummary & {
   days: number;
+  /** Graded conversations that passed, and those with a pass/fail verdict at all (passRate = passing / judged). */
+  passing: number;
+  judged: number;
   failures: number;
   byDimension: { dimension: EvalDimension; results: number; averageScore: number | null; passRate: number | null }[];
   trend: { day: string; evaluations: number; averageScore: number | null; passRate: number | null }[];

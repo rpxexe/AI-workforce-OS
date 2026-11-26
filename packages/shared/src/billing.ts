@@ -1,6 +1,8 @@
 // Phase 16: plans and their limits, the usage ledger, billing and tenant analytics.
 import { z } from "zod";
 import type { DurationStats } from "./inbox.ts";
+import type { ToolExecutionStatus } from "./tool.ts";
+import type { WorkflowExecutionStatus } from "./workflow.ts";
 
 export const PLAN_IDS = ["free", "starter", "growth", "scale"] as const;
 export type PlanId = (typeof PLAN_IDS)[number];
@@ -108,6 +110,8 @@ export type UsageSummary = {
   byKind: { kind: UsageKind; quantity: number; events: number }[];
   /** What is billed for usage. Provider cost and the markup are never sent to tenants (company policy). */
   amountUsd: number;
+  /** Amount billed per UTC day of the range, oldest first, up to today. */
+  daily: { date: string; amountUsd: number }[];
   /** Newest ledger entries, each pointing at the row it came from. */
   recent: { id: string; kind: UsageKind; quantity: number; amountUsd: number | null; sourceType: string; sourceId: string; workspaceId: string | null; occurredAt: string; detail: unknown }[];
 };
@@ -120,8 +124,8 @@ export type AnalyticsReport = {
   calls: { total: number; completed: number; minutes: number };
   messages: { customer: number; ai: number; agent: number };
   tokens: { input: number; output: number };
-  toolExecutions: { total: number; byStatus: { status: string; count: number }[] };
-  workflowExecutions: { total: number; byStatus: { status: string; count: number }[] };
+  toolExecutions: { total: number; byStatus: { status: ToolExecutionStatus; count: number }[] };
+  workflowExecutions: { total: number; byStatus: { status: WorkflowExecutionStatus; count: number }[] };
   resolutions: number;
   escalations: number;
   humanHandoffs: number;

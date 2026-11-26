@@ -32,6 +32,7 @@ import { conversationRoutes } from "./conversations.ts";
 import { customerRoutes } from "./customers.ts";
 import { meterConfigFromEnv, type MeterConfig } from "./billing/meter.ts";
 import { billingRoutes } from "./billing/routes.ts";
+import { dashboardRoutes } from "./dashboard.ts";
 import { billingService } from "./billing/service.ts";
 import { stripeClient, stripeFromEnv, type StripeConfig } from "./billing/stripe.ts";
 import { employeeRoutes } from "./employees.ts";
@@ -187,6 +188,7 @@ export async function buildApp(
   const billing = billingService({ ...(options.billing?.meter ?? meterConfigFromEnv()), enforced: options.billing?.enforced ?? stripe !== null }, app.log);
   const planLimits = billing.check;
   billingRoutes(app, authenticate, { billing, stripe, dashboardOrigin });
+  dashboardRoutes(app, authenticate, billing);
   reportRoutes(app, authenticate);
 
   workspaceRoutes(app, authenticate);

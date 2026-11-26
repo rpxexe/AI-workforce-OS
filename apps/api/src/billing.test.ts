@@ -231,6 +231,8 @@ test("limits on the Free plan: employees, conversations, messages, tool calls, s
   assert.equal(limit("messages").used, 502);
   assert.equal(limit("toolCalls").used, 201);
   assert.equal(limit("voiceMinutes").used, 31);
+  assert.ok(o.usage.daily.length >= 1);
+  assert.ok(Math.abs(o.usage.daily.reduce((s, d) => s + d.amountUsd, 0) - o.usage.amountUsd) < 1e-6, "the days add up to the period");
 
   // Without billing on, nothing is limited.
   assert.equal(await billingService({ ...METER, enforced: false }, app.log).check(orgA, ["messages", "employees"]), null);

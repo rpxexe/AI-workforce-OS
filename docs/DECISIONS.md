@@ -436,6 +436,15 @@ problem re-discovered.
 - **Publishing the SDKs is the owner's step**: the package names must be in npm and PyPI accounts the owner controls, so `private: true`
   stays until a name is chosen.
 
+- **Conversation insights are stored, not computed on every read** (`ConversationInsight`, one row per conversation). The insights
+  read recomputes rows that are missing or older than the conversation's `updatedAt` (newest first, at most 500 per request; the rest
+  catch up on the next reads), then counts stored rows in SQL, so there is no 2,000-conversation cap. Lazy on read keeps one code path
+  and needs no job: `updatedAt` already moves with every message, status change and handoff. Not-yet-refreshed rows still count with
+  their older values, dated by `activityAt`.
+- **Handoff analytics and the quality overview aggregate in SQL** instead of loading 10,000 rows: `percentile_disc` equals the
+  nearest-rank `stats()`, averages and one-decimal means are rounded in JS from SQL sums and counts, and ties keep the most recent
+  group first (`max(...) DESC`), as the in-memory version did.
+
 ## Traps already hit
 
 - **`tsx watch` does not start under `pnpm --parallel` on Windows.** Fixed by using `node --watch`.

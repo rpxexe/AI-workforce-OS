@@ -28,3 +28,4 @@ export * from "./insights.ts";
 export * from "./billing.ts";
 export * from "./developer.ts";
 export * from "./public-api.ts";
+export * from "./dashboard.ts";

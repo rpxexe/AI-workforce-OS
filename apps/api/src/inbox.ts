@@ -5,9 +5,9 @@
 // answering a conversation in WAITING_FOR_HUMAN or HUMAN_ACTIVE (runTurn checks); only returning it
 // to the AI (or resolving and reopening it) lets it answer again.
 import type { LiveBus, Presence } from "./live.ts";
-import { analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
+import { ANALYZER_VERSION, analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
-import { prisma, type Prisma } from "@workforce/database";
+import { Prisma, prisma } from "@workforce/database";
 import {
   agentMessageSchema,
   agentTypingSchema,
@@ -16,10 +16,13 @@ import {
   EVALUATION_CHANNEL,
   inboxQuerySchema,
   INBOX_VIEWS,
+  REPLY_BANDS,
   RESOLUTIONS,
   SENTIMENTS,
   type ConversationStatus,
+  type DetectedLanguage,
   type DurationStats,
+  type EntityType,
   type HandoffAnalytics,
   type HandoffRecord,
   type HandoffTrigger,
@@ -28,6 +31,7 @@ import {
   type InboxResponse,
   type InboxView,
   type InsightsOverview,
+  type Intent,
   toTransferRecord,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
@@ -76,11 +80,54 @@ const operating = (c: Pick<ListRow, "employee">) => {
   return { timezone, region: v ? regionOf({ language: v.language, workingHours: { timezone } }) : null };
 };
 
-const tally = <K extends string>(keys: K[]) => {
-  const counts = new Map<K, number>();
-  for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
-  return [...counts].sort((a, b) => b[1] - a[1]);
-};
+/** Conversations (re)analyzed per insights read; the rest catch up on the following reads. */
+const INSIGHT_BATCH = 500;
+
+/**
+ * Stores the analyzer's output for the period's conversations that have none yet, or whose stored row is older than
+ * the conversation's last activity (updatedAt) or from an older ANALYZER_VERSION, newest first and at most
+ * INSIGHT_BATCH per call.
+ */
+export async function refreshInsights(scope: { organizationId: string; workspaceId: string }, since: Date) {
+  const stale = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT c.id FROM "Conversation" c LEFT JOIN "ConversationInsight" i ON i."conversationId" = c.id
+    WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND c.channel <> ${EVALUATION_CHANNEL}
+      AND c."updatedAt" >= ${since} AND (i.id IS NULL OR i."activityAt" < c."updatedAt" OR i."analyzerVersion" < ${ANALYZER_VERSION})
+    ORDER BY c."updatedAt" DESC
+    LIMIT ${INSIGHT_BATCH}`;
+  if (stale.length === 0) return;
+  const rows = await prisma.conversation.findMany({
+    where: { ...scope, id: { in: stale.map((s) => s.id) } },
+    select: {
+      id: true,
+      status: true,
+      employee: listInclude.employee,
+      // The last 100 customer messages, as the analyzer has always been given.
+      messages: { where: { role: "USER" }, orderBy: { createdAt: "desc" }, take: 100, select: { role: true, content: true, createdAt: true } },
+      handoffs: { select: { trigger: true } },
+      updatedAt: true,
+    },
+  });
+  await prisma.$transaction(
+    rows.map((c) => {
+      const i = analyzeConversation({ messages: c.messages.reverse(), status: c.status, handoffs: c.handoffs, ...operating(c) });
+      const data = {
+        primaryLanguage: i.primaryLanguage,
+        codeSwitchedMessages: i.codeSwitchedMessages,
+        switches: i.switches,
+        sentiment: i.sentiment,
+        intent: i.intent,
+        entityTypes: i.entities.map((e) => e.type),
+        resolution: i.resolution,
+        escalated: i.escalation.escalated,
+        escalationSignals: i.escalation.signals.length,
+        activityAt: c.updatedAt,
+        analyzerVersion: ANALYZER_VERSION,
+      };
+      return prisma.conversationInsight.upsert({ where: { conversationId: c.id }, create: { ...scope, conversationId: c.id, ...data }, update: data });
+    }),
+  );
+}
 
 const base = (c: ListRow) => ({
   id: c.id,
@@ -114,8 +161,6 @@ export function stats(values: number[]): DurationStats {
   const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)] ?? null;
   return { count: sorted.length, average: Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length), median: at(0.5), p90: at(0.9) };
 }
-
-const between = (from: Date, to: Date | null) => (to ? to.getTime() - from.getTime() : null);
 
 /** Resolves a conversation from any open state and ends its open handoff; false when it was already resolved. */
 export async function resolveConversation(where: { id: string; organizationId: string; workspaceId: string }, now = new Date()) {
@@ -380,36 +425,50 @@ export function inboxRoutes(
     const { workspaceId } = workspaceParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
     const { days } = analyticsQuerySchema.parse(req.query);
-    const where = { ...within(scope), ...REAL, updatedAt: { gte: new Date(Date.now() - days * 86_400_000) } };
-    const [conversations, rows] = await Promise.all([
-      prisma.conversation.count({ where }),
-      // shortcut: analyzed on read, the newest 2,000 conversations with their last 100 customer messages; store insights per conversation when workspaces outgrow it
-      prisma.conversation.findMany({
-        where,
-        orderBy: { updatedAt: "desc" },
-        take: 2_000,
-        select: {
-          status: true,
-          employee: listInclude.employee,
-          messages: { where: { role: "USER" }, orderBy: { createdAt: "desc" }, take: 100, select: { role: true, content: true, createdAt: true } },
-          handoffs: { select: { trigger: true } },
-        },
-      }),
+    const since = new Date(Date.now() - days * 86_400_000);
+    await refreshInsights(within(scope), since);
+    // Stored insights of the period's conversations, counted in SQL; ties keep the most recent first, as before.
+    const base = Prisma.sql`"ConversationInsight" i JOIN "Conversation" c ON c.id = i."conversationId"
+      WHERE i."organizationId" = ${scope.organizationId} AND i."workspaceId" = ${scope.workspaceId}
+        AND c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId}
+        AND c.channel <> ${EVALUATION_CHANNEL} AND c."updatedAt" >= ${since}`;
+    const [conversations, [totals], groups] = await Promise.all([
+      prisma.conversation.count({ where: { ...within(scope), ...REAL, updatedAt: { gte: since } } }),
+      prisma.$queryRaw<{ analyzed: number; codeSwitched: number; withSwitches: number; escalated: number; withSignals: number }[]>`
+        SELECT count(*)::int AS analyzed, count(*) FILTER (WHERE i."codeSwitchedMessages" > 0)::int AS "codeSwitched",
+               count(*) FILTER (WHERE i.switches > 0)::int AS "withSwitches", count(*) FILTER (WHERE i.escalated)::int AS escalated,
+               count(*) FILTER (WHERE i."escalationSignals" > 0)::int AS "withSignals"
+        FROM ${base}`,
+      prisma.$queryRaw<{ kind: string; key: string; date: string | null; n: number }[]>`
+        SELECT kind, key, date, count(*)::int AS n FROM (
+          SELECT 'language' AS kind, i."primaryLanguage" AS key, NULL AS date, i."activityAt" FROM ${base}
+          UNION ALL SELECT 'sentiment', i.sentiment, NULL, i."activityAt" FROM ${base}
+          UNION ALL SELECT 'intent', i.intent, NULL, i."activityAt" FROM ${base}
+          UNION ALL SELECT 'resolution', i.resolution, NULL, i."activityAt" FROM ${base}
+          UNION ALL SELECT 'entity', unnest(i."entityTypes"), NULL, i."activityAt" FROM ${base}
+          -- Each conversation dated by the last activity it was analyzed at (UTC, as stored).
+          UNION ALL SELECT 'daily', i.sentiment, to_char(i."activityAt", 'YYYY-MM-DD'), i."activityAt" FROM ${base}
+        ) t
+        GROUP BY kind, key, date
+        ORDER BY count(*) DESC, max("activityAt") DESC`,
     ]);
-    const insights = rows.map((c) => analyzeConversation({ messages: c.messages.reverse(), status: c.status, handoffs: c.handoffs, ...operating(c) }));
-    const escalated = insights.filter((i) => i.escalation.escalated).length;
+    const of = (kind: string) => groups.filter((g) => g.kind === kind);
+    const counts = <K extends string>(kind: string, keys: readonly K[], date?: string) =>
+      Object.fromEntries(keys.map((k) => [k, of(kind).find((g) => g.key === k && (date === undefined || g.date === date))?.n ?? 0])) as Record<K, number>;
+    const analyzed = totals?.analyzed ?? 0;
     return {
       days,
       conversations,
-      analyzed: insights.length,
-      languages: tally(insights.map((i) => i.primaryLanguage).filter((l) => l !== "unknown")).map(([language, n]) => ({ language, conversations: n })),
-      codeSwitched: insights.filter((i) => i.codeSwitchedMessages > 0).length,
-      withSwitches: insights.filter((i) => i.switches > 0).length,
-      sentiment: Object.fromEntries(SENTIMENTS.map((s) => [s, insights.filter((i) => i.sentiment === s).length])) as InsightsOverview["sentiment"],
-      intents: tally(insights.map((i) => i.intent)).map(([intent, n]) => ({ intent, conversations: n })),
-      entities: tally(insights.flatMap((i) => i.entities.map((e) => e.type))).map(([type, count]) => ({ type, count })),
-      resolution: Object.fromEntries(RESOLUTIONS.map((r) => [r, insights.filter((i) => i.resolution === r).length])) as InsightsOverview["resolution"],
-      escalation: { conversations: escalated, rate: insights.length > 0 ? escalated / insights.length : null, withSignals: insights.filter((i) => i.escalation.signals.length > 0).length },
+      analyzed,
+      languages: of("language").filter((g) => g.key !== "unknown").map((g) => ({ language: g.key as DetectedLanguage, conversations: g.n })),
+      codeSwitched: totals?.codeSwitched ?? 0,
+      withSwitches: totals?.withSwitches ?? 0,
+      sentiment: counts("sentiment", SENTIMENTS),
+      intents: of("intent").map((g) => ({ intent: g.key as Intent, conversations: g.n })),
+      entities: of("entity").map((g) => ({ type: g.key as EntityType, count: g.n })),
+      resolution: counts("resolution", RESOLUTIONS),
+      escalation: { conversations: totals?.escalated ?? 0, rate: analyzed > 0 ? (totals?.escalated ?? 0) / analyzed : null, withSignals: totals?.withSignals ?? 0 },
+      sentimentDaily: [...new Set(of("daily").map((g) => g.date!))].sort().map((date) => ({ date, ...counts("daily", SENTIMENTS, date) })),
     };
   });
 
@@ -419,10 +478,12 @@ export function inboxRoutes(
     const { days } = analyticsQuerySchema.parse(req.query);
     const since = new Date(Date.now() - days * 86_400_000);
     const tenant = { ...within(scope), ...REAL };
-    const [active, handoffs, queue, assigned, humanActive, suggestionsTotal, suggestionsUsed, replies] = await Promise.all([
-      prisma.conversation.count({ where: { ...tenant, updatedAt: { gte: since } } }),
-      // shortcut: the newest 10,000 handoffs of the period; aggregate in SQL when a workspace has more
-      prisma.handoff.findMany({ where: { ...within(scope), conversation: REAL, requestedAt: { gte: since } }, orderBy: { requestedAt: "desc" }, take: 10_000 }),
+    const before = new Date(since.getTime() - days * 86_400_000);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const [active, handoffs, queue, assigned, humanActive, suggestionsTotal, suggestionsUsed, replies, started, activeDaily, previousReplies, previousActive, previousHandedOff, weeks] = await Promise.all([
+      // Active: at least one message in the period (updatedAt cannot be used for the previous period, it has moved on).
+      prisma.conversation.count({ where: { ...tenant, messages: { some: { createdAt: { gte: since } } } } }),
+      handoffTotals(scope, since),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: null } }),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: { not: null } } }),
       prisma.conversation.count({ where: { ...tenant, status: "HUMAN_ACTIVE" } }),
@@ -439,41 +500,153 @@ export function inboxRoutes(
         ) t
         WHERE previous = 'USER' AND role IN ('ASSISTANT', 'AGENT')
         GROUP BY role`,
+      prisma.$queryRaw<{ date: string; count: number }[]>`
+        SELECT to_char(c."createdAt", 'YYYY-MM-DD') AS date, count(*)::int AS count
+        FROM "Conversation" c
+        WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND c."createdAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
+        GROUP BY 1`,
+      // Conversations with at least one message that day: the base of the daily handoff rate. Timestamps are stored as UTC.
+      prisma.$queryRaw<{ date: string; count: number }[]>`
+        SELECT to_char(m."createdAt", 'YYYY-MM-DD') AS date, count(DISTINCT m."conversationId")::int AS count
+        FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
+        WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND m."createdAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
+        GROUP BY 1`,
+      // Median reply time over the period of equal length before this one, to compare against.
+      prisma.$queryRaw<{ role: string; median: number }[]>`
+        SELECT role::text AS role, (percentile_cont(0.5) WITHIN GROUP (ORDER BY gap))::float8 AS median FROM (
+          SELECT m.role, LAG(m.role) OVER w AS previous,
+                 EXTRACT(EPOCH FROM (m."createdAt" - LAG(m."createdAt") OVER w)) * 1000 AS gap
+          FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND c.channel <> ${EVALUATION_CHANNEL}
+            AND m."createdAt" >= ${before} AND m."createdAt" < ${since}
+          WINDOW w AS (PARTITION BY m."conversationId" ORDER BY m."createdAt")
+        ) t
+        WHERE previous = 'USER' AND role IN ('ASSISTANT', 'AGENT')
+        GROUP BY role`,
+      prisma.conversation.count({ where: { ...tenant, messages: { some: { createdAt: { gte: before, lt: since } } } } }),
+      prisma.handoff.groupBy({ by: ["conversationId"], where: { ...within(scope), conversation: REAL, requestedAt: { gte: before, lt: since } } }),
+      // Distinct conversations per 7-day week counted back from now (week 0 = the last 7 days). Epochs, not casts:
+      // timestamps are stored as UTC without a zone, and EXTRACT(EPOCH) reads them as UTC whatever the session zone.
+      prisma.$queryRaw<{ w: number; active: number; handed: number }[]>`
+        SELECT w, count(DISTINCT a)::int AS active, count(DISTINCT h)::int AS handed FROM (
+          SELECT floor((${nowSec} - EXTRACT(EPOCH FROM m."createdAt")) / 604800)::int AS w, m."conversationId" AS a, NULL::text AS h
+          FROM "ConversationMessage" m JOIN "Conversation" c ON c.id = m."conversationId"
+          WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND m."createdAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
+          UNION ALL
+          SELECT floor((${nowSec} - EXTRACT(EPOCH FROM h."requestedAt")) / 604800)::int, NULL::text, h."conversationId"
+          FROM "Handoff" h JOIN "Conversation" c ON c.id = h."conversationId"
+          WHERE h."organizationId" = ${scope.organizationId} AND h."workspaceId" = ${scope.workspaceId} AND h."requestedAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}
+        ) t
+        GROUP BY w`,
     ]);
+    const previous = (role: string) => {
+      const m = previousReplies.find((r) => r.role === role)?.median;
+      return m === undefined || m === null ? null : Math.round(Number(m));
+    };
+    // Counts per band: below edges[0], [edges[i-1], edges[i]), and at or above the last edge.
+    const bands = (list: number[], edges: readonly number[]) =>
+      [...edges, Infinity].map((edge, i) => list.filter((g) => g < edge && g >= (i === 0 ? -Infinity : edges[i - 1]!)).length);
+    const day = (d: Date) => d.toISOString().slice(0, 10);
+    const dates: string[] = [];
+    for (let t = Date.parse(day(since)); t <= Date.now(); t += 86_400_000) dates.push(day(new Date(t)));
     const gaps = (role: string) => (replies.find((r) => r.role === role)?.gaps ?? []).map(Number);
-    const durations = (pick: (h: (typeof handoffs)[number]) => number | null, list = handoffs) =>
-      stats(list.map(pick).filter((d): d is number => d !== null));
-    const agents = [...new Set(handoffs.map((h) => h.assignedTo).filter((a) => a !== null))];
+    const { total, agents, triggers, daily } = handoffs;
     return {
       days,
       conversations: active,
-      handoffs: handoffs.length,
-      handoffRate: active > 0 ? new Set(handoffs.map((h) => h.conversationId)).size / active : null,
-      byTrigger: [...new Set(handoffs.map((h) => h.trigger as HandoffTrigger))]
-        .map((trigger) => ({ trigger, count: handoffs.filter((h) => h.trigger === trigger).length }))
-        .sort((a, b) => b.count - a.count),
-      outcomes: {
-        resolved: handoffs.filter((h) => h.outcome === "resolved").length,
-        returnedToAi: handoffs.filter((h) => h.outcome === "returned_to_ai").length,
-        open: handoffs.filter((h) => h.endedAt === null).length,
-      },
+      handoffs: total.handoffs,
+      handoffRate: active > 0 ? total.conversations / active : null,
+      previousHandoffRate: previousActive > 0 ? previousHandedOff.length / previousActive : null,
+      byTrigger: triggers.map((t) => ({ trigger: t.trigger as HandoffTrigger, count: t.count })),
+      outcomes: { resolved: total.resolved, returnedToAi: total.returned, open: total.open },
       open: { queue, assigned, humanActive },
-      timeToAccept: durations((h) => between(h.requestedAt, h.acceptedAt)),
-      timeToFirstResponse: durations((h) => between(h.requestedAt, h.firstResponseAt)),
-      timeToResolve: durations((h) => (h.outcome === "resolved" ? between(h.requestedAt, h.endedAt) : null)),
+      timeToAccept: durationStats(total, "accept"),
+      timeToFirstResponse: durationStats(total, "first"),
+      timeToResolve: durationStats(total, "resolve"),
       replyTime: { ai: stats(gaps("ASSISTANT")), human: stats(gaps("AGENT")) },
-      byAgent: agents
-        .map((agentId) => {
-          const mine = handoffs.filter((h) => h.assignedTo === agentId);
-          return {
-            agentId,
-            handoffs: mine.length,
-            resolved: mine.filter((h) => h.outcome === "resolved").length,
-            firstResponse: durations((h) => between(h.requestedAt, h.firstResponseAt), mine),
-          };
-        })
-        .sort((a, b) => b.handoffs - a.handoffs),
+      previousReplyMedian: { ai: previous("ASSISTANT"), human: previous("AGENT") },
+      replyBands: { ai: bands(gaps("ASSISTANT"), REPLY_BANDS.ai), human: bands(gaps("AGENT"), REPLY_BANDS.human) },
+      byAgent: agents.map((a) => ({ agentId: a.agentId!, handoffs: a.handoffs, resolved: a.resolved, firstResponse: durationStats(a, "first") })),
       suggestions: { total: suggestionsTotal, used: suggestionsUsed },
+      weekly: Array.from({ length: Math.ceil(days / 7) }, (_, i) => {
+        const w = Math.ceil(days / 7) - 1 - i;
+        const row = weeks.find((x) => x.w === w);
+        return {
+          from: day(new Date(Math.max(since.getTime(), (nowSec - (w + 1) * 604_800) * 1000))),
+          to: day(new Date((nowSec - w * 604_800) * 1000)),
+          active: row?.active ?? 0,
+          handedOff: row?.handed ?? 0,
+        };
+      }),
+      daily: dates.map((date) => {
+        const d = daily.find((x) => x.date === date);
+        return {
+          date,
+          conversations: started.find((s) => s.date === date)?.count ?? 0,
+          handoffs: d?.handoffs ?? 0,
+          resolved: d?.resolved ?? 0,
+          active: activeDaily.find((a) => a.date === date)?.count ?? 0,
+          handedOff: d?.handedOff ?? 0,
+        };
+      }),
     };
   });
+}
+
+type HandoffGroup = {
+  agentId: string | null;
+  handoffs: number;
+  conversations: number;
+  resolved: number;
+  returned: number;
+  open: number;
+} & Record<`${"accept" | "first" | "resolve"}${"N" | "Sum" | "P50" | "P90"}`, number | null>;
+
+/** The same numbers stats() gives: percentile_disc is its nearest rank, and the average is rounded the same way. */
+const durationStats = (g: HandoffGroup, key: "accept" | "first" | "resolve"): DurationStats => {
+  const n = g[`${key}N`] ?? 0;
+  if (n === 0) return { count: 0, average: null, median: null, p90: null };
+  return { count: n, average: Math.round(Number(g[`${key}Sum`]) / n), median: Number(g[`${key}P50`]), p90: Number(g[`${key}P90`]) };
+};
+
+/** Handoffs requested since `since`, aggregated in SQL: the period's totals, per agent, per trigger and per day. */
+async function handoffTotals(scope: { organizationId: string; workspaceId: string }, since: Date) {
+  const from = Prisma.sql`FROM "Handoff" h JOIN "Conversation" c ON c.id = h."conversationId"
+    WHERE h."organizationId" = ${scope.organizationId} AND h."workspaceId" = ${scope.workspaceId} AND h."requestedAt" >= ${since} AND c.channel <> ${EVALUATION_CHANNEL}`;
+  const ms = (to: string) => Prisma.raw(`(EXTRACT(EPOCH FROM (h."${to}" - h."requestedAt")) * 1000)::float8`);
+  const duration = (key: string, value: Prisma.Sql) => Prisma.sql`
+    count(${value})::int AS ${Prisma.raw(`"${key}N"`)}, sum(${value}) AS ${Prisma.raw(`"${key}Sum"`)},
+    percentile_disc(0.5) WITHIN GROUP (ORDER BY ${value}) AS ${Prisma.raw(`"${key}P50"`)},
+    percentile_disc(0.9) WITHIN GROUP (ORDER BY ${value}) AS ${Prisma.raw(`"${key}P90"`)}`;
+  const [groups, triggers, daily] = await Promise.all([
+    // One row for the whole period (total = 1) and one per assigned agent; ties keep the most recent first, as before.
+    prisma.$queryRaw<(HandoffGroup & { total: number })[]>`
+      SELECT GROUPING(h."assignedTo")::int AS total, h."assignedTo" AS "agentId", count(*)::int AS handoffs,
+             count(DISTINCT h."conversationId")::int AS conversations,
+             count(*) FILTER (WHERE h.outcome = 'resolved')::int AS resolved,
+             count(*) FILTER (WHERE h.outcome = 'returned_to_ai')::int AS returned,
+             count(*) FILTER (WHERE h."endedAt" IS NULL)::int AS open,
+             ${duration("accept", ms("acceptedAt"))}, ${duration("first", ms("firstResponseAt"))},
+             ${duration("resolve", Prisma.sql`CASE WHEN h.outcome = 'resolved' THEN ${ms("endedAt")} END`)}
+      ${from}
+      GROUP BY GROUPING SETS ((), (h."assignedTo"))
+      ORDER BY count(*) DESC, max(h."requestedAt") DESC`,
+    prisma.$queryRaw<{ trigger: string; count: number }[]>`
+      SELECT h.trigger, count(*)::int AS count ${from} GROUP BY h.trigger ORDER BY count(*) DESC, max(h."requestedAt") DESC`,
+    // Timestamps are stored as UTC, so the day is the stored date. Resolved handoffs count on the day they ended.
+    prisma.$queryRaw<{ date: string; handoffs: number; handedOff: number; resolved: number }[]>`
+      SELECT date, sum(handoffs)::int AS handoffs, sum("handedOff")::int AS "handedOff", sum(resolved)::int AS resolved FROM (
+        SELECT to_char(h."requestedAt", 'YYYY-MM-DD') AS date, count(*) AS handoffs, count(DISTINCT h."conversationId") AS "handedOff", 0 AS resolved
+        ${from} GROUP BY 1
+        UNION ALL
+        SELECT to_char(h."endedAt", 'YYYY-MM-DD'), 0, 0, count(*) ${from} AND h.outcome = 'resolved' AND h."endedAt" IS NOT NULL GROUP BY 1
+      ) t GROUP BY date`,
+  ]);
+  const empty: HandoffGroup = { agentId: null, handoffs: 0, conversations: 0, resolved: 0, returned: 0, open: 0 } as HandoffGroup;
+  return {
+    total: groups.find((g) => g.total === 1) ?? empty,
+    agents: groups.filter((g) => g.total === 0 && g.agentId !== null),
+    triggers,
+    daily,
+  };
 }

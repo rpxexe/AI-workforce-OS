@@ -140,16 +140,15 @@ const toCase = (c: Prisma.EvalCaseGetPayload<object>): EvalCaseInfo => ({
   createdAt: c.createdAt.toISOString(),
 });
 
-const mean = (values: number[]) => (values.length === 0 ? null : Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10);
-const rate = (flags: (boolean | null)[]) => {
-  const judged = flags.filter((f) => f !== null);
-  return judged.length === 0 ? null : judged.filter(Boolean).length / judged.length;
-};
-const summary = (list: { score: number | null; passed: boolean | null }[]) => ({
-  evaluations: list.length,
-  averageScore: mean(list.map((e) => e.score).filter((s) => s !== null)),
-  passRate: rate(list.map((e) => e.passed)),
-});
+/** Counts from SQL: rows, rows with a score and their sum, passed and judged (passed not null). */
+type Tally = { n: number; scored: number; total: number | null; passed: number; judged: number };
+const TALLY = (t: string) =>
+  Prisma.raw(`count(*)::int AS n, count(${t}.score)::int AS scored, sum(${t}.score)::float8 AS total,
+    count(*) FILTER (WHERE ${t}.passed)::int AS passed, count(${t}.passed)::int AS judged`);
+/** Mean rounded to one decimal, or null when nothing was scored. */
+const mean = (t: Tally) => (t.scored === 0 ? null : Math.round((Number(t.total) / t.scored) * 10) / 10);
+const rate = (t: Tally) => (t.judged === 0 ? null : t.passed / t.judged);
+const summary = (t: Tally | undefined) => (t ? { evaluations: t.n, averageScore: mean(t), passRate: rate(t) } : { evaluations: 0, averageScore: null, passRate: null });
 
 /** A conversation's messages as a regression case (a copy: the case keeps them if the conversation changes or goes). */
 export async function conversationCase(scope: Scope, conversationId: string) {
@@ -337,71 +336,71 @@ export function qualityRoutes(app: FastifyInstance, authenticate: Authenticate, 
     const scope = within(await inWorkspace(member(req), workspaceId));
     const { days, employeeId } = qualityQuerySchema.parse(req.query);
     const since = new Date(Date.now() - days * 86_400_000);
-    // shortcut: the newest 10,000 evaluations of the period, aggregated here; move to SQL when a workspace has more
-    const rows = await prisma.evaluation.findMany({
-      where: { ...scope, ...PRODUCTION, status: "COMPLETED", createdAt: { gte: since }, ...(employeeId && { employeeId }) },
-      orderBy: { createdAt: "desc" },
-      take: 10_000,
-      select: {
-        employeeId: true,
-        score: true,
-        passed: true,
-        failures: true,
-        createdAt: true,
-        employeeVersion: { select: { number: true } },
-        results: { where: { status: "scored" }, select: { evaluatorId: true, dimension: true, score: true, passed: true, evaluatorVersion: { select: { name: true } } } },
-      },
-    });
-    const nameOf = await employeeNames(scope, rows.map((r) => r.employeeId));
-    const results = rows.flatMap((r) => r.results);
+    // Completed production evaluations of the period, aggregated in SQL. Ties keep the most recent first.
+    const where = Prisma.sql`e."organizationId" = ${scope.organizationId} AND e."workspaceId" = ${scope.workspaceId} AND e.trigger IN ('auto', 'manual')
+        AND e.status = 'COMPLETED' AND e."createdAt" >= ${since} ${employeeId ? Prisma.sql`AND e."employeeId" = ${employeeId}` : Prisma.empty}`;
+    const scoredResults = Prisma.sql`"EvaluationResult" r JOIN "Evaluation" e ON e.id = r."evaluationId"`;
+    const [groups, dimensionRows, failing] = await Promise.all([
+      // GROUPING bits (day, employee, version): 7 the period, 3 per day, 5 per employee, 4 per employee version.
+      prisma.$queryRaw<(Tally & { g: number; day: string | null; employeeId: string | null; version: number | null; failures: number })[]>`
+        SELECT GROUPING(to_char(e."createdAt", 'YYYY-MM-DD'), e."employeeId", v.number)::int AS g,
+               to_char(e."createdAt", 'YYYY-MM-DD') AS day, e."employeeId" AS "employeeId", v.number AS version,
+               ${TALLY("e")}, coalesce(sum(e.failures), 0)::int AS failures
+        FROM "Evaluation" e LEFT JOIN "AIEmployeeVersion" v ON v.id = e."employeeVersionId" WHERE ${where}
+        GROUP BY GROUPING SETS ((), (to_char(e."createdAt", 'YYYY-MM-DD')), (e."employeeId"), (e."employeeId", v.number))
+        ORDER BY max(e."createdAt") DESC`,
+      // GROUPING bits (employee, dimension): 2 per dimension, 0 per employee and dimension.
+      prisma.$queryRaw<(Tally & { g: number; employeeId: string | null; dimension: string })[]>`
+        SELECT GROUPING(e."employeeId", r.dimension)::int AS g, e."employeeId" AS "employeeId", r.dimension, ${TALLY("r")}
+        FROM ${scoredResults} WHERE ${where} AND r.status = 'scored'
+        GROUP BY GROUPING SETS ((r.dimension), (e."employeeId", r.dimension))`,
+      prisma.$queryRaw<{ evaluatorId: string; name: string; dimension: string; failures: number }[]>`
+        SELECT r."evaluatorId" AS "evaluatorId", (array_agg(ev.name ORDER BY e."createdAt" DESC))[1] AS name,
+               (array_agg(r.dimension ORDER BY e."createdAt" DESC))[1] AS dimension, count(*)::int AS failures
+        FROM ${scoredResults} JOIN "EvaluatorVersion" ev ON ev.id = r."evaluatorVersionId"
+        WHERE ${where} AND r.status = 'scored' AND r.passed = false
+        GROUP BY r."evaluatorId"
+        ORDER BY count(*) DESC, max(e."createdAt") DESC
+        LIMIT 10`,
+    ]);
+    const of = (g: number) => groups.filter((r) => r.g === g);
+    const period = of(7)[0];
+    const nameOf = await employeeNames(scope, of(5).map((r) => r.employeeId!));
 
     const trend: QualityOverview["trend"] = [];
     for (let i = days - 1; i >= 0; i--) {
       const day = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
-      const list = rows.filter((r) => r.createdAt.toISOString().slice(0, 10) === day);
-      const { averageScore, passRate } = summary(list);
-      trend.push({ day, evaluations: list.length, averageScore, passRate });
+      trend.push({ day, ...summary(of(3).find((r) => r.day === day)) });
     }
 
-    const employees = [...new Set(rows.map((r) => r.employeeId))];
-    const versions = [...new Map(rows.map((r) => [`${r.employeeId}:${r.employeeVersion?.number}`, r])).values()].filter((r) => r.employeeVersion);
-    const failing = results.filter((r) => r.passed === false);
     return {
       days,
-      ...summary(rows),
-      failures: rows.reduce((n, r) => n + r.failures, 0),
-      byDimension: EVAL_DIMENSIONS.map((dimension) => {
-        const list = results.filter((r) => r.dimension === dimension);
-        return { dimension, results: list.length, averageScore: mean(list.map((r) => r.score).filter((s) => s !== null)), passRate: rate(list.map((r) => r.passed)) };
-      }).filter((d) => d.results > 0),
+      ...summary(period),
+      passing: period?.passed ?? 0,
+      judged: period?.judged ?? 0,
+      failures: period?.failures ?? 0,
+      byDimension: EVAL_DIMENSIONS.flatMap((dimension) => {
+        const t = dimensionRows.find((r) => r.g === 2 && r.dimension === dimension);
+        return t ? [{ dimension, results: t.n, averageScore: mean(t), passRate: rate(t) }] : [];
+      }),
       trend,
-      byEmployee: employees
-        .map((id) => {
-          const list = rows.filter((r) => r.employeeId === id);
-          const mine = list.flatMap((r) => r.results);
+      byEmployee: of(5)
+        .map((t) => {
+          const id = t.employeeId!;
           const dimensions: Partial<Record<EvalDimension, number>> = {};
           for (const d of EVAL_DIMENSIONS) {
-            const avg = mean(mine.filter((r) => r.dimension === d).map((r) => r.score).filter((s) => s !== null));
+            const r = dimensionRows.find((x) => x.g === 0 && x.employeeId === id && x.dimension === d);
+            const avg = r ? mean(r) : null;
             if (avg !== null) dimensions[d] = avg;
           }
-          return { employeeId: id, name: nameOf(id), ...summary(list), dimensions };
+          return { employeeId: id, name: nameOf(id), ...summary(t), dimensions };
         })
         .sort((a, b) => (b.averageScore ?? -1) - (a.averageScore ?? -1)),
-      byVersion: versions
-        .map((v) => {
-          const version = v.employeeVersion?.number ?? 0;
-          const list = rows.filter((r) => r.employeeId === v.employeeId && r.employeeVersion?.number === version);
-          return { employeeId: v.employeeId, name: nameOf(v.employeeId), version, ...summary(list) };
-        })
+      byVersion: of(4)
+        .filter((t) => t.version !== null)
+        .map((t) => ({ employeeId: t.employeeId!, name: nameOf(t.employeeId!), version: t.version!, ...summary(t) }))
         .sort((a, b) => a.name.localeCompare(b.name) || b.version - a.version),
-      topFailures: [...new Set(failing.map((r) => r.evaluatorId))]
-        .map((evaluatorId) => {
-          const list = failing.filter((r) => r.evaluatorId === evaluatorId);
-          const first = list[0];
-          return { evaluatorId, name: first?.evaluatorVersion.name ?? "", dimension: (first?.dimension ?? "correctness") as EvalDimension, failures: list.length };
-        })
-        .sort((a, b) => b.failures - a.failures)
-        .slice(0, 10),
+      topFailures: failing.map((f) => ({ ...f, dimension: f.dimension as EvalDimension })),
     };
   });
 

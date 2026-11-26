@@ -47,6 +47,34 @@ export type Scope = Member & { workspaceId: string };
 /** The tenant filter every employee query carries. */
 export const within = (s: { organizationId: string; workspaceId: string }) => ({ organizationId: s.organizationId, workspaceId: s.workspaceId });
 
+/** A workspace's employees, most recently changed first: the archived ones, or the rest (the default). */
+export async function listEmployees(scope: { organizationId: string; workspaceId: string }, archived = false): Promise<EmployeeSummary[]> {
+  const employees = await prisma.aiEmployee.findMany({
+    where: { ...within(scope), status: archived ? "ARCHIVED" : { not: "ARCHIVED" } },
+    orderBy: { updatedAt: "desc" },
+    // shortcut: no pagination, add a cursor when a workspace nears 200 employees
+    take: 200,
+    include: { versions: { orderBy: { number: "desc" }, take: 1 }, publishedVersion: { select: { number: true } } },
+  });
+  return employees.flatMap((e) => {
+    const latest = e.versions[0];
+    if (!latest) return [];
+    const { name, role, description, avatar, language } = configOf(latest);
+    return {
+      id: e.id,
+      status: e.status,
+      name,
+      role,
+      description,
+      avatar,
+      language,
+      latestVersion: latest.number,
+      publishedVersion: e.publishedVersion?.number ?? null,
+      updatedAt: e.updatedAt.toISOString(),
+    };
+  });
+}
+
 /**
  * AI Employee CRUD. Every query is scoped to the organization in the session and to a workspace
  * of that organization; an employee anywhere else answers 404, the same as one that does not exist.
@@ -97,30 +125,7 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
   app.get(base, async (req): Promise<EmployeeSummary[]> => {
     const { scope } = await scoped(req, member);
     const { archived } = z.object({ archived: z.enum(["true", "false"]).default("false") }).parse(req.query);
-    const employees = await prisma.aiEmployee.findMany({
-      where: { ...within(scope), status: archived === "true" ? "ARCHIVED" : { not: "ARCHIVED" } },
-      orderBy: { updatedAt: "desc" },
-      // shortcut: no pagination, add a cursor when a workspace nears 200 employees
-      take: 200,
-      include: { versions: { orderBy: { number: "desc" }, take: 1 }, publishedVersion: { select: { number: true } } },
-    });
-    return employees.flatMap((e) => {
-      const latest = e.versions[0];
-      if (!latest) return [];
-      const { name, role, description, avatar, language } = configOf(latest);
-      return {
-        id: e.id,
-        status: e.status,
-        name,
-        role,
-        description,
-        avatar,
-        language,
-        latestVersion: latest.number,
-        publishedVersion: e.publishedVersion?.number ?? null,
-        updatedAt: e.updatedAt.toISOString(),
-      };
-    });
+    return listEmployees(scope, archived === "true");
   });
 
   app.post(base, async (req, reply) => {

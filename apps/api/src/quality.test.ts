@@ -275,6 +275,7 @@ test("a conversation is graded in the background with links to its employee vers
 
   // The overview.
   const overview = (await call("GET", `/workspaces/${ws}/quality?days=7`, undefined, memberOf(orgA))).json<QualityOverview>();
+  assert.equal(overview.judged === 0 ? null : overview.passing / overview.judged, overview.passRate, "exact counts match the rate");
   assert.equal(overview.evaluations, 1);
   assert.equal(overview.failures, 2);
   assert.equal(overview.passRate, 0);

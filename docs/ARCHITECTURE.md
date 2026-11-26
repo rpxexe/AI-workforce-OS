@@ -44,6 +44,10 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
 - `Conversation`: `organizationId`, `workspaceId`, `employeeId`, `channel`, `title`, `status` (AI_ACTIVE,
   WAITING_FOR_HUMAN, HUMAN_ACTIVE, RESOLVED, REOPENED), `assignedTo` (Clerk user id; null = unassigned queue),
   `failedTurns` (consecutive failed turns), `resolvedAt`.
+- `ConversationInsight`: the analyzer's output for one conversation (unique per conversation, and per organization + workspace +
+  conversation): `primaryLanguage`, `codeSwitchedMessages`, `switches`, `sentiment`, `intent`, `entityTypes` (one per entity),
+  `resolution`, `escalated`, `escalationSignals`, and `activityAt` (the conversation's `updatedAt` it was computed from).
+  Written by `refreshInsights` (inbox.ts) on insights reads; a row older than the conversation's `updatedAt` is recomputed.
 - `ConversationMessage`: `role` (USER, ASSISTANT, AGENT = a human agent, with `authorId`), `content`; assistant rows also carry
   `employeeVersion`, `provider`, `model`, `inputTokens`, `outputTokens`, `latencyMs`.
   `sources` (the knowledge documents and pages the reply was given).
@@ -247,9 +251,12 @@ GET   /workspaces/:workspaceId/conversations/:conversationId            member; 
 PATCH .../conversations/:conversationId         member; { action: take_over | assign (userId|null) | return_to_ai | resolve | reopen }; 409 if it moved
 POST  .../conversations/:conversationId/messages  member; { text, suggestionId? }; takes over, sends on the channel (502 if that fails), then stores
 POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
-GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30)
-GET   /workspaces/:workspaceId/insights        member; ?days= (default 30); InsightsOverview (Phase 15; the conversation detail carries `insight`)
+GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30); aggregated in SQL (percentile_disc = stats()' nearest rank)
+GET   /workspaces/:workspaceId/insights        member; ?days= (default 30); InsightsOverview (Phase 15; the conversation detail carries `insight`);
+                                                first (re)analyzes up to 500 missing/stale conversations, then counts stored ConversationInsight rows in SQL
 GET   /analytics/report                         member; ?from&to (to exclusive, <= 366 days)&workspaceId?; AnalyticsReport (Phase 16)
+GET   /workspaces/:workspaceId/dashboard        member; ?days=7|30|90; DashboardSummary: counts in SQL, open queue, quality, employees, this workspace's and the organization's billed usage, plan limits, attention thresholds
+PUT   /workspaces/:workspaceId/attention        admin; { handoffRateRise, qualityScoreBelow, limitUsedPercent }; stored on Workspace.attention (JSON), defaults when unset
 GET   /billing                                  member; BillingOverview: plan, status, period, limits with use, usage, invoices, plans
 GET   /billing/usage                            member; ?from&to; UsageSummary (ledger totals, cost, billed, newest 100 entries with sources)
 POST  /billing/checkout                         admin; { plan }; no subscription: { url } (Stripe Checkout); else changes the price ({ url: null }); free = cancel at period end
@@ -263,7 +270,7 @@ PATCH .../evaluators/:id                        admin; { enabled }
 GET   /workspaces/:workspaceId/evaluations      member; production evaluations, newest 100; ?failed=true ?dimension= ?evaluatorId= ?employeeId= ?days=
 GET   .../conversations/:conversationId/evaluations   member; newest 20 with results (drill-down)
 POST  .../conversations/:conversationId/evaluations   admin; queues a manual evaluation; 202 (PENDING)
-GET   /workspaces/:workspaceId/quality          member; ?days= ?employeeId=; QualityOverview
+GET   /workspaces/:workspaceId/quality          member; ?days= ?employeeId=; QualityOverview, aggregated in SQL (GROUPING SETS), no cap
 GET   /workspaces/:workspaceId/datasets         member; with case counts and the last run
 POST  /workspaces/:workspaceId/datasets         admin; { name, description? }; 409 if the name is taken
 GET   .../datasets/:id                          member; cases and newest 50 runs

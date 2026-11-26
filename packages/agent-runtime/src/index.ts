@@ -36,7 +36,7 @@ export { suggest, toSuggestion, type CopilotInput } from "./copilot.ts";
 export { ROLLOUT_INCLUDE, rolloutBucket, servedVersion } from "./rollout.ts";
 export { asciiDigits, extractEntities, parseAmount, regionOf, type ExtractedEntity } from "./entities.ts";
 export { detectLanguage, languageProfile } from "./language.ts";
-export { analyzeConversation, type InsightMessage } from "./insights.ts";
+export { ANALYZER_VERSION, analyzeConversation, type InsightMessage } from "./insights.ts";
 
 export type TurnInput = {
   provider: AIProvider;

@@ -16,6 +16,7 @@ import {
   type CopilotSuggestion,
   type EmployeeChannelInfo,
   type EmployeeDetail,
+  type DashboardSummary,
   type HandoffAnalytics,
   type InboxConversation,
   type InboxResponse,
@@ -442,5 +443,36 @@ test("handoff analytics: counts by trigger, outcomes, response times, Copilot us
   assert.ok(a.byAgent.some((x) => x.agentId === "user_member" && x.firstResponse.count >= 1));
   assert.deepEqual(a.suggestions, { total: 1, used: 1 });
   assert.ok(a.handoffRate !== null && a.handoffRate > 0 && a.handoffRate <= 1);
+  assert.ok(a.daily.length >= 7 && a.daily.length <= 8);
+  assert.equal(a.daily.reduce((s, d) => s + d.handoffs, 0), a.handoffs);
+  assert.equal(a.weekly.length, 1);
+  assert.equal(a.weekly[0]!.active > 0 ? a.weekly[0]!.handedOff / a.weekly[0]!.active : null, a.handoffRate, "a 7-day week counts each conversation once");
+  assert.ok(a.daily.some((d) => d.active > 0 && d.handedOff > 0 && d.handedOff <= d.handoffs));
+  assert.equal(a.replyBands.ai.length, 4);
+  assert.equal(a.replyBands.ai.reduce((s, n) => s + n, 0), a.replyTime.ai.count, "every AI reply lands in one band");
+  assert.equal(a.replyBands.human.reduce((s, n) => s + n, 0), a.replyTime.human.count, "every human reply lands in one band");
+  assert.ok("ai" in a.previousReplyMedian && "human" in a.previousReplyMedian);
+  assert.ok(a.previousHandoffRate === null || (a.previousHandoffRate >= 0 && a.previousHandoffRate <= 1));
   assert.equal((await call("GET", `/workspaces/${ws}/handoffs/analytics`, undefined, memberOf(orgB))).statusCode, 404);
+});
+
+test("dashboard: one summary that agrees with the full analytics, scoped to the workspace", async () => {
+  const res = await call("GET", `/workspaces/${ws}/dashboard`, undefined, memberOf(orgA));
+  assert.equal(res.statusCode, 200, res.payload);
+  const d = res.json<DashboardSummary>();
+  const full = (await call("GET", `/workspaces/${ws}/handoffs/analytics?days=7`, undefined, memberOf(orgA))).json<HandoffAnalytics>();
+  assert.equal(d.handoffs, full.handoffs);
+  assert.deepEqual(d.open, full.open);
+  assert.equal(d.handoffRate, full.handoffRate);
+  assert.ok(d.employees.list.every((e) => e.status !== "ARCHIVED"));
+  assert.ok(d.billing.workspaceUsd <= d.billing.organizationUsd + 1e-9);
+  assert.equal((await call("GET", `/workspaces/${ws}/dashboard`, undefined, memberOf(orgB))).statusCode, 404);
+  // Thresholds: defaults first, admins change them, members cannot, other organizations get 404.
+  assert.deepEqual(d.attention, { handoffRateRise: 5, qualityScoreBelow: 70, limitUsedPercent: 80 });
+  const next = { handoffRateRise: 10, qualityScoreBelow: 60, limitUsedPercent: 90 };
+  assert.equal((await call("PUT", `/workspaces/${ws}/attention`, next, memberOf(orgA))).statusCode, 403);
+  assert.equal((await call("PUT", `/workspaces/${ws}/attention`, next, adminOf(orgB))).statusCode, 404);
+  assert.equal((await call("PUT", `/workspaces/${ws}/attention`, { ...next, limitUsedPercent: 10 }, adminOf(orgA))).statusCode, 400);
+  assert.equal((await call("PUT", `/workspaces/${ws}/attention`, next, adminOf(orgA))).statusCode, 200);
+  assert.deepEqual((await call("GET", `/workspaces/${ws}/dashboard`, undefined, memberOf(orgA))).json<DashboardSummary>().attention, next);
 });

@@ -336,6 +336,16 @@ test("API: the workspace overview counts languages, sentiment, intents, entities
   assert.deepEqual(o.entities.map((e) => e.type).sort(), ["order_id", "phone"]);
   assert.deepEqual(o.resolution, { resolved: 1, with_people: 1, open: 0 });
   assert.deepEqual(o.escalation, { conversations: 1, rate: 0.5, withSignals: 0 });
+  const daily = o.sentimentDaily.reduce((t, d) => ({ positive: t.positive + d.positive, negative: t.negative + d.negative, neutral: t.neutral + d.neutral, mixed: t.mixed + d.mixed }), { positive: 0, negative: 0, neutral: 0, mixed: 0 });
+  assert.deepEqual(daily, o.sentiment, "the days add up to the period");
+  // Stored per conversation; a conversation that moves on is analyzed again on the next read.
+  const stored = await prisma.conversationInsight.findMany({ where: { organizationId: orgA, workspaceId: wsA } });
+  assert.equal(stored.length, 2);
+  const target = stored.find((s) => s.resolution === "with_people") ?? stored[0]!;
+  await prisma.conversation.update({ where: { id: target.conversationId }, data: { status: "RESOLVED" } });
+  const again = (await app.inject({ method: "GET", url: `/workspaces/${wsA}/insights?days=7`, headers: memberOf(orgA) })).json<InsightsOverview>();
+  assert.deepEqual(again.resolution, { resolved: 2, with_people: 0, open: 0 });
+  assert.equal((await prisma.conversationInsight.findUniqueOrThrow({ where: { conversationId: target.conversationId } })).resolution, "resolved");
 });
 
 test("API: other organizations get 404, signed-out 401", async () => {
