@@ -15,14 +15,6 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [{ source: "/ai-models", destination: "/model-routing", permanent: false }];
   },
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
-  },
 };
 
 export default nextConfig;
