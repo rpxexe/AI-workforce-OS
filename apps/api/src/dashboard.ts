@@ -7,6 +7,7 @@ import { z } from "zod";
 import { guards, type Authenticate } from "./auth.ts";
 import type { BillingService } from "./billing/service.ts";
 import { listEmployees, within } from "./employees.ts";
+import { activeConversations } from "./inbox.ts";
 
 const DAY_MS = 86_400_000;
 /** Regression replays are not customer conversations. */
@@ -45,7 +46,7 @@ export function dashboardRoutes(app: FastifyInstance, authenticate: Authenticate
     const handoffRate = async (from: Date, to?: Date) => {
       const range = { gte: from, ...(to && { lt: to }) };
       const [active, handed] = await Promise.all([
-        prisma.conversation.count({ where: { ...tenant, ...REAL, messages: { some: { createdAt: range } } } }),
+        activeConversations(scope, from, to),
         prisma.handoff.groupBy({ by: ["conversationId"], where: { ...tenant, conversation: REAL, requestedAt: range } }),
       ]);
       return active > 0 ? handed.length / active : null;

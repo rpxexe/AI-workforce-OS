@@ -441,6 +441,18 @@ problem re-discovered.
   catch up on the next reads), then counts stored rows in SQL, so there is no 2,000-conversation cap. Lazy on read keeps one code path
   and needs no job: `updatedAt` already moves with every message, status change and handoff. Not-yet-refreshed rows still count with
   their older values, dated by `activityAt`.
+- **Insights are computed by a job when a conversation goes quiet** (2026-11-26), swept like grading (`insights-sweep`, 10 minutes
+  idle, every 5 minutes; `insights/analyze` per conversation, ids only). The lazy read path stays as the safety net for a delayed
+  job or a still-active conversation, so the output is unchanged; normally it finds nothing to do.
+- **Messages carry their conversation's tenant** (`ConversationMessage.organizationId`/`workspaceId`, copied on every insert,
+  backfilled by migration `20261126130000_message_tenant`, index `(organizationId, workspaceId, createdAt, conversationId)`), so
+  "active conversations" (handoff rate and its previous period, in handoff analytics and the dashboard; `activeConversations` in
+  inbox.ts) are counted from the workspace's messages of the period instead of a relation filter that probes every conversation of
+  the workspace. Distinct conversation ids come from the index alone, then each conversation is joined once for the channel. A
+  message-driven query on the existing `createdAt` index was not enough: the planner still walked the workspace's conversations, or
+  read every tenant's messages of the period. EXPLAIN ANALYZE, 6M synthetic messages, 600k conversations, 40 workspaces: 240k-
+  conversation workspace, 30 days 1.7-3.7 s before (1.9-2.3 s / 0.75-1.6 s with `createdAt` only), 0.27 s after; previous 30 days
+  1.5 s to 0.27 s; 15k-conversation workspace 0.22-0.28 s to 0.02 s. Conversations never move workspace, so the copy cannot drift.
 - **Handoff analytics and the quality overview aggregate in SQL** instead of loading 10,000 rows: `percentile_disc` equals the
   nearest-rank `stats()`, averages and one-decimal means are rounded in JS from SQL sums and counts, and ties keep the most recent
   group first (`max(...) DESC`), as the in-memory version did.

@@ -22,6 +22,7 @@ import { validFact } from "@workforce/memory";
 import { defaultEmployeeConfig, type EmployeeConfig, type EmployeeDetail, type InboxConversation, type InsightsOverview, type Workspace } from "@workforce/shared";
 import { deepgramProvider } from "@workforce/stt";
 import { elevenLabsProvider } from "@workforce/tts";
+import { analyzeInsights, quietInsights, refreshInsights } from "./inbox.ts";
 import { adminOf, deleteOrgs, memberOf, newOrg, testApp } from "./testing.ts";
 import { forSpeech, spokenRupees } from "./voice/speaker.ts";
 
@@ -280,9 +281,9 @@ before(async () => {
       status: "WAITING_FOR_HUMAN",
       messages: {
         create: [
-          { role: "USER", content: "mera order OD4312345678 kab aayega? 3 din ho gaye", createdAt: new Date(t0) },
-          { role: "ASSISTANT", content: "Main check karta hoon.", createdAt: new Date(t0 + 1000) },
-          { role: "USER", content: "bahut ghatiya service. Call me on 9876543210", createdAt: new Date(t0 + 2000) },
+          { organizationId: orgA, workspaceId: wsA, role: "USER", content: "mera order OD4312345678 kab aayega? 3 din ho gaye", createdAt: new Date(t0) },
+          { organizationId: orgA, workspaceId: wsA, role: "ASSISTANT", content: "Main check karta hoon.", createdAt: new Date(t0 + 1000) },
+          { organizationId: orgA, workspaceId: wsA, role: "USER", content: "bahut ghatiya service. Call me on 9876543210", createdAt: new Date(t0 + 2000) },
         ],
       },
     },
@@ -295,11 +296,11 @@ before(async () => {
       channel: "web_chat",
       title: "Price",
       status: "RESOLVED",
-      messages: { create: [{ role: "USER", content: "गोल्ड प्लान की कीमत क्या है?" }, { role: "ASSISTANT", content: "₹999 प्रति माह।" }] },
+      messages: { create: [{ organizationId: orgA, workspaceId: wsA, role: "USER", content: "गोल्ड प्लान की कीमत क्या है?" }, { organizationId: orgA, workspaceId: wsA, role: "ASSISTANT", content: "₹999 प्रति माह।" }] },
     },
   });
   // Regression replays are not customer conversations.
-  await prisma.conversation.create({ data: { ...scope, channel: "evaluation", title: "Replay", messages: { create: [{ role: "USER", content: "refund chahiye" }] } } });
+  await prisma.conversation.create({ data: { ...scope, channel: "evaluation", title: "Replay", messages: { create: [{ organizationId: orgA, workspaceId: wsA, role: "USER", content: "refund chahiye" }] } } });
 });
 after(async () => {
   await deleteOrgs(orgA, orgB);
@@ -346,6 +347,23 @@ test("API: the workspace overview counts languages, sentiment, intents, entities
   const again = (await app.inject({ method: "GET", url: `/workspaces/${wsA}/insights?days=7`, headers: memberOf(orgA) })).json<InsightsOverview>();
   assert.deepEqual(again.resolution, { resolved: 2, with_people: 0, open: 0 });
   assert.equal((await prisma.conversationInsight.findUniqueOrThrow({ where: { conversationId: target.conversationId } })).resolution, "resolved");
+});
+
+test("the insights job analyzes quiet conversations, so the read has nothing left to do", async () => {
+  const scope = { organizationId: orgA, workspaceId: wsA };
+  const employeeId = (await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } })).employeeId;
+  const quiet = await prisma.conversation.create({
+    data: { ...scope, employeeId, createdBy: "test", channel: "web_chat", title: "Thanks", messages: { create: [{ ...scope, role: "USER", content: "got it, thank you so much" }] } },
+  });
+  await prisma.conversation.update({ where: { id: quiet.id }, data: { updatedAt: new Date(Date.now() - 20 * 60_000) } });
+  const due = await quietInsights({ idleMs: 10 * 60_000, organizationId: orgA });
+  assert.deepEqual(due.map((d) => d.conversationId), [quiet.id], "only the quiet one; the others are fresh or still active");
+  assert.equal(await analyzeInsights(scope, [quiet.id]), 1);
+  assert.equal(await analyzeInsights({ organizationId: orgB, workspaceId: wsA }, [quiet.id]), 0, "never another organization's conversation");
+  assert.equal(await refreshInsights(scope, new Date(Date.now() - 7 * 86_400_000)), 0, "nothing missing or stale for the read");
+  const res = (await app.inject({ method: "GET", url: `/workspaces/${wsA}/insights?days=7`, headers: memberOf(orgA) })).json<InsightsOverview>();
+  assert.equal(res.analyzed, 3);
+  assert.equal(res.resolution.resolved, 3);
 });
 
 test("API: other organizations get 404, signed-out 401", async () => {

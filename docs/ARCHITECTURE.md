@@ -47,8 +47,10 @@ no build step. One `.env` at the repo root is read by the API (`--env-file`), Pr
 - `ConversationInsight`: the analyzer's output for one conversation (unique per conversation, and per organization + workspace +
   conversation): `primaryLanguage`, `codeSwitchedMessages`, `switches`, `sentiment`, `intent`, `entityTypes` (one per entity),
   `resolution`, `escalated`, `escalationSignals`, and `activityAt` (the conversation's `updatedAt` it was computed from).
-  Written by `refreshInsights` (inbox.ts) on insights reads; a row older than the conversation's `updatedAt` is recomputed.
-- `ConversationMessage`: `role` (USER, ASSISTANT, AGENT = a human agent, with `authorId`), `content`; assistant rows also carry
+  Written by the `insights/analyze` job when a conversation goes quiet (`insights-sweep`, see Background jobs); `refreshInsights`
+  (inbox.ts) on insights reads recomputes any row still missing or older than the conversation's `updatedAt` (safety net).
+- `ConversationMessage`: `role` (USER, ASSISTANT, AGENT = a human agent, with `authorId`), `content`, and the conversation's
+  `organizationId`/`workspaceId` (copied on insert, for per-workspace scans by time); assistant rows also carry
   `employeeVersion`, `provider`, `model`, `inputTokens`, `outputTokens`, `latencyMs`.
   `sources` (the knowledge documents and pages the reply was given).
 - `KnowledgeSource`: a named collection of documents in a workspace; name unique per workspace.
@@ -253,7 +255,8 @@ POST  .../conversations/:conversationId/messages  member; { text, suggestionId? 
 POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
 GET   /workspaces/:workspaceId/handoffs/analytics member; ?days= (default 30); aggregated in SQL (percentile_disc = stats()' nearest rank)
 GET   /workspaces/:workspaceId/insights        member; ?days= (default 30); InsightsOverview (Phase 15; the conversation detail carries `insight`);
-                                                first (re)analyzes up to 500 missing/stale conversations, then counts stored ConversationInsight rows in SQL
+                                                rows come from the insights job; the read first (re)analyzes up to 500 still missing/stale
+                                                (normally only active ones), then counts stored ConversationInsight rows in SQL
 GET   /analytics/report                         member; ?from&to (to exclusive, <= 366 days)&workspaceId?; AnalyticsReport (Phase 16)
 GET   /workspaces/:workspaceId/dashboard        member; ?days=7|30|90; DashboardSummary: counts in SQL, open queue, quality, employees, this workspace's and the organization's billed usage, plan limits, attention thresholds
 PUT   /workspaces/:workspaceId/attention        admin; { handoffRateRise, qualityScoreBelow, limitUsedPercent }; stored on Workspace.attention (JSON), defaults when unset
@@ -846,13 +849,14 @@ customer messages -> packages/agent-runtime/src/
                 parseAmount (lakh, crore, k); regionOf(employee) = "IN" for Asia/Kolkata or en-IN / hi-en
   insights.ts   analyzeConversation: phrase lists (English, Devanagari, Hinglish) for sentiment (with negation), intent,
                 resolution ("ho gaya", "got it") and escalation ("consumer court"); + status and Handoff rows
-read: GET conversation detail -> insight; GET /workspaces/:id/insights -> per conversation, then counted (newest 2,000)
+quiet 10 min -> insights-sweep -> insights/analyze -> ConversationInsight row (the read refreshes rows still missing or stale)
+read: GET conversation detail -> insight (computed); GET /workspaces/:id/insights -> stored rows counted in SQL
 runTurn: buildContext -> systemPrompt(..., customerMessage): reply in the customer's latest language and script; Indian
          formats only when regionOf(employee) is IN; never infer a customer's background
 ```
 
-- Nothing is stored and no model is called: insights are recomputed on every read, so improving a phrase list applies to old
-  conversations too. Relative dates use the message's own time in the employee's time zone.
+- No model is called. Stored rows carry `analyzerVersion`; bumping ANALYZER_VERSION makes every row stale, so improving a phrase
+  list applies to old conversations too. Relative dates use the message's own time in the employee's time zone.
 - Region is operational context from the employee's settings (time zone, language variant), never from a customer's number or
   language. Languages are reported as languages, not nationalities.
 - Speech: employee languages `en-IN` and `hi-en` (Hinglish). `isoOf` / `isMixedLanguage` / `localeOf` (shared) map them per
@@ -939,6 +943,9 @@ workflow-sweep               cron, every minute             engine.dueRuns -> wo
 evaluation/requested         { evaluationId }               runEvaluation (claims PENDING; records FAILED itself)
 evaluation/dataset.run       { runId }                      runCase per case (skips graded cases), then finishRun
 evaluation-sweep             cron, every 5 minutes          queueDueEvaluations -> evaluation/requested for each
+insights/analyze             { organizationId, workspaceId, conversationId }  analyzeInsights: analyzer -> ConversationInsight upsert
+insights-sweep               cron, every 5 minutes          quietInsights (quiet 10 min, last 3 days, insight missing/stale) -> insights/analyze
+                                                            (in process: after the evaluation sweep)
 usage-meter                  cron, every 5 minutes          meter every organization, 3 days back (Phase 16; in process: after the evaluation sweep)
 webhook-sweep                cron, every minute (Inngest only) new webhook events and due deliveries (Phase 17; without Inngest: a 5 s timer)
 improvement/analyze          { organizationId, workspaceId } analyzeWorkspace: patterns -> suggestions (never a version)

@@ -80,24 +80,62 @@ const operating = (c: Pick<ListRow, "employee">) => {
   return { timezone, region: v ? regionOf({ language: v.language, workingHours: { timezone } }) : null };
 };
 
-/** Conversations (re)analyzed per insights read; the rest catch up on the following reads. */
-const INSIGHT_BATCH = 500;
+type Scope = { organizationId: string; workspaceId: string };
 
 /**
- * Stores the analyzer's output for the period's conversations that have none yet, or whose stored row is older than
- * the conversation's last activity (updatedAt) or from an older ANALYZER_VERSION, newest first and at most
- * INSIGHT_BATCH per call.
+ * Distinct conversations of the workspace (not evaluation replays) with at least one message in [from, to). Driven by the
+ * workspace's messages of the period (index on the message's own tenant + createdAt), not by probing every conversation.
  */
-export async function refreshInsights(scope: { organizationId: string; workspaceId: string }, since: Date) {
+export async function activeConversations(scope: Scope, from: Date, to?: Date) {
+  // Distinct first (index-only), then each conversation once for the channel.
+  const [row] = await prisma.$queryRaw<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM (
+      SELECT DISTINCT m."conversationId" FROM "ConversationMessage" m
+      WHERE m."organizationId" = ${scope.organizationId} AND m."workspaceId" = ${scope.workspaceId}
+        AND m."createdAt" >= ${from} ${to ? Prisma.sql`AND m."createdAt" < ${to}` : Prisma.empty}
+    ) p JOIN "Conversation" c ON c.id = p."conversationId"
+    WHERE c.channel <> ${EVALUATION_CHANNEL}`;
+  return row?.n ?? 0;
+}
+
+/** Conversations (re)analyzed per insights read; the rest catch up on the following reads. */
+const INSIGHT_BATCH = 500;
+/**
+ * The safety net behind the insights job: stores the analyzer's output for the period's conversations that have none
+ * yet, or whose stored row is older than the conversation's last activity (updatedAt) or from an older ANALYZER_VERSION,
+ * newest first and at most INSIGHT_BATCH per call. Returns how many it analyzed (normally only conversations still active).
+ */
+export async function refreshInsights(scope: Scope, since: Date) {
   const stale = await prisma.$queryRaw<{ id: string }[]>`
     SELECT c.id FROM "Conversation" c LEFT JOIN "ConversationInsight" i ON i."conversationId" = c.id
     WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId} AND c.channel <> ${EVALUATION_CHANNEL}
       AND c."updatedAt" >= ${since} AND (i.id IS NULL OR i."activityAt" < c."updatedAt" OR i."analyzerVersion" < ${ANALYZER_VERSION})
     ORDER BY c."updatedAt" DESC
     LIMIT ${INSIGHT_BATCH}`;
-  if (stale.length === 0) return;
+  return analyzeInsights(scope, stale.map((s) => s.id));
+}
+
+/**
+ * Conversations that went quiet (no activity for `idleMs`, active in the last 3 days) with a missing or stale insight:
+ * the insights sweep queues an insights/analyze job for each, like the evaluation sweep. `organizationId` keeps tests
+ * to their own data.
+ */
+export async function quietInsights({ idleMs, limit = INSIGHT_BATCH, organizationId }: { idleMs: number; limit?: number; organizationId?: string }) {
+  return prisma.$queryRaw<(Scope & { conversationId: string })[]>`
+    SELECT c.id AS "conversationId", c."organizationId", c."workspaceId" FROM "Conversation" c
+    LEFT JOIN "ConversationInsight" i ON i."conversationId" = c.id
+    WHERE c.channel <> ${EVALUATION_CHANNEL} AND (${organizationId ?? null}::text IS NULL OR c."organizationId" = ${organizationId ?? null})
+      AND c."updatedAt" <= ${new Date(Date.now() - idleMs)} AND c."updatedAt" > now() - interval '3 days'
+      AND (i.id IS NULL OR i."activityAt" < c."updatedAt" OR i."analyzerVersion" < ${ANALYZER_VERSION})
+    ORDER BY c."updatedAt" ASC
+    LIMIT ${limit}`;
+}
+
+/** Runs the analyzer on these conversations of the workspace and upserts their ConversationInsight rows; the insights/analyze job. */
+export async function analyzeInsights(scope: Scope, ids: string[]) {
+  if (ids.length === 0) return 0;
   const rows = await prisma.conversation.findMany({
-    where: { ...scope, id: { in: stale.map((s) => s.id) } },
+    where: { ...scope, ...REAL, id: { in: ids } },
     select: {
       id: true,
       status: true,
@@ -127,6 +165,7 @@ export async function refreshInsights(scope: { organizationId: string; workspace
       return prisma.conversationInsight.upsert({ where: { conversationId: c.id }, create: { ...scope, conversationId: c.id, ...data }, update: data });
     }),
   );
+  return rows.length;
 }
 
 const base = (c: ListRow) => ({
@@ -357,7 +396,7 @@ export function inboxRoutes(
 
     const now = new Date();
     await prisma.$transaction(async (tx) => {
-      const message = await tx.conversationMessage.create({ data: { conversationId: conversation.id, role: "AGENT", content: text, authorId: scope.userId, createdAt: now } });
+      const message = await tx.conversationMessage.create({ data: { ...within(scope), conversationId: conversation.id, role: "AGENT", content: text, authorId: scope.userId, createdAt: now } });
       await tx.conversation.update({ where: { id: conversation.id }, data: { status: "HUMAN_ACTIVE", updatedAt: now } });
       await tx.conversation.updateMany({ where: { id: conversation.id, assignedTo: null }, data: { assignedTo: scope.userId } });
       const open = { conversationId: conversation.id, endedAt: null };
@@ -482,7 +521,7 @@ export function inboxRoutes(
     const nowSec = Math.floor(Date.now() / 1000);
     const [active, handoffs, queue, assigned, humanActive, suggestionsTotal, suggestionsUsed, replies, started, activeDaily, previousReplies, previousActive, previousHandedOff, weeks] = await Promise.all([
       // Active: at least one message in the period (updatedAt cannot be used for the previous period, it has moved on).
-      prisma.conversation.count({ where: { ...tenant, messages: { some: { createdAt: { gte: since } } } } }),
+      activeConversations(scope, since),
       handoffTotals(scope, since),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: null } }),
       prisma.conversation.count({ where: { ...tenant, status: "WAITING_FOR_HUMAN", assignedTo: { not: null } } }),
@@ -523,7 +562,7 @@ export function inboxRoutes(
         ) t
         WHERE previous = 'USER' AND role IN ('ASSISTANT', 'AGENT')
         GROUP BY role`,
-      prisma.conversation.count({ where: { ...tenant, messages: { some: { createdAt: { gte: before, lt: since } } } } }),
+      activeConversations(scope, before, since),
       prisma.handoff.groupBy({ by: ["conversationId"], where: { ...within(scope), conversation: REAL, requestedAt: { gte: before, lt: since } } }),
       // Distinct conversations per 7-day week counted back from now (week 0 = the last 7 days). Epochs, not casts:
       // timestamps are stored as UTC without a zone, and EXTRACT(EPOCH) reads them as UTC whatever the session zone.

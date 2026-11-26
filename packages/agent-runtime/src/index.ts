@@ -193,7 +193,7 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
   const hold = async (id: string): Promise<TurnEvent> => {
     const saved = await prisma.conversation.update({
       where: { id },
-      data: { messages: { create: { role: "USER", content: userMessage, createdAt: startedAt } } },
+      data: { messages: { create: { organizationId, workspaceId, role: "USER", content: userMessage, createdAt: startedAt } } },
       include: { messages: { orderBy: { createdAt: "desc" }, take: 1 } },
     });
     const [message] = saved.messages;
@@ -237,13 +237,13 @@ export async function* runTurn(input: TurnInput): AsyncGenerator<TurnEvent> {
   async function* save(
     reply: string,
     handoff: HandoffRequest | null,
-    meta: Omit<Prisma.ConversationMessageCreateWithoutConversationInput, "role" | "content">,
+    meta: Omit<Prisma.ConversationMessageCreateWithoutConversationInput, "role" | "content" | "organizationId" | "workspaceId">,
   ): AsyncGenerator<TurnEvent> {
     // The reply is stamped at least 1 ms after the question so the pair always sorts in order.
     const finishedAt = new Date(Math.max(Date.now(), startedAt.getTime() + 1));
     const messages = [
-      { role: "USER" as const, content: userMessage, createdAt: startedAt },
-      { role: "ASSISTANT" as const, content: reply, createdAt: finishedAt, employeeVersion: input.employeeVersion, ...meta },
+      { organizationId, workspaceId, role: "USER" as const, content: userMessage, createdAt: startedAt },
+      { organizationId, workspaceId, role: "ASSISTANT" as const, content: reply, createdAt: finishedAt, employeeVersion: input.employeeVersion, ...meta },
     ];
     const status: ConversationStatus | undefined = handoff ? "WAITING_FOR_HUMAN" : conversation?.status === "RESOLVED" ? "REOPENED" : undefined;
     const handoffs = handoff ? { create: { organizationId, workspaceId, employeeId, ...handoff, requestedAt: finishedAt } } : undefined;

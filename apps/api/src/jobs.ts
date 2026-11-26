@@ -8,6 +8,8 @@
 //   evaluation/requested          grade a conversation with the workspace's evaluators (the evaluation worker)
 //   evaluation/dataset.run        replay a regression dataset against an employee version and grade each case
 //   evaluation-sweep (cron, 5 min) queues evaluations of conversations that went quiet
+//   insights/analyze              analyzes one conversation and stores its ConversationInsight row
+//   insights-sweep (cron, 5 min)  queues insights/analyze for quiet conversations with a missing or stale insight
 //   improvement/analyze           finds failure patterns in a workspace and writes improvement suggestions (never changes an employee)
 //   improvement-analysis (cron, daily 06:00) queues improvement/analyze for workspaces with recent failures
 //
@@ -39,6 +41,7 @@ export type JobEvents = {
   };
   "evaluation/requested": { evaluationId: string };
   "evaluation/dataset.run": { runId: string };
+  "insights/analyze": { organizationId: string; workspaceId: string; conversationId: string };
   "improvement/analyze": { organizationId: string; workspaceId: string };
 };
 export type JobName = keyof JobEvents;

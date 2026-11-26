@@ -240,12 +240,18 @@ model ConversationMessage {
   tools           Json?
   // AGENT messages: the Clerk user who wrote it.
   authorId        String?
+  // The conversation's tenant, copied on insert (conversations never move): per-workspace analytics read a period's
+  // messages through their own index instead of probing every conversation of the workspace.
+  organizationId  String
+  workspaceId     String
 
   createdAt DateTime @default(now())
 
   @@index([conversationId, createdAt])
   // Phase 16: the usage meter reads new messages across organizations by time.
   @@index([createdAt])
+  // A workspace's messages of a period; conversationId last so counting distinct conversations reads the index only.
+  @@index([organizationId, workspaceId, createdAt, conversationId], map: "ConversationMessage_tenant_createdAt_idx")
 }
 
 // A named collection of company documents in a workspace. Employees answer from the sources

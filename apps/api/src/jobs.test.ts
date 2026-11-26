@@ -19,6 +19,7 @@ import {
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
+import { quietInsights } from "./inbox.ts";
 import type { JobDefinitions, JobEvents, JobName, Schedule, Steps } from "./jobs.ts";
 import { adminOf, deleteOrgs, headerAuth, newOrg } from "./testing.ts";
 
@@ -112,13 +113,14 @@ after(async () => {
   await deleteOrgs(org);
 });
 
-test("the queue serves one function per job, the workflow sweep, the evaluation sweep, the improvement analysis and the usage meter", () => {
+test("the queue serves one function per job, the workflow sweep, the evaluation and insights sweeps, the improvement analysis and the usage meter", () => {
   assert.deepEqual(Object.keys(definitions).sort(), [
     "channel/message.received",
     "evaluation/dataset.run",
     "evaluation/requested",
     "handoff/reminder.due",
     "improvement/analyze",
+    "insights/analyze",
     "knowledge/document.uploaded",
     "memory/exchange.saved",
     "workflow/run.due",
@@ -127,6 +129,7 @@ test("the queue serves one function per job, the workflow sweep, the evaluation 
   assert.deepEqual(schedules.map((s) => [s.id, s.cron]), [
     ["workflow-sweep", "* * * * *"],
     ["evaluation-sweep", "*/5 * * * *"],
+    ["insights-sweep", "*/5 * * * *"],
     ["improvement-analysis", "0 6 * * *"],
     ["usage-meter", "*/5 * * * *"],
     ["webhook-sweep", "* * * * *"],
@@ -208,6 +211,30 @@ test("memory: learning from an exchange is a job that carries ids, not the conve
   assert.equal(fact.value, "Priya");
 });
 
+test("insights: a quiet conversation is analyzed by its job, which carries ids only", async () => {
+  const conversation = await prisma.conversation.create({
+    data: {
+      organizationId: org,
+      workspaceId: ws,
+      employeeId: ava,
+      createdBy: "test",
+      channel: "web_chat",
+      title: "Refund",
+      messages: { create: [{ organizationId: org, workspaceId: ws, role: "USER", content: "mujhe refund chahiye, bahut ghatiya service" }] },
+    },
+  });
+  const quiet = () => quietInsights({ idleMs: 10 * 60_000, organizationId: org });
+  assert.ok(!(await quiet()).some((r) => r.conversationId === conversation.id), "not while the conversation is active");
+  await prisma.conversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date(Date.now() - 20 * 60_000) } });
+  const job = (await quiet()).find((r) => r.conversationId === conversation.id);
+  assert.deepEqual(job, { conversationId: conversation.id, organizationId: org, workspaceId: ws });
+  await runJob("insights/analyze", job);
+  const insight = await prisma.conversationInsight.findUniqueOrThrow({ where: { conversationId: conversation.id } });
+  assert.equal(insight.sentiment, "negative");
+  assert.equal(insight.workspaceId, ws);
+  assert.ok(!(await quiet()).some((r) => r.conversationId === conversation.id), "analyzed once per conversation state");
+});
+
 test("channels: a WhatsApp message is answered by its job, once", async () => {
   assert.equal((await call("PUT", `/workspaces/${ws}/employees/${ava}/channels/whatsapp`, { config: { phoneNumberId: PNID } })).statusCode, 200);
   sent = [];
@@ -249,7 +276,7 @@ test("channels: a WhatsApp message is answered by its job, once", async () => {
   assert.equal(waSent, 1);
 });
 
-test("with Inngest itself, /api/inngest serves the thirteen functions (eight jobs, five schedules)", async () => {
+test("with Inngest itself, /api/inngest serves the fifteen functions (nine jobs, six schedules)", async () => {
   // Dev mode needs no keys and no network to describe itself.
   process.env.INNGEST_DEV = "1";
   const real = await buildApp({ authenticate: headerAuth, provider: model, embedder, logger: false, whatsapp: [], jobs: "inngest" });
@@ -257,7 +284,7 @@ test("with Inngest itself, /api/inngest serves the thirteen functions (eight job
     const res = await real.inject({ method: "GET", url: "/api/inngest" });
     assert.equal(res.statusCode, 200, res.payload);
     const body = res.json<{ function_count?: number; mode?: string }>();
-    assert.equal(body.function_count, 13);
+    assert.equal(body.function_count, 15);
     assert.equal(body.mode, "dev");
   } finally {
     delete process.env.INNGEST_DEV;
