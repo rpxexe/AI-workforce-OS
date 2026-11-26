@@ -101,7 +101,7 @@ export function EmptyState({
 
 /** A headline number with its label and an optional hint underneath. */
 /** KPI tile laid out like the shadcn dashboard example: label and icon on top, big value, muted hint. */
-export function StatTile({ label, value, hint, icon: Icon }: { label: string; value: ReactNode; hint?: string; icon?: LucideIcon }) {
+export function StatTile({ label, value, hint, icon: Icon, children }: { label: string; value: ReactNode; hint?: string; icon?: LucideIcon; children?: ReactNode }) {
   return (
     <Card className="gap-2 py-5">
       <CardContent className="flex items-center justify-between gap-2 px-5">
@@ -112,6 +112,7 @@ export function StatTile({ label, value, hint, icon: Icon }: { label: string; va
         <span className="text-2xl font-bold tabular-nums">{value}</span>
         {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
       </CardContent>
+      {children && <CardContent className="px-5">{children}</CardContent>}
     </Card>
   );
 }

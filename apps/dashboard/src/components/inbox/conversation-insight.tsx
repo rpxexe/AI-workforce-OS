@@ -2,8 +2,8 @@ import { DETECTED_LANGUAGES, ENTITY_TYPES, HANDOFF_TRIGGER_LABELS, INTENTS, type
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const SENTIMENT_LABELS = { positive: "Positive", negative: "Negative", neutral: "Neutral", mixed: "Mixed" } as const;
-const RESOLUTION_LABELS = { resolved: "Resolved", with_people: "With people", open: "Open" } as const;
+export const SENTIMENT_LABELS = { positive: "Positive", negative: "Negative", neutral: "Neutral", mixed: "Mixed" } as const;
+export const RESOLUTION_LABELS = { resolved: "Resolved", with_people: "With people", open: "Open" } as const;
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
