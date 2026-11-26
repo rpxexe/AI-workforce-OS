@@ -510,6 +510,9 @@ problem re-discovered.
   `org_test_` (testing.ts `newOrg`; Clerk ids never have a second underscore); tests deliver their own with `tick(organizationId)`.
 - **Prisma's `$queryRaw` tag reads cooked template strings**: `\_` in a LIKE pattern became a bare `_` wildcard. Use
   `starts_with()` for prefixes.
+- **Tailwind runs through `postcss.config.mjs` (`@tailwindcss/postcss`), not a custom Turbopack CSS loader.** The old
+  `turbopack.rules` loader (`@tailwindcss/turbopack`) left stale CSS in `.next/cache`. Production builds, including Vercel's,
+  which restores that cache, shipped the pre-redesign `globals.css`: wrong font variable, old colors and radius.
 
 ## Checking the signed-in UI without a login
 
