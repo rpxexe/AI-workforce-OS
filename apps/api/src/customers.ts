@@ -5,7 +5,9 @@ import {
   updateMemorySchema,
   type CustomerDetail,
   type CustomerExport,
+  type CustomerFilter,
   type CustomerMemoryItem,
+  type CustomerPage,
   type CustomerSummary,
   type MemoryCategory,
 } from "@workforce/shared";
@@ -66,24 +68,46 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
     return memory;
   };
 
-  app.get("/workspaces/:workspaceId/customers", async (req): Promise<CustomerSummary[]> => {
+  app.get("/workspaces/:workspaceId/customers", async (req): Promise<CustomerPage> => {
     const { workspaceId } = customerParams.pick({ workspaceId: true }).parse(req.params);
-    const { q } = listCustomersQuery.parse(req.query);
+    const { q, filter, limit, cursor } = listCustomersQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
     const like = { contains: q, mode: "insensitive" as const };
-    const customers = await prisma.customer.findMany({
-      where: {
-        ...within(scope),
-        ...(q && {
-          OR: [{ externalId: like }, { profile: { OR: [{ name: like }, { email: like }, { phone: like }, { company: like }] } }],
-        }),
-      },
-      include: { profile: true },
-      orderBy: { lastSeenAt: "desc" },
-      // shortcut: newest 200 matches only, add a cursor when workspaces have more customers than that
-      take: 200,
-    });
-    return customers.map(toSummary);
+    const where: Prisma.CustomerWhereInput = {
+      ...within(scope),
+      ...(q && {
+        OR: [{ externalId: like }, { profile: { OR: [{ name: like }, { email: like }, { phone: like }, { company: like }] } }],
+      }),
+    };
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const has = (field: "email" | "phone" | "company"): Prisma.CustomerWhereInput => ({ profile: { [field]: { not: null } } });
+    const filters: Record<CustomerFilter, Prisma.CustomerWhereInput> = {
+      all: {},
+      week: { lastSeenAt: { gte: weekAgo } },
+      email: has("email"),
+      phone: has("phone"),
+    };
+    const count = (extra: Prisma.CustomerWhereInput) => prisma.customer.count({ where: { AND: [where, extra] } });
+    const [rows, total, seenThisWeek, withEmail, withPhone, reachable, withCompany] = await Promise.all([
+      prisma.customer.findMany({
+        where: { AND: [where, filters[filter]] },
+        include: { profile: true },
+        orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
+        take: limit + 1,
+        ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+      }),
+      count({}),
+      count(filters.week),
+      count(filters.email),
+      count(filters.phone),
+      count({ OR: [has("email"), has("phone")] }),
+      count(has("company")),
+    ]);
+    return {
+      data: rows.slice(0, limit).map(toSummary),
+      nextCursor: rows.length > limit ? rows[limit - 1]!.id : null,
+      counts: { total, seenThisWeek, withEmail, withPhone, reachable, withCompany },
+    };
   });
 
   app.get("/workspaces/:workspaceId/customers/:customerId", async (req): Promise<CustomerDetail> => {

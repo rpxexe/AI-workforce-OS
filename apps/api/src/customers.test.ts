@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, parseExtraction } from "@workforce/memory";
-import { defaultEmployeeConfig, type CustomerDetail, type CustomerExport, type CustomerSummary, type EmployeeDetail, type Workspace } from "@workforce/shared";
+import { defaultEmployeeConfig, type CustomerDetail, type CustomerExport, type CustomerPage, type EmployeeDetail, type Workspace } from "@workforce/shared";
 import { adminOf, deleteOrgs, memberOf, newOrg, testApp } from "./testing.ts";
 
 const orgA = newOrg();
@@ -86,7 +86,7 @@ test("the list searches name, email, phone, company and channel id", async () =>
   const { customerId } = await seedCustomer("+15550001111", "Priya");
   await seedCustomer("visitor-xyz", "Marco");
   const search = async (q: string) =>
-    (await call("GET", `/workspaces/${wsA}/customers?q=${encodeURIComponent(q)}`, memberOf(orgA))).json<CustomerSummary[]>().map((c) => c.name);
+    (await call("GET", `/workspaces/${wsA}/customers?q=${encodeURIComponent(q)}`, memberOf(orgA))).json<CustomerPage>().data.map((c) => c.name);
 
   assert.deepEqual(await search("priya"), ["Priya"]);
   assert.deepEqual(await search("MARCO@EXAMPLE"), ["Marco"]);
@@ -103,6 +103,55 @@ test("the list searches name, email, phone, company and channel id", async () =>
     d.conversations.map((c) => [c.channel, c.status, c.summary]),
     [["whatsapp", "AI_ACTIVE", "Priya asked about pricing."]],
   );
+});
+
+test("the list pages newest first by last seen, filters on the server, and counts the whole search", async () => {
+  const scope = { organizationId: orgA, workspaceId: wsA };
+  const day = 24 * 60 * 60 * 1000;
+  // Seven people under one search term; the profile varies so every filter and count has something to find.
+  const people = [
+    { email: "a@paging.test", phone: null, company: "Acme", age: 0 },
+    { email: null, phone: "+15550000001", company: null, age: 1 },
+    { email: "c@paging.test", phone: "+15550000002", company: null, age: 2 },
+    { email: null, phone: null, company: null, age: 3 },
+    { email: "e@paging.test", phone: null, company: "Beta", age: 10 },
+    { email: null, phone: "+15550000003", company: null, age: 20 },
+    { email: null, phone: null, company: null, age: 30 },
+  ];
+  const ids: string[] = [];
+  for (const [i, p] of people.entries()) {
+    const c = await prisma.customer.create({
+      data: {
+        ...scope,
+        externalId: `pager-${i}`,
+        lastSeenAt: new Date(Date.now() - p.age * day),
+        profile: { create: { name: `Pager ${i}`, email: p.email, phone: p.phone, company: p.company } },
+      },
+    });
+    ids.push(c.id);
+  }
+  const list = async (query: string) => (await call("GET", `/workspaces/${wsA}/customers?q=pager${query}`, memberOf(orgA))).json<CustomerPage>();
+
+  const first = await list("&limit=3");
+  assert.deepEqual(first.data.map((c) => c.id), ids.slice(0, 3));
+  assert.deepEqual(first.counts, { total: 7, seenThisWeek: 4, withEmail: 3, withPhone: 3, reachable: 5, withCompany: 2 });
+  assert.ok(first.nextCursor);
+  const second = await list(`&limit=3&cursor=${first.nextCursor}`);
+  assert.deepEqual(second.data.map((c) => c.id), ids.slice(3, 6));
+  const third = await list(`&limit=3&cursor=${second.nextCursor}`);
+  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor], [ids.slice(6), null]);
+  assert.deepEqual(third.counts, first.counts);
+
+  const ofFilter = async (filter: string) => (await list(`&filter=${filter}`)).data.map((c) => c.externalId);
+  assert.deepEqual(await ofFilter("week"), ["pager-0", "pager-1", "pager-2", "pager-3"]);
+  assert.deepEqual(await ofFilter("email"), ["pager-0", "pager-2", "pager-4"]);
+  assert.deepEqual(await ofFilter("phone"), ["pager-1", "pager-2", "pager-5"]);
+  const both = await list("&filter=phone&limit=2");
+  assert.deepEqual([both.data.length, both.counts.total], [2, 7]);
+  assert.deepEqual((await list(`&filter=phone&limit=2&cursor=${both.nextCursor}`)).data.map((c) => c.externalId), ["pager-5"]);
+
+  for (const bad of ["&limit=0", "&limit=101", "&filter=nope"])
+    assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${bad}`, memberOf(orgA))).statusCode, 400, bad);
 });
 
 test("an admin edits a memory: validated, profile kept in step, confidence 1, audited", async () => {
@@ -195,7 +244,11 @@ test("another organization's customer is a 404 on every route and nothing change
       const res = await call(method, url, adminOf(orgB), method === "PATCH" ? { value: "hacked" } : undefined);
       assert.equal(res.statusCode, 404, `${method} ${url}`);
     }
-  assert.deepEqual((await call("GET", `/workspaces/${wsB}/customers?q=Pia`, adminOf(orgB))).json(), []);
+  const outside = (await call("GET", `/workspaces/${wsB}/customers?q=Pia`, adminOf(orgB))).json<CustomerPage>();
+  assert.deepEqual([outside.data, outside.counts.total], [[], 0]);
+  // A cursor from org A does not open org A's list to org B.
+  const cursor = (await call("GET", `/workspaces/${wsB}/customers?cursor=${customerId}`, adminOf(orgB))).json<CustomerPage>();
+  assert.deepEqual(cursor.data, []);
 
   // A memory id from another customer of the same organization is a 404 too.
   const other = await seedCustomer("other@example.com", "Otto");

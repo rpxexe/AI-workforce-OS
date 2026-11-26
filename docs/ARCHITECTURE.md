@@ -181,7 +181,7 @@ GET   /health                                   public
 GET   /ws                                       WebSocket echo (placeholder transport)
 GET   /workspaces                               member; provisions org + Default on first call
 POST  /workspaces                               admin
-GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list
+GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; no ?limit=: the whole list as an array (pickers; the dashboard calls listEmployees); ?limit=1-100 [&cursor=] [&q= latest name/role]: EmployeePage { data, nextCursor, counts by status for the tab }, newest change first
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
@@ -193,7 +193,7 @@ GET   .../employees/:id/conversations/:cid      member; with messages
 POST  .../employees/:id/messages                admin; body { conversationId?, message, customer? }; SSE reply
 GET   .../employees/:id/knowledge               member; sources attached to the employee
 PUT   .../employees/:id/knowledge               admin; body { sourceIds }; replaces the set
-GET   /workspaces/:workspaceId/knowledge/sources            member
+GET   /workspaces/:workspaceId/knowledge/sources            member; KnowledgeSourceSummary[]: documentCount plus readyDocuments, processingDocuments (pending + processing), failedDocuments (one groupBy)
 POST  .../knowledge/sources                     admin; body { name, description? }
 GET   .../knowledge/sources/:sourceId           member; with documents and their status
 DELETE .../knowledge/sources/:sourceId          admin; removes documents, chunks, attachments
@@ -216,7 +216,7 @@ GET   .../calls/:callId                         member; participants and transcr
 POST  /voice/:provider/inbound                  provider webhook (twilio|telnyx; checked): answers with <Connect><Stream>
 POST  /voice/:provider/status                   call status callback (checked); ?callId= on outbound calls
 GET   /voice/:provider/stream                   WebSocket: the provider's media stream (token-checked on start)
-GET   /workspaces/:workspaceId/workflows        member; ?deleted=true lists deleted ones instead
+GET   /workspaces/:workspaceId/workflows        member; ?deleted=true lists deleted ones instead; WorkflowListItem[] (newest 200): trigger (published version, else latest), runCount, lastRunAt, lastRunStatus (one DISTINCT ON query)
 POST  /workspaces/:workspaceId/workflows        admin; body { name, description?, definition? } (blank: trigger -> end)
 POST  .../workflows/validate                    member; body { definition }; returns { issues }
 GET   .../workflows/:id                         member; ?version=n; definition, versions, issues, hookUrl (admins only)
@@ -329,7 +329,7 @@ POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fr
 GET   /developer/audit                          admin; newest 100 developer audit entries
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
-GET   /workspaces/:workspaceId/customers        member; newest 200 by last seen, with profile; ?q= searches name/email/phone/company/externalId
+GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (50) &cursor=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany) follow ?q= only
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
 DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited

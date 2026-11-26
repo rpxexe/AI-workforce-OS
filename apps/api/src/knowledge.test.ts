@@ -14,6 +14,7 @@ import {
   type KnowledgeMatch,
   type KnowledgeSource,
   type KnowledgeSourceDetail,
+  type KnowledgeSourceSummary,
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
@@ -217,6 +218,12 @@ test("bad uploads are refused or marked failed, and reprocessing replaces chunks
   assert.match(byName["broken.pdf"]?.error ?? "", /could not be read/);
   assert.match(byName["blank.txt"]?.error ?? "", /No text was found/);
   assert.equal(byName["pricing.txt"]?.status, "READY");
+  // The list counts each source's documents by status.
+  const listed = (await call("GET", `${knowledge()}/sources`, memberOf(orgA))).json<KnowledgeSourceSummary[]>().find((s) => s.id === scratch);
+  assert.deepEqual(
+    [listed?.documentCount, listed?.readyDocuments, listed?.processingDocuments, listed?.failedDocuments],
+    [3, 1, 0, 2],
+  );
 
   const chunks = () => prisma.knowledgeChunk.count({ where: { documentId: good.id } });
   const embeddings = () => prisma.embedding.count({ where: { chunk: { documentId: good.id } } });

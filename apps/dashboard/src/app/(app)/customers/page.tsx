@@ -1,10 +1,11 @@
 "use client";
 
-import type { CustomerSummary } from "@workforce/shared";
+import type { CustomerCounts, CustomerFilter, CustomerPage, CustomerSummary } from "@workforce/shared";
 import { Activity, AtSign, Building2, ChevronRight, Mail, Phone, Search, SearchX, Users } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CustomerAvatar, RelativeTime, seenThisWeek } from "@/components/customers/meta";
+import { CustomerAvatar, RelativeTime } from "@/components/customers/meta";
+import { LoadMoreButton, useLoadMore } from "@/components/load-more";
 import { Skeleton as Skullet } from "skullet/react";
 import { EmptyState, ErrorState, PageHeader, StatTile } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -27,13 +28,19 @@ const SAMPLE: CustomerSummary[] = Array.from({ length: 6 }, (_, i) => ({
   lastSeenAt: "2026-01-01T00:00:00.000Z",
 }));
 
-const FILTERS = {
-  all: { label: "All", match: () => true },
-  week: { label: "Seen this week", match: (c: CustomerSummary) => seenThisWeek(c.lastSeenAt) },
-  email: { label: "Has email", match: (c: CustomerSummary) => c.email !== null },
-  phone: { label: "Has phone", match: (c: CustomerSummary) => c.phone !== null },
-} satisfies Record<string, { label: string; match: (c: CustomerSummary) => boolean }>;
-type Filter = keyof typeof FILTERS;
+// The server filters and counts; each filter shows how many of the search's customers it keeps.
+const FILTERS: Record<CustomerFilter, { label: string; count: (c: CustomerCounts) => number }> = {
+  all: { label: "All", count: (c) => c.total },
+  week: { label: "Seen this week", count: (c) => c.seenThisWeek },
+  email: { label: "Has email", count: (c) => c.withEmail },
+  phone: { label: "Has phone", count: (c) => c.withPhone },
+};
+type Filter = CustomerFilter;
+const SAMPLE_PAGE: CustomerPage = {
+  data: SAMPLE,
+  nextCursor: null,
+  counts: { total: 6, seenThisWeek: 6, withEmail: 6, withPhone: 6, reachable: 6, withCompany: 6 },
+};
 
 export default withWorkspace(function CustomersPage({ workspace }) {
   const [query, setQuery] = useState("");
@@ -46,9 +53,9 @@ export default withWorkspace(function CustomersPage({ workspace }) {
   }, [query]);
 
   const base = `/workspaces/${workspace.id}/customers`;
-  const { data, error, loading, reload } = useApiQuery<CustomerSummary[]>(search ? `${base}?q=${encodeURIComponent(search)}` : base, {
-    keepPrevious: true,
-  });
+  const path = `${base}?filter=${filter}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
+  const { data, error, loading, reload } = useApiQuery<CustomerPage>(path, { keepPrevious: true });
+  const more = useLoadMore(path, data);
 
   return (
     <div className="flex flex-col gap-6">
@@ -57,7 +64,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
         description={`People your AI employees in the ${workspace.name} workspace have talked to, and what they remember about them.`}
       />
 
-      {!error && <Stats data={data} search={search} />}
+      {!error && <Stats counts={data?.counts} search={search} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <InputGroup className="sm:max-w-sm">
@@ -85,6 +92,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           {(Object.keys(FILTERS) as Filter[]).map((k) => (
             <ToggleGroupItem key={k} value={k} className="px-3">
               {FILTERS[k].label}
+              {data && k !== "all" && <span className="text-muted-foreground tabular-nums">{FILTERS[k].count(data.counts).toLocaleString()}</span>}
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
@@ -93,10 +101,11 @@ export default withWorkspace(function CustomersPage({ workspace }) {
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data} sample={SAMPLE} id="customers-list" label="Loading customers">
-          {(data) => (
+        <Skullet data={data && { ...data, data: more.rows ?? [] }} sample={SAMPLE_PAGE} id="customers-list" label="Loading customers">
+          {(page) => (
             <CustomerList
-              data={data}
+              data={page.data}
+              total={page.counts.total}
               search={search}
               filter={filter}
               loading={loading}
@@ -105,42 +114,42 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           )}
         </Skullet>
       )}
-      {data?.length === 200 && <p className="text-xs text-muted-foreground">Showing the 200 most recent. Search to find others.</p>}
+      {!error && <LoadMoreButton {...more} loading={more.loading || loading} label="Load more customers" />}
     </div>
   );
 });
 
-/** Counts over the rows already loaded (the 200 most recent, or the search results). */
-function Stats({ data, search }: { data: CustomerSummary[] | undefined; search: string }) {
-  const count = (match: (c: CustomerSummary) => boolean) => (data ? data.filter(match).length.toLocaleString() : "—");
-  const scope = search ? "Matching your search" : data?.length === 200 ? "Of the 200 most recent" : "In this workspace";
+/** Counts from the server over the whole workspace, or everyone matching the search. */
+function Stats({ counts, search }: { counts: CustomerCounts | undefined; search: string }) {
+  const count = (pick: (c: CustomerCounts) => number) => (counts ? pick(counts).toLocaleString() : "—");
   return (
     <section aria-label="Customer summary" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <StatTile label="Customers" icon={Users} value={count(() => true)} hint={scope} />
-      <StatTile label="Seen this week" icon={Activity} value={count(FILTERS.week.match)} hint="Talked in the last 7 days" />
-      <StatTile label="Reachable" icon={AtSign} value={count((c) => c.email !== null || c.phone !== null)} hint="Have an email or phone number" />
-      <StatTile label="With a company" icon={Building2} value={count((c) => c.company !== null)} hint="Business customers" />
+      <StatTile label="Customers" icon={Users} value={count((c) => c.total)} hint={search ? "Matching your search" : "In this workspace"} />
+      <StatTile label="Seen this week" icon={Activity} value={count((c) => c.seenThisWeek)} hint="Talked in the last 7 days" />
+      <StatTile label="Reachable" icon={AtSign} value={count((c) => c.reachable)} hint="Have an email or phone number" />
+      <StatTile label="With a company" icon={Building2} value={count((c) => c.withCompany)} hint="Business customers" />
     </section>
   );
 }
 
 function CustomerList({
   data,
+  total,
   search,
   filter,
   loading,
   clearFilter,
 }: {
   data: CustomerSummary[];
+  total: number;
   search: string;
   filter: Filter;
   loading: boolean;
   clearFilter: () => void;
 }) {
-  const matches = data.filter(FILTERS[filter].match);
-  const customers = usePaged(matches, 20, `${search}:${filter}`);
+  const customers = usePaged(data, 20, `${search}:${filter}`);
 
-  if (data.length === 0) {
+  if (total === 0) {
     return search ? (
       <EmptyState icon={SearchX} title="No customers match" description={`Nobody found for “${search}”. Try part of a name, email or phone number.`} />
     ) : (
@@ -151,7 +160,7 @@ function CustomerList({
       />
     );
   }
-  if (matches.length === 0) {
+  if (data.length === 0) {
     return (
       <EmptyState icon={SearchX} title={`No customers match “${FILTERS[filter].label}”`} description="Try another filter.">
         <Button variant="outline" onClick={clearFilter}>

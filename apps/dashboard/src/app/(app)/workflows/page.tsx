@@ -5,6 +5,7 @@ import {
   leadFollowUpWorkflow,
   type EmployeeSummary,
   type WorkflowDetail,
+  type WorkflowListItem,
   type WorkflowSummary,
 } from "@workforce/shared";
 import { History, Plus } from "lucide-react";
@@ -23,7 +24,7 @@ import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
-const SAMPLE: WorkflowSummary[] = Array.from({ length: 5 }, (_, i) => ({
+const SAMPLE: WorkflowListItem[] = Array.from({ length: 5 }, (_, i) => ({
   id: `sample-${i}`,
   name: "New lead follow-up",
   description: "Call new leads and book a meeting",
@@ -32,6 +33,10 @@ const SAMPLE: WorkflowSummary[] = Array.from({ length: 5 }, (_, i) => ({
   publishedVersion: 2,
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: "2026-01-01T00:00:00.000Z",
+  trigger: "manual",
+  runCount: 12,
+  lastRunAt: "2026-01-01T00:00:00.000Z",
+  lastRunStatus: "COMPLETED",
 }));
 const SAMPLE_DELETED = SAMPLE.slice(0, 3);
 
@@ -170,7 +175,7 @@ function DeletedWorkflows({ workspaceId, onRestored }: { workspaceId: string; on
 
 export default withWorkspace(function WorkflowsPage({ workspace }) {
   const isAdmin = useIsAdmin();
-  const { data, error, reload } = useApiQuery<WorkflowSummary[]>(`/workspaces/${workspace.id}/workflows`);
+  const { data, error, reload } = useApiQuery<WorkflowListItem[]>(`/workspaces/${workspace.id}/workflows`);
   const [creating, setCreating] = useState(false);
   const [showDeleted, setShowDeleted] = useState(false);
 

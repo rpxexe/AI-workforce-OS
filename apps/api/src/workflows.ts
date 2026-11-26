@@ -18,8 +18,10 @@ import {
   type WorkflowDependencies,
   type WorkflowDetail,
   type WorkflowExecutionDetail,
+  type WorkflowExecutionStatus,
   type WorkflowExecutionSummary,
   type WorkflowIssue,
+  type WorkflowListItem,
   type WorkflowSummary,
 } from "@workforce/shared";
 import { WorkflowStartError, type WorkflowEngine } from "@workforce/workflows";
@@ -54,6 +56,13 @@ const toSummary = (w: Prisma.WorkflowGetPayload<{ include: typeof summaryInclude
   updatedAt: w.updatedAt.toISOString(),
   deletedAt: w.deletedAt?.toISOString() ?? null,
 });
+
+/** What starts a version: its trigger node's kind, or null when it has none (or the definition is unreadable). */
+const triggerOf = (definition: unknown): WorkflowListItem["trigger"] => {
+  const parsed = workflowDefinitionSchema.safeParse(definition);
+  const node = parsed.success ? parsed.data.nodes.find((n) => n.type === "trigger") : undefined;
+  return node ? (nodeConfigSchemas.trigger.safeParse(node.config).data?.kind ?? "manual") : null;
+};
 
 const executionInclude = { version: { select: { number: true, definition: true } } } satisfies Prisma.WorkflowExecutionInclude;
 
@@ -168,7 +177,7 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
     return err;
   };
 
-  app.get(base, async (req): Promise<WorkflowSummary[]> => {
+  app.get(base, async (req): Promise<WorkflowListItem[]> => {
     const { workspaceId } = workspaceParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
     const { deleted } = listQuery.parse(req.query);
@@ -177,9 +186,32 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
       orderBy: { updatedAt: "desc" },
       // shortcut: no pagination, add a cursor when a workspace nears 200 workflows
       take: 200,
-      include: { ...summaryInclude, versions: { ...summaryInclude.versions, take: 1 } },
+      include: {
+        versions: { ...summaryInclude.versions, select: { ...summaryInclude.versions.select, definition: true }, take: 1 },
+        publishedVersion: { select: { number: true, definition: true } },
+      },
     });
-    return workflows.map(toSummary);
+    const ids = workflows.map((w) => w.id);
+    // Each workflow's latest run and its run count in one pass over the (workflowId, createdAt) index.
+    const runs = ids.length
+      ? await prisma.$queryRaw<{ workflowId: string; status: WorkflowExecutionStatus; createdAt: Date; runs: number }[]>`
+          SELECT DISTINCT ON ("workflowId") "workflowId", status::text AS status, "createdAt",
+                 (count(*) OVER (PARTITION BY "workflowId"))::int AS runs
+          FROM "WorkflowExecution"
+          WHERE "organizationId" = ${scope.organizationId} AND "workspaceId" = ${scope.workspaceId} AND "workflowId" = ANY(${ids})
+          ORDER BY "workflowId", "createdAt" DESC, id DESC`
+      : [];
+    const runsOf = new Map(runs.map((r) => [r.workflowId, r]));
+    return workflows.map((w) => {
+      const last = runsOf.get(w.id);
+      return {
+        ...toSummary(w),
+        trigger: triggerOf(w.publishedVersion?.definition ?? w.versions[0]?.definition),
+        runCount: last?.runs ?? 0,
+        lastRunAt: last?.createdAt.toISOString() ?? null,
+        lastRunStatus: last?.status ?? null,
+      };
+    });
   });
 
   app.post(base, async (req, reply): Promise<WorkflowDetail> => {

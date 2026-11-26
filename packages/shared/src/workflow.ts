@@ -378,6 +378,14 @@ export type WorkflowSummary = {
   deletedAt: string | null;
 };
 
+/** A workflow in the list: what starts it (published version, else the latest; null without a trigger) and its runs. */
+export type WorkflowListItem = WorkflowSummary & {
+  trigger: "manual" | "webhook" | null;
+  runCount: number;
+  lastRunAt: string | null;
+  lastRunStatus: WorkflowExecutionStatus | null;
+};
+
 /** What deleting a workflow affects. */
 export type WorkflowDependencies = {
   /** Runs queued, running or waiting (incl. for a person); deleting stops them. */

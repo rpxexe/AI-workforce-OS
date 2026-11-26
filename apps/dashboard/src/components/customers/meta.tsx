@@ -4,11 +4,6 @@ import { timeAgo } from "@/components/inbox/meta";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Seen in the last seven days. */
-export const seenThisWeek = (iso: string) => Date.now() - new Date(iso).getTime() < WEEK_MS;
-
 /** "PS" for "Priya Sharma"; the channel id's first character when there is no name. */
 export function initials(customer: Pick<CustomerSummary, "name" | "externalId">) {
   const words = (customer.name ?? "").trim().split(/\s+/).filter(Boolean);

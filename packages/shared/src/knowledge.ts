@@ -55,6 +55,9 @@ export type KnowledgeSource = {
   updatedAt: string;
 };
 
+/** A source in the list, with its documents counted by status (processing includes pending). */
+export type KnowledgeSourceSummary = KnowledgeSource & { readyDocuments: number; processingDocuments: number; failedDocuments: number };
+
 export type KnowledgeSourceDetail = KnowledgeSource & { documents: KnowledgeDocument[] };
 
 /** One excerpt found by a search, with enough to trace it back to where it came from. */

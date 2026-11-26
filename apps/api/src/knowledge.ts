@@ -14,6 +14,7 @@ import {
   type KnowledgeMatch,
   type KnowledgeSource,
   type KnowledgeSourceDetail,
+  type KnowledgeSourceSummary,
   type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify";
@@ -137,14 +138,20 @@ export function knowledgeRoutes(
     return document;
   };
 
-  app.get(`${base}/sources`, async (req): Promise<KnowledgeSource[]> => {
+  app.get(`${base}/sources`, async (req): Promise<KnowledgeSourceSummary[]> => {
     const scope = await inWorkspace(member(req), workspaceParams.parse(req.params).workspaceId);
-    const sources = await prisma.knowledgeSource.findMany({
-      where: within(scope),
-      orderBy: { name: "asc" },
-      include: sourceInclude,
-    });
-    return sources.map(toSource);
+    const [sources, byStatus] = await Promise.all([
+      prisma.knowledgeSource.findMany({ where: within(scope), orderBy: { name: "asc" }, include: sourceInclude }),
+      prisma.knowledgeDocument.groupBy({ by: ["sourceId", "status"], where: within(scope), _count: { _all: true } }),
+    ]);
+    const countOf = (sourceId: string, ...statuses: string[]) =>
+      byStatus.filter((g) => g.sourceId === sourceId && statuses.includes(g.status)).reduce((sum, g) => sum + g._count._all, 0);
+    return sources.map((s) => ({
+      ...toSource(s),
+      readyDocuments: countOf(s.id, "READY"),
+      processingDocuments: countOf(s.id, "PENDING", "PROCESSING"),
+      failedDocuments: countOf(s.id, "FAILED"),
+    }));
   });
 
   app.post(`${base}/sources`, async (req, reply) => {

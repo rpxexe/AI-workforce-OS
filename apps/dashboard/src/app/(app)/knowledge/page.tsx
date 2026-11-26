@@ -1,7 +1,7 @@
 "use client";
 
-import type { KnowledgeSource } from "@workforce/shared";
-import { BookOpen, Clock, FileText, FolderOpen, Library, Search, SearchX } from "lucide-react";
+import type { KnowledgeSourceSummary } from "@workforce/shared";
+import { BookOpen, CircleAlert, CircleCheck, Library, LoaderCircle, Search, SearchX } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { formatDate } from "@/components/employees/meta";
@@ -18,11 +18,14 @@ import { useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
-const SAMPLE: KnowledgeSource[] = Array.from({ length: 6 }, (_, i) => ({
+const SAMPLE: KnowledgeSourceSummary[] = Array.from({ length: 6 }, (_, i) => ({
   id: `sample-${i}`,
   name: "Pricing and plans",
   description: "Current price list, plan limits and discounts.",
   documentCount: 12,
+  readyDocuments: 12,
+  processingDocuments: 0,
+  failedDocuments: 0,
   updatedAt: "2026-01-01T00:00:00.000Z",
 }));
 
@@ -34,7 +37,7 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 export default withWorkspace(function KnowledgePage({ workspace }) {
   const isAdmin = useIsAdmin();
   const base = `/workspaces/${workspace.id}/knowledge`;
-  const { data, error, reload } = useApiQuery<KnowledgeSource[]>(`${base}/sources`);
+  const { data, error, reload } = useApiQuery<KnowledgeSourceSummary[]>(`${base}/sources`);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
 
@@ -116,27 +119,29 @@ export default withWorkspace(function KnowledgePage({ workspace }) {
   );
 });
 
-/** Headline numbers from the list already loaded; per-document status lives on each source's page. */
-function Summary({ data }: { data: KnowledgeSource[] }) {
-  const documents = data.reduce((sum, s) => sum + s.documentCount, 0);
+/** Headline numbers over every source, with documents counted by status on the server. */
+function Summary({ data }: { data: KnowledgeSourceSummary[] }) {
+  const sum = (pick: (s: KnowledgeSourceSummary) => number) => data.reduce((total, s) => total + pick(s), 0);
+  const documents = sum((s) => s.documentCount);
+  const processing = sum((s) => s.processingDocuments);
+  const failed = sum((s) => s.failedDocuments);
   const empty = data.filter((s) => s.documentCount === 0).length;
-  const latest = data.reduce((max, s) => (s.updatedAt > max.updatedAt ? s : max), data[0]!);
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatTile label="Sources" value={data.length} icon={Library} hint="Collections of related documents" />
       <StatTile
-        label="Documents"
-        value={documents}
-        icon={FileText}
-        hint={`About ${Math.round(documents / data.length)} per source`}
+        label="Sources"
+        value={data.length}
+        icon={Library}
+        hint={empty === 0 ? `${plural(documents, "document")} in all` : `${plural(empty, "empty source")}, upload documents to use them`}
       />
+      <StatTile label="Ready" value={sum((s) => s.readyDocuments)} icon={CircleCheck} hint="Documents your employees can answer from" />
+      <StatTile label="Processing" value={processing} icon={LoaderCircle} hint={processing === 0 ? "Nothing waiting" : "Being read and indexed"} />
       <StatTile
-        label="Empty sources"
-        value={empty}
-        icon={FolderOpen}
-        hint={empty === 0 ? "Every source has documents" : "Upload documents so they can be used"}
+        label="Failed"
+        value={failed}
+        icon={CircleAlert}
+        hint={failed === 0 ? "Every document was read" : "Open the source to see why and reprocess"}
       />
-      <StatTile label="Last updated" value={formatDate(latest.updatedAt)} icon={Clock} hint={latest.name} />
     </div>
   );
 }
@@ -147,7 +152,7 @@ function SourceGrid({
   filter,
   clear,
 }: {
-  data: KnowledgeSource[];
+  data: KnowledgeSourceSummary[];
   query: string;
   filter: Filter;
   clear: () => void;
@@ -185,15 +190,27 @@ function SourceGrid({
                 </ItemDescription>
               </ItemContent>
               <ItemFooter>
-                {source.documentCount === 0 ? (
-                  <Badge variant="outline" className="border-warning/40 text-warning">
-                    Empty
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary" className="tabular-nums">
-                    {plural(source.documentCount, "document")}
-                  </Badge>
-                )}
+                <span className="flex flex-wrap gap-1.5">
+                  {source.documentCount === 0 ? (
+                    <Badge variant="outline" className="border-warning/40 text-warning">
+                      Empty
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary" className="tabular-nums">
+                      {plural(source.documentCount, "document")}
+                    </Badge>
+                  )}
+                  {source.processingDocuments > 0 && (
+                    <Badge variant="outline" className="border-info/40 text-info tabular-nums">
+                      {source.processingDocuments} processing
+                    </Badge>
+                  )}
+                  {source.failedDocuments > 0 && (
+                    <Badge variant="outline" className="border-destructive/40 text-destructive tabular-nums">
+                      {source.failedDocuments} failed
+                    </Badge>
+                  )}
+                </span>
                 <span className="text-xs text-muted-foreground">Updated {formatDate(source.updatedAt)}</span>
               </ItemFooter>
             </Link>

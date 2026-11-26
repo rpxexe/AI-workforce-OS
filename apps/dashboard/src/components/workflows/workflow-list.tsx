@@ -1,10 +1,11 @@
 "use client";
 
-import type { WorkflowStatus, WorkflowSummary } from "@workforce/shared";
-import { ChevronRight, CirclePause, CirclePlay, FilePen, Search, SearchX, Workflow } from "lucide-react";
+import type { WorkflowExecutionStatus, WorkflowListItem, WorkflowStatus } from "@workforce/shared";
+import { ChevronRight, CirclePlay, FilePen, Hand, History, Search, SearchX, Webhook, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useRef, useState, type ReactNode } from "react";
-import { StatusBadge, formatDate, versionLabel } from "@/components/employees/meta";
+import { StatusBadge, versionLabel } from "@/components/employees/meta";
+import { timeAgo } from "@/components/inbox/meta";
 import { EmptyState, StatTile } from "@/components/states";
 import { TablePager, usePaged } from "@/components/table-pager";
 import { Badge } from "@/components/ui/badge";
@@ -22,8 +23,16 @@ const FILTERS: { value: Filter; label: string }[] = [
   { value: "DRAFT", label: "Draft" },
 ];
 
+const RUN_LABEL: Record<WorkflowExecutionStatus, string> = {
+  QUEUED: "Queued",
+  RUNNING: "Running",
+  WAITING: "Waiting",
+  COMPLETED: "Completed",
+  FAILED: "Failed",
+};
+
 /** Summary tiles, search, status filter and the paged list of workflows. */
-export function WorkflowList({ data, isAdmin, newButton }: { data: WorkflowSummary[]; isAdmin: boolean; newButton: ReactNode }) {
+export function WorkflowList({ data, isAdmin, newButton }: { data: WorkflowListItem[]; isAdmin: boolean; newButton: ReactNode }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -53,13 +62,15 @@ export function WorkflowList({ data, isAdmin, newButton }: { data: WorkflowSumma
 
   const count = (status: WorkflowStatus) => data.filter((w) => w.status === status).length;
   const unpublished = data.filter((w) => w.publishedVersion !== w.latestVersion).length;
+  const runs = data.reduce((sum, w) => sum + w.runCount, 0);
+  const failing = data.filter((w) => w.lastRunStatus === "FAILED").length;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatTile label="Workflows" value={data.length} icon={Workflow} hint="In this workspace" />
-        <StatTile label="Active" value={count("ACTIVE")} icon={CirclePlay} hint="Running on new triggers" />
-        <StatTile label="Paused" value={count("PAUSED")} icon={CirclePause} hint="Not starting new runs" />
+        <StatTile label="Active" value={count("ACTIVE")} icon={CirclePlay} hint={`${count("PAUSED")} paused, ${count("DRAFT")} draft`} />
+        <StatTile label="Runs" value={runs} icon={History} hint={failing === 0 ? "No workflow's last run failed" : `${failing} last run failed`} />
         <StatTile label="Unpublished changes" value={unpublished} icon={FilePen} hint="Latest version not live" />
       </div>
 
@@ -132,7 +143,24 @@ export function WorkflowList({ data, isAdmin, newButton }: { data: WorkflowSumma
                           </Badge>
                         )}
                       </span>
-                      <span className="hidden text-xs lg:inline">Updated {formatDate(w.updatedAt)}</span>
+                      {w.trigger && (
+                        <Badge variant="outline" className="hidden md:inline-flex">
+                          {w.trigger === "webhook" ? <Webhook aria-hidden /> : <Hand aria-hidden />}
+                          {w.trigger === "webhook" ? "Webhook" : "Manual"}
+                        </Badge>
+                      )}
+                      <span className="hidden flex-col items-end text-xs lg:flex">
+                        <span className="tabular-nums">
+                          {w.runCount.toLocaleString()} {w.runCount === 1 ? "run" : "runs"}
+                        </span>
+                        {w.lastRunAt && w.lastRunStatus ? (
+                          <span className={w.lastRunStatus === "FAILED" ? "text-destructive" : undefined}>
+                            {RUN_LABEL[w.lastRunStatus]} {timeAgo(w.lastRunAt)}
+                          </span>
+                        ) : (
+                          <span>Never run</span>
+                        )}
+                      </span>
                       <ChevronRight className="size-4" aria-hidden />
                     </ItemActions>
                   </Link>

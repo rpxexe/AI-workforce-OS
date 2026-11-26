@@ -11,7 +11,7 @@ import {
   type ChatStreamEvent,
   type ConversationDetail,
   type CustomerDetail,
-  type CustomerSummary,
+  type CustomerPage,
   type EmployeeDetail,
   type Workspace,
 } from "@workforce/shared";
@@ -68,7 +68,7 @@ const send = async (org: string, ws: string, employee: string, payload: object) 
   await settled();
   return last;
 };
-const customers = async (org: string, ws: string) => (await get(`/workspaces/${ws}/customers`, memberOf(org))).json<CustomerSummary[]>();
+const customers = async (org: string, ws: string) => (await get(`/workspaces/${ws}/customers`, memberOf(org))).json<CustomerPage>().data;
 const detail = async (org: string, ws: string, id: string) =>
   (await get(`/workspaces/${ws}/customers/${id}`, memberOf(org))).json<CustomerDetail>();
 const factsOf = (d: CustomerDetail) => Object.fromEntries(d.memories.map((m) => [m.key, m.value]));

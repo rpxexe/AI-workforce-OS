@@ -10,7 +10,16 @@ export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
 // ---- Requests ----
 
-export const listCustomersQuery = z.object({ q: z.string().trim().max(100).optional() });
+export const CUSTOMER_FILTERS = ["all", "week", "email", "phone"] as const;
+export type CustomerFilter = (typeof CUSTOMER_FILTERS)[number];
+
+/** ?q= search, ?filter= (seen in the last 7 days, has email, has phone), and a cursor page newest first by last seen. */
+export const listCustomersQuery = z.object({
+  q: z.string().trim().max(100).optional(),
+  filter: z.enum(CUSTOMER_FILTERS).default("all"),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(100).optional(),
+});
 
 /** A person correcting a remembered value. The same safety checks as extraction apply on the server. */
 export const updateMemorySchema = z.object({ value: z.string().trim().min(1, "Enter a value").max(200, "Keep it under 200 characters") });
@@ -37,6 +46,20 @@ export type CustomerSummary = {
   company: string | null;
   lastSeenAt: string;
 };
+
+/** Whole-workspace counts for the list's tiles and filters; they follow ?q= but not ?filter= or paging. */
+export type CustomerCounts = {
+  total: number;
+  seenThisWeek: number;
+  withEmail: number;
+  withPhone: number;
+  /** Has an email or a phone number. */
+  reachable: number;
+  withCompany: number;
+};
+
+/** One page of the customer list; pass `nextCursor` back as ?cursor= for the next one (null: no more). */
+export type CustomerPage = { data: CustomerSummary[]; nextCursor: string | null; counts: CustomerCounts };
 
 export type CustomerDetail = CustomerSummary & {
   memories: CustomerMemoryItem[];
