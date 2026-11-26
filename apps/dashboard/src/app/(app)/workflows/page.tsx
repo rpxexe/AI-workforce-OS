@@ -7,22 +7,20 @@ import {
   type WorkflowDetail,
   type WorkflowSummary,
 } from "@workforce/shared";
-import { History, Plus, Workflow } from "lucide-react";
-import Link from "next/link";
+import { History, Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent, type ReactNode } from "react";
-import { StatusBadge, formatDate, versionLabel } from "@/components/employees/meta";
+import { useState, type FormEvent } from "react";
+import { formatDate } from "@/components/employees/meta";
 import { Skeleton as Skullet } from "skullet/react";
-import { EmptyState, ErrorState, PageHeader } from "@/components/states";
+import { ErrorState, PageHeader } from "@/components/states";
+import { WorkflowList } from "@/components/workflows/workflow-list";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: WorkflowSummary[] = Array.from({ length: 5 }, (_, i) => ({
@@ -68,6 +66,10 @@ function NewWorkflow({ workspaceId, onCancel }: { workspaceId: string; onCancel:
 
   return (
     <Card className="sm:max-w-lg">
+      <CardHeader>
+        <CardTitle>New workflow</CardTitle>
+        <CardDescription>Start from the example journey or a blank canvas. You can edit every step next.</CardDescription>
+      </CardHeader>
       <CardContent>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
@@ -203,51 +205,3 @@ export default withWorkspace(function WorkflowsPage({ workspace }) {
     </div>
   );
 });
-
-function WorkflowList({ data, isAdmin, newButton }: { data: WorkflowSummary[]; isAdmin: boolean; newButton: ReactNode }) {
-  const workflows = usePaged(data, 20);
-  return data.length === 0 ? (
-    <EmptyState
-      icon={Workflow}
-      title="No workflows yet"
-      description={
-        isAdmin
-          ? "Draw a journey: what starts it, what your AI employees do, and what happens next."
-          : "An organization admin has not created any workflows in this workspace yet."
-      }
-    >
-      {newButton}
-    </EmptyState>
-  ) : (
-    <Card className="py-0">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Workflow</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="hidden sm:table-cell">Version</TableHead>
-            <TableHead className="hidden lg:table-cell">Updated</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {workflows.rows.map((w) => (
-            <TableRow key={w.id}>
-              <TableCell>
-                <Link href={`/workflows/${w.id}`} className="font-medium hover:underline">
-                  {w.name}
-                </Link>
-                {w.description && <span className="block truncate text-sm text-muted-foreground">{w.description}</span>}
-              </TableCell>
-              <TableCell>
-                <StatusBadge status={w.status} />
-              </TableCell>
-              <TableCell className="hidden text-muted-foreground tabular-nums sm:table-cell">{versionLabel(w.latestVersion, w.publishedVersion)}</TableCell>
-              <TableCell className="hidden text-muted-foreground lg:table-cell">{formatDate(w.updatedAt)}</TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      <TablePager {...workflows.pager} className="px-4 pb-3" />
-    </Card>
-  );
-}
