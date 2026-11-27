@@ -70,11 +70,14 @@ const TRANSFER_RESULTS: Record<CallTransferRecord["status"], (t: CallTransferRec
   FAILED: (t) => `The call could not be transferred (${t.error ?? "unknown error"}): call the customer back`,
 };
 
+// One line each, like most chat turns: the skeleton draws each bubble as one block, so long texts make tall blocks.
 const SAMPLE_TEXTS = [
-  "Hi, I ordered a pair of shoes last week and the tracking page has not changed in three days.",
-  "Sorry about the wait. Your order shipped on Monday and is with the courier; it should arrive by Friday.",
-  "Okay. Can I change the delivery address to my office?",
-  "Yes. Send me the new address and I will update it before the courier's next attempt.",
+  "Hi, my order has not arrived yet.",
+  "Sorry about that. It shipped on Monday and arrives by Friday.",
+  "Can I change the delivery address?",
+  "Yes, send me the new address and I will update it.",
+  "It is 12 MG Road, Bengaluru.",
+  "Done. The courier has the new address.",
   "Thanks, that helps a lot.",
 ];
 
@@ -495,7 +498,8 @@ export default withWorkspace(function ConversationPage({ workspace }) {
                     ))}
                   </MessageScrollerContent>
                 </MessageScrollerViewport>
-                <MessageScrollerButton />
+                {/* Hidden until scrolled up, but the skeleton would still draw it as a stray pill. */}
+                {data !== SAMPLE && <MessageScrollerButton />}
               </MessageScroller>
             </MessageScrollerProvider>
 

@@ -291,6 +291,21 @@ const dimensionConfig = {
   pass: { label: "Passing %", color: "var(--chart-2)" },
 } satisfies ChartConfig;
 
+/** A radar axis label, one word per line, so long dimension names stay inside the card instead of being clipped. */
+function RadarTick({ x, y, textAnchor, payload }: { x?: number | string; y?: number | string; textAnchor?: "start" | "middle" | "end" | "inherit"; payload?: { value: string } }) {
+  const words = payload?.value.split(" ") ?? [];
+  const top = Number(y) - ((words.length - 1) * 12) / 2;
+  return (
+    <text x={x} y={top} textAnchor={textAnchor} dominantBaseline="central" className="fill-muted-foreground text-[11px]">
+      {words.map((w, i) => (
+        <tspan key={i} x={x} dy={i === 0 ? 0 : 12}>
+          {w}
+        </tspan>
+      ))}
+    </text>
+  );
+}
+
 /** Average score and pass rate per dimension: a radar when there are enough dimensions to make a shape, bars otherwise. */
 function Dimensions({ rows }: { rows: QualityOverview["byDimension"] }) {
   const values = rows.map((d) => ({
@@ -303,10 +318,10 @@ function Dimensions({ rows }: { rows: QualityOverview["byDimension"] }) {
     <>
       <ChartContainer config={dimensionConfig} className="mx-auto aspect-square max-h-72 w-full">
         {data.length >= 3 ? (
-          <RadarChart data={data} outerRadius="70%">
+          <RadarChart data={data} outerRadius="58%">
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
             <PolarGrid />
-            <PolarAngleAxis dataKey="label" tick={{ fontSize: 11 }} />
+            <PolarAngleAxis dataKey="label" tick={RadarTick} />
             <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
             <Radar dataKey="score" stroke="var(--color-score)" fill="var(--color-score)" fillOpacity={0.3} strokeWidth={2} {...motion} />
             <Radar dataKey="pass" stroke="var(--color-pass)" fill="var(--color-pass)" fillOpacity={0.1} strokeWidth={2} strokeDasharray="4 3" {...motion} />
@@ -467,7 +482,8 @@ function OverviewContent({ data, below }: { data: QualityOverview; below: number
       description="Conversations are graded automatically about 10 minutes after they go quiet. You can also grade one now from its page in Conversations."
     />
   ) : (
-    <>
+    // Skullet wraps its children in plain block divs, so the gap between rows has to live here.
+    <div className="flex flex-col gap-6">
       <section aria-label="Summary" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile label="Quality score" icon={Gauge} value={formatScore(data.averageScore)} hint="Average of every evaluator's score, 0-100">
           {data.averageScore !== null && <GaugeChart value={data.averageScore} color={scoreColor(data.averageScore, below)} />}
@@ -595,7 +611,7 @@ function OverviewContent({ data, below }: { data: QualityOverview; below: number
           </CardContent>
         </Card>
       </div>
-    </>
+    </div>
   );
 }
 
