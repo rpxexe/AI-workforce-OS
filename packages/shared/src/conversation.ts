@@ -37,12 +37,31 @@ export type ConversationMessage = {
 };
 
 export type ConversationSummary = { id: string; title: string; updatedAt: string; status: ConversationStatus };
+/** One page of an employee's test chats, newest activity first; pass `nextCursor` back as ?cursor= for the next (null: the list ends). */
+export type ConversationSummaryPage = { data: ConversationSummary[]; nextCursor: string | null };
 
 /** A handoff the turn started: the reply is the employee's handoff message. */
 export type TurnHandoff = { id: string; trigger: HandoffTrigger; reason: string };
 
-export type ConversationDetail = ConversationSummary & {
+/**
+ * A conversation detail's messages (oldest first): the newest 100, or with ?after= only the ones after that position.
+ * Earlier ones: GET …/messages?cursor=olderCursor; newer ones: GET …/messages/new?after=newestCursor.
+ */
+export type MessageWindow = {
   messages: ConversationMessage[];
+  /** Opens the page before these messages; null when none come before (always null with ?after=). */
+  olderCursor: string | null;
+  /** Where ?after= continues: the newest message here, or the given ?after= when nothing is newer. */
+  newestCursor: string;
+  /** False when more messages followed ?after= than one window holds: GET …/messages/new for the rest. */
+  caughtUp: boolean;
+};
+/** One page of a conversation's earlier messages, oldest first; nextCursor opens the page before it (null: the first message is in). */
+export type MessagePage = { data: ConversationMessage[]; nextCursor: string | null };
+/** Messages after ?after=, oldest first; `cursor` continues from the last of them, `more` says another call has more. */
+export type NewMessages = { data: ConversationMessage[]; cursor: string; more: boolean };
+
+export type ConversationDetail = ConversationSummary & MessageWindow & {
   /** The customer's external id, when the conversation is with a known customer. */
   customer: string | null;
 };

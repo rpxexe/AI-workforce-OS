@@ -1,6 +1,6 @@
 "use client";
 
-import { HANDOFF_TRIGGER_LABELS, type InboxResponse, type InboxView } from "@workforce/shared";
+import { HANDOFF_TRIGGER_LABELS, type InboxCounts, type InboxPage, type InboxView } from "@workforce/shared";
 import { Inbox } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -8,6 +8,7 @@ import { CHANNEL_LABELS, ConversationStatusBadge, timeAgo } from "@/components/i
 import { Skeleton as Skullet } from "skullet/react";
 import { EmptyState, ErrorState, PageHeader } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
+import { TablePager, useCursorPaged } from "@/components/table-pager";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsCount, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApiQuery } from "@/lib/api";
@@ -26,8 +27,8 @@ const VIEWS: { view: InboxView; label: string; empty: string }[] = [
 ];
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
-const SAMPLE: InboxResponse = {
-  items: Array.from({ length: 5 }, (_, i) => ({
+const SAMPLE: InboxPage = {
+  data: Array.from({ length: 5 }, (_, i) => ({
     id: `sample-${i}`,
     title: "Conversation with a customer",
     channel: "web",
@@ -39,7 +40,7 @@ const SAMPLE: InboxResponse = {
     handoff: { trigger: "customer_request", reason: "The customer asked for a person", requestedAt: "2026-01-01T00:00:00.000Z" },
     updatedAt: "2026-01-01T00:00:00.000Z",
   })),
-  counts: { queue: 5, mine: 0, waiting: 5, human_active: 0, ai_active: 0, reopened: 0, resolved: 0, all: 5 },
+  nextCursor: null,
 };
 
 /** How often the inbox looks for new handoffs. */
@@ -47,17 +48,29 @@ const REFRESH_MS = 5000;
 
 export default withWorkspace(function InboxPage({ workspace }) {
   const [view, setView] = useState<InboxView>("queue");
-  const { data, error, reload } = useApiQuery<InboxResponse>(`/workspaces/${workspace.id}/inbox?view=${view}`);
+  const base = `/workspaces/${workspace.id}/inbox`;
+  // Cursor pages from the server in the view's own order; another view starts again at page 1.
+  const paged = useCursorPaged(view);
+  const { data, error, loading, reload } = useApiQuery<InboxPage>(`${base}?view=${view}&${paged.query}`, { keepPrevious: true });
+  // Every view's count in one request, not per page or view, so the tabs keep their pills while a view loads.
+  const counts = useApiQuery<InboxCounts>(`${base}/counts`);
+  const reloadCounts = counts.reload;
   const { nameOf } = useMembers();
-  // Counts cover every view, so keep the last ones while a newly picked view loads; without this the
-  // count pills vanish on each switch and the tabs jump in width.
-  const [counts, setCounts] = useState(data?.counts);
-  if (data && data.counts !== counts) setCounts(data.counts);
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({
+    nextCursor: loading ? null : (data?.nextCursor ?? null),
+    rows: loading ? 1 : (data?.data.length ?? 1),
+    total: counts.data?.[view],
+  });
 
+  // Refreshes the page shown: page 1 picks up new activity, a later page keeps its place after its cursor.
   useEffect(() => {
-    const timer = setInterval(reload, REFRESH_MS);
+    const timer = setInterval(() => {
+      reload();
+      reloadCounts();
+    }, REFRESH_MS);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, reloadCounts]);
 
   const current = VIEWS.find((v) => v.view === view)!;
   return (
@@ -72,7 +85,7 @@ export default withWorkspace(function InboxPage({ workspace }) {
           {VIEWS.map((v) => (
             <TabsTrigger key={v.view} value={v.view}>
               {v.label}
-              {!!counts?.[v.view] && <TabsCount>{counts[v.view]}</TabsCount>}
+              {!!counts.data?.[v.view] && <TabsCount>{counts.data[v.view]}</TabsCount>}
             </TabsTrigger>
           ))}
         </TabsList>
@@ -82,12 +95,12 @@ export default withWorkspace(function InboxPage({ workspace }) {
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
         <Skullet data={data} sample={SAMPLE} id="conversations-list" label="Loading conversations">
-          {(data) => data.items.length === 0 ? (
+          {(data) => data.data.length === 0 ? (
         <EmptyState icon={Inbox} title={current.empty} description="This list refreshes by itself every few seconds." />
       ) : (
         <Card className="gap-0 py-0">
           <ul className="flex flex-col divide-y">
-            {data.items.map((c) => (
+            {data.data.map((c) => (
               <li key={c.id}>
                 <Link
                   href={`/conversations/${c.id}`}
@@ -120,6 +133,7 @@ export default withWorkspace(function InboxPage({ workspace }) {
               </li>
             ))}
           </ul>
+          <TablePager {...pager} className="px-4 pb-3" />
         </Card>
           )}
         </Skullet>

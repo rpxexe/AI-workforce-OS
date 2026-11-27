@@ -7,6 +7,7 @@ import {
   type ConversationMessage,
   type CopilotSuggestion,
   type InboxConversation,
+  type MessagePage,
 } from "@workforce/shared";
 import { ArrowLeft, ArrowUp, Bot, Phone, PhoneForwarded, type LucideIcon, CornerDownLeft, Hand, RotateCcw, Sparkles, UserRoundCheck, CircleCheck } from "lucide-react";
 import Link from "next/link";
@@ -15,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { useUser } from "@clerk/nextjs";
 import { Checkpoint, MessageSources, MessageTools, Suggestions, useToolExecutions } from "@/components/chat/message-parts";
 import { ConversationInsightCard } from "@/components/inbox/conversation-insight";
+import { LoadOnView } from "@/components/load-on-view";
 import { CHANNEL_LABELS, ConversationStatusBadge, formatDuration, timeAgo } from "@/components/inbox/meta";
 import { ErrorState } from "@/components/states";
 import { Skeleton as Skullet } from "skullet/react";
@@ -39,7 +41,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useMembers } from "@/lib/members";
+import { catchUp, mergeMessages } from "@/lib/messages";
 import { withWorkspace } from "@/lib/workspace";
+import { toast } from "sonner";
 
 /** How often an open conversation looks for the customer's new messages. */
 const REFRESH_MS = 4000;
@@ -97,6 +101,9 @@ const SAMPLE: InboxConversation = {
     sources: [],
     tools: [],
   })),
+  olderCursor: null,
+  newestCursor: "",
+  caughtUp: true,
   handoffs: [],
   suggestions: [],
   transfers: [],
@@ -122,8 +129,8 @@ type Entry =
   | ({ kind: "message"; at: string } & Pick<ConversationMessage, "id" | "role" | "content" | "authorId" | "sources" | "tools">)
   | { kind: "event"; at: string; id: string; text: string; icon: LucideIcon };
 
-/** Messages and handoff events, in time order. */
-function timeline(c: InboxConversation, nameOf: (id: string | null) => string): Entry[] {
+/** Messages and handoff events, in time order. While earlier messages are still to load, events before the first loaded one wait with them. */
+function timeline(c: InboxConversation, nameOf: (id: string | null) => string, complete: boolean): Entry[] {
   const entries: Entry[] = c.messages.map((m) => ({
     kind: "message",
     at: m.createdAt,
@@ -150,7 +157,8 @@ function timeline(c: InboxConversation, nameOf: (id: string | null) => string): 
     entries.push({ kind: "event", at: t.createdAt, id: `${t.id}:start`, icon: PhoneForwarded, text: `Transferring the call to ${t.to}` });
     if (t.endedAt) entries.push({ kind: "event", at: t.endedAt, id: `${t.id}:end`, icon: Phone, text: TRANSFER_RESULTS[t.status](t) });
   }
-  return entries.sort((a, b) => a.at.localeCompare(b.at));
+  const from = complete ? "" : (c.messages[0]?.createdAt ?? "");
+  return entries.filter((e) => e.at >= from).sort((a, b) => a.at.localeCompare(b.at));
 }
 
 function Copilot({ suggestions, busy, onSuggest, onUse }: {
@@ -262,12 +270,64 @@ export default withWorkspace(function ConversationPage({ workspace }) {
   const [suggestionId, setSuggestionId] = useState<string>();
   const [busy, setBusy] = useState<string>();
   const [panel, setPanel] = useState("copilot");
-  const executions = useToolExecutions(workspace.id, data?.id, data?.messages ?? NO_MESSAGES);
+  // The transcript as loaded: the first window, earlier pages (scrolling to the top), and what polls and replies
+  // added. `older` opens the page before it (null: complete); `newest` is where the next poll continues.
+  const [thread, setThread] = useState<{ id: string; messages: ConversationMessage[]; older: string | null; newest: string }>();
+  const [shown, setShown] = useState(data);
+  if (data !== shown) {
+    setShown(data);
+    if (data)
+      setThread((t) =>
+        t?.id === data.id
+          ? { ...t, messages: mergeMessages(t.messages, data.messages) }
+          : { id: data.id, messages: data.messages, older: data.olderCursor, newest: data.newestCursor },
+      );
+  }
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadOlder = async () => {
+    if (!thread?.older || loadingOlder) return;
+    const { id: conversationId, older } = thread;
+    setLoadingOlder(true);
+    try {
+      const page = await api<MessagePage>(`${path}/messages?cursor=${encodeURIComponent(older)}`);
+      setThread((t) => (t?.id === conversationId ? { ...t, messages: mergeMessages(page.data, t.messages), older: page.nextCursor } : t));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not load earlier messages.");
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+  const messages = data && thread?.id === data.id ? thread.messages : (data?.messages ?? NO_MESSAGES);
+  const executions = useToolExecutions(workspace.id, data?.id, messages);
 
+  // Each poll asks only for what is new since the newest message it has (following …/messages/new when more than one
+  // window came in), plus the conversation's state. The cached detail keeps its first window, so a later visit can
+  // still page back from it.
+  const latest = useRef({ thread, data });
   useEffect(() => {
-    const timer = setInterval(reload, REFRESH_MS);
+    latest.current = { thread, data };
+  });
+  useEffect(() => {
+    let polling = false;
+    const timer = setInterval(async () => {
+      const { thread: t } = latest.current;
+      if (polling || !t || t.id !== latest.current.data?.id) return;
+      polling = true;
+      try {
+        const d = await api<InboxConversation>(`${path}?after=${encodeURIComponent(t.newest)}`);
+        const rest = d.caughtUp ? { messages: [], cursor: d.newestCursor } : await catchUp(api, path, d.newestCursor);
+        setThread((x) => (x?.id === d.id ? { ...x, messages: mergeMessages(x.messages, [...d.messages, ...rest.messages]), newest: rest.cursor } : x));
+        const shownNow = latest.current.data;
+        if (shownNow?.id === d.id)
+          setData({ ...d, messages: shownNow.messages, olderCursor: shownNow.olderCursor, newestCursor: shownNow.newestCursor, caughtUp: true });
+      } catch {
+        // The next poll tries again.
+      } finally {
+        polling = false;
+      }
+    }, REFRESH_MS);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [api, path, setData]);
 
   if (error && !data) return <ErrorState message={error.message} onRetry={reload} />;
   const view = (data: InboxConversation) => {
@@ -315,6 +375,8 @@ export default withWorkspace(function ConversationPage({ workspace }) {
     };
 
     const withPeople = data.status === "WAITING_FOR_HUMAN" || data.status === "HUMAN_ACTIVE";
+    // Every earlier message is loaded (or there were none).
+    const complete = thread?.id !== data.id || thread.older === null;
     const latestSuggestion = data.suggestions[0];
     const mine = data.assignedTo !== null && data.assignedTo === me;
     const who = (e: Extract<Entry, { kind: "message" }>) =>
@@ -394,9 +456,11 @@ export default withWorkspace(function ConversationPage({ workspace }) {
           <Card className="h-[70vh] min-h-96 gap-0 overflow-hidden py-0 lg:h-auto lg:min-h-0">
             <MessageScrollerProvider autoScroll>
               <MessageScroller className="min-h-0 flex-1">
-                <MessageScrollerViewport>
-                  <MessageScrollerContent role="log" aria-label="Conversation" className="gap-4 p-4">
-                    {timeline(data, nameOf).map((e) => (
+                {/* Earlier pages are prepended; the viewport keeps what you were reading in place. */}
+                <MessageScrollerViewport preserveScrollOnPrepend>
+                  <MessageScrollerContent role="log" aria-label="Conversation" aria-busy={loadingOlder} className="gap-4 p-4">
+                    {complete ? null : <LoadOnView onView={loadOlder} loading={loadingOlder} label="Loading earlier messages" />}
+                    {timeline({ ...data, messages: thread?.id === data.id ? thread.messages : data.messages }, nameOf, complete).map((e) => (
                       // The customer's turn is the scroll anchor, so a new question settles near the top.
                       <MessageScrollerItem key={e.id} messageId={e.id} scrollAnchor={e.kind === "message" && e.role === "USER"}>
                         {e.kind === "event" ? (

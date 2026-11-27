@@ -10,10 +10,12 @@ import {
   WEBHOOK_EVENT_LABELS,
   WEBHOOK_EVENTS,
   type ApiKeyInfo,
+  type ApiKeyPage,
   type ApiScope,
   type CreatedApiKey,
   type CreatedWebhookEndpoint,
   type DeveloperAuditEntry,
+  type DeveloperAuditPage,
   type WebhookDeliveryPage,
   type WebhookDeliveryRecord,
   type WebhookEndpointInfo,
@@ -225,7 +227,11 @@ function ShortList({ items, label }: { items: readonly string[]; label: string }
 export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
   const api = useApi();
   const { workspace } = useWorkspaces();
-  const keys = useApiQuery<ApiKeyInfo[]>("/developer/api-keys");
+  // Cursor pages from the server, newest first, no total.
+  const paged = useCursorPaged("api-keys");
+  const keys = useApiQuery<ApiKeyPage>(`/developer/api-keys?${paged.query}`, { keepPrevious: true });
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({ nextCursor: keys.loading ? null : (keys.data?.nextCursor ?? null), rows: keys.loading ? 1 : (keys.data?.data.length ?? 1) });
   const [sheet, setSheet] = useState<KeySheet | null>(null);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [name, setName] = useState("");
@@ -313,7 +319,7 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
           {keys.error ? (
             <ErrorState message={keys.error.message} onRetry={keys.reload} />
           ) : (
-            <Skullet data={keys.data} sample={SAMPLE_KEYS} id="api-keys-list" label="Loading API keys">
+            <Skullet data={keys.data?.data} sample={SAMPLE_KEYS} id="api-keys-list" label="Loading API keys">
               {(data) =>
                 data.length === 0 ? (
                   <EmptyState icon={KeyRound} title="No API keys yet" description="Create a key to call the API from your own systems." />
@@ -382,6 +388,7 @@ export function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
               }
             </Skullet>
           )}
+          <TablePager {...pager} />
         </CardContent>
       </Card>
 
@@ -530,7 +537,11 @@ const ACTION_LABELS: Record<string, string> = {
 /** Who changed keys and endpoints (admins only). */
 function DeveloperActivity() {
   const { userId } = useAuth();
-  const audit = useApiQuery<DeveloperAuditEntry[]>("/developer/audit");
+  // A log: cursor pages from the server, no total.
+  const paged = useCursorPaged("developer-audit", 10);
+  const audit = useApiQuery<DeveloperAuditPage>(`/developer/audit?${paged.query}`, { keepPrevious: true });
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({ nextCursor: audit.loading ? null : (audit.data?.nextCursor ?? null), rows: audit.loading ? 1 : (audit.data?.data.length ?? 1) });
   const summary = (d: Record<string, unknown>) =>
     ["name", "url", "keepOldForHours", "expireOldInHours"]
       .filter((k) => d[k] !== undefined && d[k] !== null)
@@ -546,7 +557,7 @@ function DeveloperActivity() {
         {audit.error ? (
           <ErrorState message={audit.error.message} onRetry={audit.reload} />
         ) : (
-          <Skullet data={audit.data} sample={SAMPLE_AUDIT} id="developer-activity" label="Loading developer activity">
+          <Skullet data={audit.data?.data} sample={SAMPLE_AUDIT} id="developer-activity" label="Loading developer activity">
             {(data) =>
               data.length === 0 ? (
                 <p className="text-sm text-muted-foreground">Nothing yet.</p>
@@ -568,6 +579,7 @@ function DeveloperActivity() {
             }
           </Skullet>
         )}
+        <TablePager {...pager} />
       </CardContent>
     </Card>
   );

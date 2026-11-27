@@ -4,6 +4,7 @@ import {
   NODE_LABELS,
   type WorkflowDetail,
   type WorkflowExecutionDetail,
+  type WorkflowExecutionPage,
   type WorkflowExecutionSummary,
   type WorkflowStepExecution,
 } from "@workforce/shared";
@@ -20,7 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { RunStatusBadge, formatTime } from "@/components/workflows/meta";
 import { WorkflowCanvas } from "@/components/workflows/workflow-canvas";
 import { useApi, useApiQuery } from "@/lib/api";
-import { TablePager, usePaged } from "@/components/table-pager";
+import { TablePager, useCursorPaged } from "@/components/table-pager";
 
 const ACTIVE = ["QUEUED", "RUNNING", "WAITING"];
 
@@ -141,8 +142,16 @@ function RunDetail({ workspaceId, executionId, isAdmin }: { workspaceId: string;
 export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: string; workflow: WorkflowDetail; isAdmin: boolean }) {
   const api = useApi();
   const path = `/workspaces/${workspaceId}/workflows/${workflow.id}/executions`;
-  const { data, error, reload } = useApiQuery<WorkflowExecutionSummary[]>(path);
-  const runs = usePaged(data ?? [], 20);
+  // The run history one cursor page at a time, newest first; polling and new runs reload the page shown.
+  const paged = useCursorPaged(workflow.id);
+  const list = useApiQuery<WorkflowExecutionPage>(`${path}?${paged.query}`, { keepPrevious: true });
+  const { error, reload } = list;
+  const data = list.data?.data;
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({
+    nextCursor: list.loading ? null : (list.data?.nextCursor ?? null),
+    rows: list.loading ? 1 : (data?.length ?? 1),
+  });
   const [input, setInput] = useState("{\n}");
   const [selected, setSelected] = useState<string>();
   const [runError, setRunError] = useState<string>();
@@ -196,7 +205,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
           <ErrorState message={error.message} onRetry={reload} />
         ) : !data ? (
           <Skeleton className="h-32 w-full" />
-        ) : data.length === 0 ? (
+        ) : data.length === 0 && pager.page === 0 ? (
           <EmptyState icon={Play} title="No runs yet" description="Runs appear here when the workflow is started." />
         ) : (
           <Card className="py-0">
@@ -209,7 +218,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {runs.rows.map((run) => (
+                {data.map((run) => (
                   <TableRow key={run.id} data-state={run.id === selected ? "selected" : undefined} className="cursor-pointer" onClick={() => setSelected(run.id)}>
                     <TableCell>
                       <Button type="button" variant="link" className="h-auto p-0 font-normal text-foreground" onClick={() => setSelected(run.id)}>
@@ -225,7 +234,7 @@ export function WorkflowRuns({ workspaceId, workflow, isAdmin }: { workspaceId: 
                 ))}
               </TableBody>
             </Table>
-            <TablePager {...runs.pager} className="px-4 pb-3" />
+            <TablePager {...pager} className="px-4 pb-3" />
           </Card>
         )}
 

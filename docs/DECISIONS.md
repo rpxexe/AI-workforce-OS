@@ -557,6 +557,12 @@ workflows/summary, knowledge/sources/summary), so changing page costs one indexe
 count at all. The footer (useCursorPaged, rules in lib/cursor-pages.ts with tests) has first, previous and next but
 no last page, since a page's cursor comes from the one before; Next is off while a page loads.
 
+Transcripts (inbox conversation, test chat) load the newest 100 messages; older ones load by cursor when the reader
+scrolls to the top (LoadOnView sentinel, scroll position kept), and polls ask only for messages after the newest one
+shown (`?after=`), following `more` until caught up, so a burst of any size between polls is never skipped. Keyset
+polling can in principle miss a message whose insert commits after a newer one was read; each message is one short
+insert, so the window is milliseconds.
+
 Bounded lists load whole and page in the browser with `usePaged`: current employees (50 per plan), an employee's
 attached knowledge (20 at most). Migrations that build or drop indexes on big tables use `CREATE/DROP INDEX
 CONCURRENTLY` alone in their file (it cannot run in a transaction).

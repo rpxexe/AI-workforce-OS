@@ -1,6 +1,6 @@
 "use client";
 
-import { LANGUAGES, type EmployeeDetail, type InboxResponse, type QualityOverview } from "@workforce/shared";
+import { LANGUAGES, type EmployeeDetail, type InboxCounts, type QualityOverview } from "@workforce/shared";
 import { ChartColumn, CircleCheck, Gauge, MessagesSquare, UserRound } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
@@ -25,12 +25,12 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 
 /** Whether this employee is working: conversation and quality numbers, then its key settings. */
 export function EmployeeOverview({ workspaceId, employee }: { workspaceId: string; employee: EmployeeDetail }) {
-  const inbox = useApiQuery<InboxResponse>(`/workspaces/${workspaceId}/inbox?view=all&employeeId=${employee.id}`);
+  const inbox = useApiQuery<InboxCounts>(`/workspaces/${workspaceId}/inbox/counts?employeeId=${employee.id}`);
   const quality = useApiQuery<QualityOverview>(`/workspaces/${workspaceId}/quality?days=${DAYS}&employeeId=${employee.id}`);
 
   const latest = employee.versions[0];
   const workingDays = latest.workingHours.days.filter((d) => d.enabled);
-  const counts = inbox.data?.counts;
+  const counts = inbox.data;
   const nothingYet = counts?.all === 0 && quality.data?.evaluations === 0;
 
   return (

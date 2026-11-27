@@ -19,6 +19,7 @@ import {
   type WorkflowDependencies,
   type WorkflowDetail,
   type WorkflowExecutionDetail,
+  type WorkflowExecutionPage,
   type WorkflowExecutionStatus,
   type WorkflowExecutionSummary,
   type WorkflowIssue,
@@ -43,6 +44,7 @@ const executionParams = workspaceParams.extend({ executionId: z.string().min(1) 
 const hookParams = z.object({ id: z.string().min(1), token: z.string().min(1) });
 const versionQuery = z.object({ version: z.coerce.number().int().positive().optional() });
 const listQuery = listWorkflowsQuery.extend(cursorQuery);
+const runsQuery = z.object(cursorQuery);
 const deleteQuery = z.object({ stopRuns: z.literal("true").optional() });
 const IN_PROGRESS = ["QUEUED", "RUNNING", "WAITING"] as const;
 
@@ -416,17 +418,22 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
     return toExecution(await prisma.workflowExecution.findUniqueOrThrow({ where: { id: execution.id }, include: executionInclude }));
   });
 
-  app.get(`${base}/:id/executions`, async (req): Promise<WorkflowExecutionSummary[]> => {
+  // A workflow's runs, newest first, one page at a time over the (…, workflowId, createdAt) index.
+  app.get(`${base}/:id/executions`, async (req): Promise<WorkflowExecutionPage> => {
     const { workspaceId, id } = workflowParams.parse(req.params);
+    const { limit, cursor } = runsQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
-    const executions = await prisma.workflowExecution.findMany({
-      where: { workflowId: id, ...within(scope) },
-      orderBy: { createdAt: "desc" },
-      // shortcut: newest 50 only, add a cursor when a run history page is built
-      take: 50,
+    // A cursor only continues the run history it came from: same workspace and workflow.
+    const context = pagingContext(scope.workspaceId, id);
+    const after = decodeCursor(cursor, context, "date");
+    const rows = await prisma.workflowExecution.findMany({
+      where: { AND: [{ workflowId: id, ...within(scope) }, keysetAfter("createdAt", after)] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
       include: executionInclude,
     });
-    return executions.map(toExecution);
+    const { page, nextCursor } = keysetPage(rows, limit, (e) => e.createdAt, context);
+    return { data: page.map(toExecution), nextCursor };
   });
 
   app.get("/workspaces/:workspaceId/workflow-executions/:executionId", async (req) => {

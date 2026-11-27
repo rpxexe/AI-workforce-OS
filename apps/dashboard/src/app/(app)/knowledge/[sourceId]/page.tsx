@@ -5,12 +5,14 @@ import {
   knowledgeKindOf,
   type DocumentStatus,
   type KnowledgeDocument,
+  type KnowledgeDocumentFilter,
+  type KnowledgeDocumentPage,
   type KnowledgeSourceDetail,
 } from "@workforce/shared";
 import { ArrowLeft, CircleAlert, CircleCheck, FileText, Loader, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { formatDate } from "@/components/employees/meta";
 import { Skeleton as Skullet } from "skullet/react";
@@ -38,7 +40,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useApi, useApiQuery } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
+import { TablePager, useCursorPaged, type Pager } from "@/components/table-pager";
 
 const STATUS: Record<DocumentStatus, { label: string; dot: string }> = {
   PENDING: { label: "Waiting", dot: "bg-muted-foreground/50" },
@@ -52,8 +54,7 @@ const formatSize = (bytes: number) =>
 
 const working = (d: KnowledgeDocument) => d.status === "PENDING" || d.status === "PROCESSING";
 
-const FILTERS = { ALL: "All", READY: "Ready", WORKING: "Processing", FAILED: "Failed" } as const;
-type Filter = keyof typeof FILTERS;
+const FILTERS: Record<KnowledgeDocumentFilter, string> = { all: "All", ready: "Ready", processing: "Processing", failed: "Failed" };
 
 /** A file picked or dropped in this visit, shown as an attachment until it is dismissed. */
 type PickedFile = { id: string; name: string; size: number; state: "uploading" | "done" | "error"; message: string };
@@ -71,12 +72,19 @@ const problemOf = (f: File) =>
 const SAMPLE_DOCUMENT_NAMES = ["Refund policy 2026.pdf", "Shipping and delivery FAQ.docx", "Product catalogue.csv", "Warranty terms.txt", "Onboarding guide for new customers.pdf"];
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
-const SAMPLE: KnowledgeSourceDetail = {
-  id: "sample-source",
-  name: "Customer support handbook",
-  description: "",
-  documentCount: SAMPLE_DOCUMENT_NAMES.length,
-  updatedAt: "2026-01-01T00:00:00.000Z",
+const SAMPLE: Loaded = {
+  source: {
+    id: "sample-source",
+    name: "Customer support handbook",
+    description: "",
+    documentCount: SAMPLE_DOCUMENT_NAMES.length,
+    readyDocuments: SAMPLE_DOCUMENT_NAMES.length,
+    processingDocuments: 0,
+    failedDocuments: 0,
+    passages: 42 * SAMPLE_DOCUMENT_NAMES.length,
+    totalBytes: 245_760 * SAMPLE_DOCUMENT_NAMES.length,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  },
   documents: SAMPLE_DOCUMENT_NAMES.map((name, i) => ({
     id: `sample-${i}`,
     name,
@@ -94,40 +102,77 @@ export default withWorkspace(function KnowledgeSourcePage({ workspace }) {
   const isAdmin = useIsAdmin();
   const base = `/workspaces/${workspace.id}/knowledge`;
 
-  const { data, error, reload } = useApiQuery<KnowledgeSourceDetail>(`${base}/sources/${sourceId}`);
+  // The source with its counts, and its documents one cursor page at a time (back to page 1 on a new status).
+  const detail = useApiQuery<KnowledgeSourceDetail>(`${base}/sources/${sourceId}`);
+  const [filter, setFilter] = useState<KnowledgeDocumentFilter>("all");
+  const paged = useCursorPaged(filter);
+  const list = useApiQuery<KnowledgeDocumentPage>(`${base}/sources/${sourceId}/documents?${paged.query}${filter === "all" ? "" : `&status=${filter}`}`, {
+    keepPrevious: true,
+  });
+  const source = detail.data;
+  const totals: Record<KnowledgeDocumentFilter, number | undefined> = {
+    all: source?.documentCount,
+    ready: source?.readyDocuments,
+    processing: source?.processingDocuments,
+    failed: source?.failedDocuments,
+  };
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({
+    total: totals[filter],
+    nextCursor: list.loading ? null : (list.data?.nextCursor ?? null),
+    rows: list.loading ? 1 : (list.data?.data.length ?? 1),
+  });
+  const { reload: reloadSource } = detail;
+  const { reload: reloadList } = list;
+  // After an upload, delete or reprocess, and while documents process: the counts and the page shown.
+  const reload = useCallback(() => {
+    reloadSource();
+    reloadList();
+  }, [reloadSource, reloadList]);
 
   // Processing happens on the server after the upload returns; keep checking until it settles.
-  const inProgress = data?.documents.some(working) ?? false;
+  const inProgress = (source?.processingDocuments ?? 0) > 0;
   useEffect(() => {
     if (!inProgress) return;
     const timer = setInterval(reload, 2000);
     return () => clearInterval(timer);
   }, [inProgress, reload]);
 
+  const error = detail.error ?? list.error;
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
+  const loaded = source && list.data ? { source, documents: list.data.data } : undefined;
   return (
-    <Skullet data={data} sample={SAMPLE} id="knowledge-source" label="Loading knowledge source">
-      {(data) => <SourceView data={data} base={base} sourceId={sourceId} isAdmin={isAdmin} reload={reload} />}
+    <Skullet data={loaded} sample={SAMPLE} id="knowledge-source" label="Loading knowledge source">
+      {(loaded) => (
+        <SourceView {...loaded} base={base} sourceId={sourceId} isAdmin={isAdmin} reload={reload} filter={filter} setFilter={setFilter} pager={pager} />
+      )}
     </Skullet>
   );
 });
 
+type Loaded = { source: KnowledgeSourceDetail; documents: KnowledgeDocument[] };
+
 function SourceView({
-  data,
+  source: data,
+  documents,
   base,
   sourceId,
   isAdmin,
   reload,
-}: {
-  data: KnowledgeSourceDetail;
+  filter,
+  setFilter,
+  pager,
+}: Loaded & {
   base: string;
   sourceId: string;
   isAdmin: boolean;
   reload: () => void;
+  filter: KnowledgeDocumentFilter;
+  setFilter: (filter: KnowledgeDocumentFilter) => void;
+  pager: Pager;
 }) {
   const api = useApi();
   const router = useRouter();
-  const [filter, setFilter] = useState<Filter>("ALL");
   const [uploading, setUploading] = useState(false);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -183,14 +228,7 @@ function SourceView({
     void uploadFiles([...event.dataTransfer.files]);
   };
 
-  const docs = data.documents;
-  const ready = docs.filter((d) => d.status === "READY");
-  const failed = docs.filter((d) => d.status === "FAILED");
-  const processing = docs.filter(working).length;
-  const passages = ready.reduce((sum, d) => sum + d.chunkCount, 0);
-  const totalBytes = docs.reduce((sum, d) => sum + d.sizeBytes, 0);
-  const visible = filter === "ALL" ? docs : docs.filter((d) => (filter === "WORKING" ? working(d) : d.status === filter));
-  const documents = usePaged(visible, 20, filter);
+  const { passages, processingDocuments: processing, failedDocuments: failed } = data;
 
   return (
     <div className="flex flex-col gap-6">
@@ -243,10 +281,10 @@ function SourceView({
       </PageHeader>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Documents" value={docs.length} icon={FileText} hint={`${formatSize(totalBytes)} in total`} />
-        <StatTile label="Ready" value={ready.length} icon={CircleCheck} hint={`${passages} searchable ${passages === 1 ? "passage" : "passages"}`} />
+        <StatTile label="Documents" value={data.documentCount} icon={FileText} hint={`${formatSize(data.totalBytes)} in total`} />
+        <StatTile label="Ready" value={data.readyDocuments} icon={CircleCheck} hint={`${passages} searchable ${passages === 1 ? "passage" : "passages"}`} />
         <StatTile label="Processing" value={processing} icon={Loader} hint={processing ? "Updates automatically" : "Nothing in the queue"} />
-        <StatTile label="Failed" value={failed.length} icon={CircleAlert} hint={failed.length ? "Retry or replace them" : "No problems"} />
+        <StatTile label="Failed" value={failed} icon={CircleAlert} hint={failed ? "Retry or replace them" : "No problems"} />
       </div>
 
       {isAdmin && (
@@ -304,20 +342,20 @@ function SourceView({
         </section>
       )}
 
-      {failed.length > 0 && (
+      {failed > 0 && (
         <Alert variant="destructive">
           <CircleAlert aria-hidden />
           <AlertTitle>
-            {failed.length} {failed.length === 1 ? "document" : "documents"} could not be processed
+            {failed} {failed === 1 ? "document" : "documents"} could not be processed
           </AlertTitle>
           <AlertDescription>
-            AI employees cannot answer from {failed.length === 1 ? "it" : "them"} yet. The reason is shown under each name;
+            AI employees cannot answer from {failed === 1 ? "it" : "them"} yet. The reason is shown under each name;
             fix the file and upload it again, or retry it.
           </AlertDescription>
         </Alert>
       )}
 
-      {docs.length === 0 ? (
+      {data.documentCount === 0 ? (
         <EmptyState
           icon={FileText}
           title="No documents yet"
@@ -336,10 +374,10 @@ function SourceView({
               variant="outline"
               size="sm"
               value={filter}
-              onValueChange={(v) => v && setFilter(v as Filter)}
+              onValueChange={(v) => v && setFilter(v as KnowledgeDocumentFilter)}
               aria-label="Filter documents by status"
             >
-              {(Object.keys(FILTERS) as Filter[]).map((k) => (
+              {(Object.keys(FILTERS) as KnowledgeDocumentFilter[]).map((k) => (
                 <ToggleGroupItem key={k} value={k} className="px-3">
                   {FILTERS[k]}
                 </ToggleGroupItem>
@@ -347,7 +385,7 @@ function SourceView({
             </ToggleGroup>
           </CardHeader>
           <CardContent className="px-0">
-            {visible.length === 0 ? (
+            {documents.length === 0 ? (
               <p className="px-4 py-10 text-center text-sm text-muted-foreground">No documents with this status.</p>
             ) : (
               <Table>
@@ -364,7 +402,7 @@ function SourceView({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {documents.rows.map((d) => (
+                  {documents.map((d) => (
                     <TableRow key={d.id}>
                       <TableCell className="max-w-72 pl-4">
                         <span className="flex items-center gap-2">
@@ -443,9 +481,9 @@ function SourceView({
               </Table>
             )}
           </CardContent>
-          {visible.length > 0 && (
+          {documents.length > 0 && (
             <CardFooter className="border-t py-3">
-              <TablePager {...documents.pager} />
+              <TablePager {...pager} />
             </CardFooter>
           )}
         </Card>

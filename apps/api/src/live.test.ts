@@ -13,7 +13,8 @@ import {
   type EmployeeDetail,
   type KnowledgeMatch,
   type KnowledgeSource,
-  type KnowledgeSourceDetail,
+  type KnowledgeDocument,
+  type KnowledgeDocumentPage,
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
@@ -84,10 +85,10 @@ test(
       payload: readFileSync(new URL("./fixtures/pricing.pdf", import.meta.url)),
     });
     assert.equal(uploaded.statusCode, 201, uploaded.payload);
-    let document: KnowledgeSourceDetail["documents"][number] | undefined;
+    let document: KnowledgeDocument | undefined;
     for (let i = 0; i < 120 && document?.status !== "READY" && document?.status !== "FAILED"; i++) {
       await new Promise((r) => setTimeout(r, 250));
-      [document] = (await call("GET", `${ws}/knowledge/sources/${source.id}`)).json<KnowledgeSourceDetail>().documents;
+      [document] = (await call("GET", `${ws}/knowledge/sources/${source.id}/documents`)).json<KnowledgeDocumentPage>().data;
     }
     assert.equal(document?.status, "READY", `processing failed: ${document?.error}`);
     t.diagnostic(`document: ${document?.name} ${document?.status}, ${document?.chunkCount} chunks`);

@@ -19,7 +19,10 @@ import {
   type DashboardSummary,
   type HandoffAnalytics,
   type InboxConversation,
-  type InboxResponse,
+  type InboxCounts,
+  type InboxPage,
+  type MessagePage,
+  type NewMessages,
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
@@ -100,7 +103,8 @@ const conv = (id: string) => `/workspaces/${ws}/conversations/${id}`;
 const act = (id: string, body: object, headers = memberOf(orgA)) => call("PATCH", conv(id), body, headers);
 const reply = (id: string, body: object, headers = memberOf(orgA)) => call("POST", `${conv(id)}/messages`, body, headers);
 const detail = async (id: string) => (await call("GET", conv(id), undefined, memberOf(orgA))).json<InboxConversation>();
-const inbox = async (view: string) => (await call("GET", `/workspaces/${ws}/inbox?view=${view}`, undefined, memberOf(orgA))).json<InboxResponse>();
+const inbox = async (view: string) => (await call("GET", `/workspaces/${ws}/inbox?view=${view}&limit=100`, undefined, memberOf(orgA))).json<InboxPage>();
+const counts = async () => (await call("GET", `/workspaces/${ws}/inbox/counts`, undefined, memberOf(orgA))).json<InboxCounts>();
 
 const until = async (ok: () => Promise<boolean>, what: string) => {
   const end = Date.now() + 4000;
@@ -173,10 +177,10 @@ test("a customer asking for a person is handed off without calling the model; th
 
   // In the unassigned queue.
   const queue = await inbox("queue");
-  const item = queue.items.find((i) => i.id === id);
+  const item = queue.data.find((i) => i.id === id);
   assert.ok(item);
   assert.deepEqual([item.status, item.assignedTo, item.handoff?.trigger, item.employee.name], ["WAITING_FOR_HUMAN", null, "customer_request", "Ava"]);
-  assert.ok(queue.counts.queue >= 1);
+  assert.ok((await counts()).queue >= 1);
 
   // While waiting, messages are kept and not answered.
   const held = await say("Hello? Anyone there?", id);
@@ -187,7 +191,7 @@ test("a customer asking for a person is handed off without calling the model; th
   const taken = await act(id, { action: "take_over" });
   assert.equal(taken.statusCode, 200, taken.payload);
   assert.deepEqual([taken.json<InboxConversation>().status, taken.json<InboxConversation>().assignedTo], ["HUMAN_ACTIVE", "user_member"]);
-  assert.equal((await inbox("mine")).items[0]?.id, id);
+  assert.equal((await inbox("mine")).data[0]?.id, id);
   const answered = await reply(id, { text: "Hi, I'm Sam from the team. The Pro plan costs $49 a month." });
   assert.equal(answered.statusCode, 200, answered.payload);
   const after = answered.json<InboxConversation>();
@@ -406,9 +410,9 @@ test("assignment, isolation and channels an agent cannot write on", async () => 
   // Assigned to a teammate: out of the queue, in their "mine".
   const assigned = await act(id, { action: "assign", userId: "user_admin" });
   assert.equal(assigned.json<InboxConversation>().assignedTo, "user_admin");
-  assert.ok(!(await inbox("queue")).items.some((i) => i.id === id));
-  const theirs = (await call("GET", `/workspaces/${ws}/inbox?view=mine`, undefined, adminOf(orgA))).json<InboxResponse>();
-  assert.ok(theirs.items.some((i) => i.id === id));
+  assert.ok(!(await inbox("queue")).data.some((i) => i.id === id));
+  const theirs = (await call("GET", `/workspaces/${ws}/inbox?view=mine`, undefined, adminOf(orgA))).json<InboxPage>();
+  assert.ok(theirs.data.some((i) => i.id === id));
   // Unassigned: back in the queue, waiting.
   const unassigned = await act(id, { action: "assign", userId: null });
   assert.deepEqual([unassigned.json<InboxConversation>().status, unassigned.json<InboxConversation>().assignedTo], ["WAITING_FOR_HUMAN", null]);
@@ -477,4 +481,159 @@ test("dashboard: one summary that agrees with the full analytics, scoped to the 
   assert.deepEqual((await call("GET", `/workspaces/${ws}/dashboard`, undefined, memberOf(orgA))).json<DashboardSummary>().attention, next);
   assert.deepEqual((await call("GET", `/workspaces/${ws}/attention`, undefined, memberOf(orgA))).json(), next);
   assert.equal((await call("GET", `/workspaces/${ws}/attention`, undefined, memberOf(orgB))).statusCode, 404);
+});
+
+test("inbox views page by cursor in their own order; counts come apart; a cursor only works for its own view", async () => {
+  const created = await call("POST", `/workspaces/${ws}/employees`, { ...defaultEmployeeConfig("UTC"), name: "Bea", role: "Pager" });
+  assert.equal(created.statusCode, 201, created.payload);
+  const bea = created.json<EmployeeDetail>().id;
+  const at = (minutes: number) => new Date(Date.UTC(2026, 0, 1, 12, minutes));
+  // Three waiting (two at the same moment: the id breaks the tie), two with the AI, one replay that never shows.
+  const rows: [string, number, "WAITING_FOR_HUMAN" | "AI_ACTIVE", string][] = [
+    ["w1", 1, "WAITING_FOR_HUMAN", "web_chat"],
+    ["w2", 2, "WAITING_FOR_HUMAN", "web_chat"],
+    ["w3", 2, "WAITING_FOR_HUMAN", "web_chat"],
+    ["a1", 3, "AI_ACTIVE", "web_chat"],
+    ["a2", 4, "AI_ACTIVE", "web_chat"],
+    ["replay", 5, "AI_ACTIVE", "evaluation"],
+  ];
+  for (const [title, minutes, status, channel] of rows)
+    await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: ws, employeeId: bea, channel, title, status, createdBy: "test", updatedAt: at(minutes) } });
+  const order = (dir: "asc" | "desc", status?: "WAITING_FOR_HUMAN") =>
+    prisma.conversation
+      .findMany({ where: { employeeId: bea, channel: { not: "evaluation" }, ...(status && { status }) }, orderBy: [{ updatedAt: dir }, { id: dir }], select: { id: true } })
+      .then((r) => r.map((c) => c.id));
+
+  const walk = async (view: string) => {
+    const ids: string[] = [];
+    const cursors: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const res = await call("GET", `/workspaces/${ws}/inbox?view=${view}&employeeId=${bea}&limit=2${cursor ? `&cursor=${cursor}` : ""}`, undefined, memberOf(orgA));
+      assert.equal(res.statusCode, 200, res.payload);
+      const page = res.json<InboxPage>();
+      assert.ok(page.data.length <= 2);
+      ids.push(...page.data.map((c) => c.id));
+      cursor = page.nextCursor;
+      if (cursor) cursors.push(cursor);
+    } while (cursor);
+    return { ids, cursors };
+  };
+  // Everything newest first; the queue oldest first (whoever has waited longest).
+  const all = await walk("all");
+  assert.deepEqual(all.ids, await order("desc"));
+  assert.equal(all.cursors.length, 2);
+  assert.deepEqual((await walk("queue")).ids, await order("asc", "WAITING_FOR_HUMAN"));
+  assert.equal((await walk("ai_active")).ids.length, 2);
+
+  // Counts for the same employee, every view at once.
+  const c = (await call("GET", `/workspaces/${ws}/inbox/counts?employeeId=${bea}`, undefined, memberOf(orgA))).json<InboxCounts>();
+  assert.deepEqual([c.queue, c.waiting, c.ai_active, c.mine, c.all], [3, 3, 2, 0, 5]);
+
+  // A cursor belongs to its view and employee; a malformed one is refused.
+  const inboxUrl = (query: string) => `/workspaces/${ws}/inbox?${query}`;
+  const first = all.cursors[0]!;
+  for (const query of [`view=queue&employeeId=${bea}&cursor=${first}`, `view=all&cursor=${first}`, `view=all&employeeId=${bea}&cursor=garbage`])
+    assert.equal((await call("GET", inboxUrl(query), undefined, memberOf(orgA))).statusCode, 400, query);
+  // Another organization: our workspace is not found, its own has none of ours.
+  assert.equal((await call("GET", inboxUrl(`view=all&employeeId=${bea}&cursor=${first}`), undefined, memberOf(orgB))).statusCode, 404);
+  assert.equal((await call("GET", `/workspaces/${ws}/inbox/counts`, undefined, memberOf(orgB))).statusCode, 404);
+  const theirs = (await call("GET", `/workspaces/${wsB}/inbox?view=all&employeeId=${bea}`, undefined, memberOf(orgB))).json<InboxPage>();
+  assert.deepEqual(theirs, { data: [], nextCursor: null });
+});
+
+test("a long conversation: the detail carries the newest 100 messages, earlier ones page by cursor", async () => {
+  const conversation = await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: ws, employeeId: ava, channel: "web_chat", title: "Long", createdBy: "test" } });
+  const start = Date.UTC(2026, 0, 1);
+  // 105 messages; m1 and m2 share a moment, so the id breaks the tie.
+  await prisma.conversationMessage.createMany({
+    data: Array.from({ length: 105 }, (_, i) => ({
+      organizationId: orgA,
+      workspaceId: ws,
+      conversationId: conversation.id,
+      role: i % 2 ? ("ASSISTANT" as const) : ("USER" as const),
+      content: `m${i}`,
+      createdAt: new Date(start + (i === 2 ? 1 : i) * 1000),
+    })),
+  });
+  const expected = (
+    await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { id: true } })
+  ).map((m) => m.id);
+
+  const d = await detail(conversation.id);
+  assert.deepEqual(d.messages.map((m) => m.id), expected.slice(5));
+  assert.ok(d.olderCursor);
+
+  const older = (cursor: string, headers = memberOf(orgA)) => call("GET", `${conv(conversation.id)}/messages?limit=3&cursor=${cursor}`, undefined, headers);
+  const p1 = (await older(d.olderCursor)).json<MessagePage>();
+  assert.deepEqual(p1.data.map((m) => m.id), expected.slice(2, 5));
+  assert.ok(p1.nextCursor);
+  const p2 = (await older(p1.nextCursor)).json<MessagePage>();
+  assert.deepEqual([p2.data.map((m) => m.id), p2.nextCursor], [expected.slice(0, 2), null]);
+
+  // A short conversation has nothing earlier.
+  const short = await prisma.conversation.create({
+    data: {
+      organizationId: orgA,
+      workspaceId: ws,
+      employeeId: ava,
+      channel: "web_chat",
+      title: "Short",
+      createdBy: "test",
+      messages: { create: [{ organizationId: orgA, workspaceId: ws, role: "USER", content: "hi" }] },
+    },
+  });
+  assert.equal((await detail(short.id)).olderCursor, null);
+
+  // Malformed, or another conversation's cursor: 400. Another organization: 404.
+  assert.equal((await older("garbage")).statusCode, 400);
+  assert.equal((await call("GET", `${conv(short.id)}/messages?cursor=${d.olderCursor}`, undefined, memberOf(orgA))).statusCode, 400);
+  assert.equal((await older(d.olderCursor, memberOf(orgB))).statusCode, 404);
+  assert.equal((await call("GET", `/workspaces/${wsB}/conversations/${conversation.id}/messages`, undefined, memberOf(orgB))).statusCode, 404);
+});
+
+test("polling with ?after= catches up a gap larger than one window, in order, and the cursor is tied to its conversation", async () => {
+  const conversation = await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: ws, employeeId: ava, channel: "web_chat", title: "Busy", createdBy: "test" } });
+  // Nothing yet: the detail still gives a position to poll from.
+  const empty = await detail(conversation.id);
+  assert.deepEqual([empty.messages, empty.olderCursor, empty.caughtUp], [[], null, true]);
+  const start = Date.UTC(2026, 0, 2);
+  await prisma.conversationMessage.createMany({
+    data: Array.from({ length: 250 }, (_, i) => ({
+      organizationId: orgA,
+      workspaceId: ws,
+      conversationId: conversation.id,
+      role: "USER" as const,
+      content: `n${i}`,
+      // n10 and n11 share a moment: the id breaks the tie.
+      createdAt: new Date(start + (i === 11 ? 10 : i) * 1000),
+    })),
+  });
+  const expected = (
+    await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { id: true } })
+  ).map((m) => m.id);
+
+  const poll = (await call("GET", `${conv(conversation.id)}?after=${empty.newestCursor}`, undefined, memberOf(orgA))).json<InboxConversation>();
+  assert.deepEqual([poll.messages.length, poll.caughtUp, poll.olderCursor], [100, false, null]);
+  const seen = poll.messages.map((m) => m.id);
+  let cursor = poll.newestCursor;
+  for (let more = true; more; ) {
+    const res = await call("GET", `${conv(conversation.id)}/messages/new?after=${cursor}&limit=100`, undefined, memberOf(orgA));
+    assert.equal(res.statusCode, 200, res.payload);
+    const page = res.json<NewMessages>();
+    seen.push(...page.data.map((m) => m.id));
+    ({ cursor, more } = page);
+  }
+  assert.deepEqual(seen, expected);
+  // Caught up: nothing new, and the same position to poll from next time.
+  const quiet = (await call("GET", `${conv(conversation.id)}?after=${cursor}`, undefined, memberOf(orgA))).json<InboxConversation>();
+  assert.deepEqual([quiet.messages, quiet.caughtUp, quiet.newestCursor], [[], true, cursor]);
+
+  // Another conversation's position, or a malformed one: 400. Another organization: 404.
+  const otherConversation = await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: ws, employeeId: ava, channel: "web_chat", title: "Other", createdBy: "test" } });
+  const other = await detail(otherConversation.id);
+  for (const url of [`${conv(conversation.id)}?after=${other.newestCursor}`, `${conv(conversation.id)}/messages/new?after=${other.newestCursor}`, `${conv(conversation.id)}/messages/new?after=garbage`])
+    assert.equal((await call("GET", url, undefined, memberOf(orgA))).statusCode, 400, url);
+  assert.equal((await call("GET", `${conv(conversation.id)}/messages/new`, undefined, memberOf(orgA))).statusCode, 400, "after is required");
+  assert.equal((await call("GET", `${conv(conversation.id)}/messages/new?after=${cursor}`, undefined, memberOf(orgB))).statusCode, 404);
 });
