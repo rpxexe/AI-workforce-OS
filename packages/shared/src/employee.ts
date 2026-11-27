@@ -151,14 +151,15 @@ export const publishSchema = z.object({ version: z.number().int().positive() });
 export const setStatusSchema = z.object({ status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED"]) });
 
 /**
- * GET employees: without ?limit= the whole list (pickers); with it, one page newest first by last change,
- * ?cursor= from the previous page and ?q= matching name or role.
+ * GET employees, newest change first; ?archived=true for the archived ones. Without ?limit= the whole list (pickers,
+ * the Current tab: plans cap it at 50); with ?limit= one cursor page (?cursor= from the last one), ?q= matching the
+ * latest name or role.
  */
 export const listEmployeesQuery = z.object({
   archived: z.enum(["true", "false"]).default("false"),
   q: z.string().trim().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
-  cursor: z.string().min(1).max(100).optional(),
+  cursor: z.string().min(1).max(1000).optional(),
 });
 
 // ---- API responses (dates are ISO strings) ----
@@ -174,8 +175,8 @@ export type EmployeeSummary = Pick<EmployeeConfig, "name" | "role" | "descriptio
   updatedAt: string;
 };
 
-/** One page of employees (?limit= given); counts by status cover the whole tab (current or archived), not the page or ?q=. */
-export type EmployeePage = { data: EmployeeSummary[]; nextCursor: string | null; counts: Record<EmployeeStatus, number> };
+/** One page of employees (?limit= given); pass `nextCursor` back as ?cursor= (same ?archived= and ?q=) for the next. */
+export type EmployeePage = { data: EmployeeSummary[]; nextCursor: string | null };
 
 export type EmployeeDetail = {
   id: string;

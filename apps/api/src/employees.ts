@@ -1,7 +1,6 @@
 import { configOf } from "@workforce/agent-runtime";
 import { Prisma, prisma } from "@workforce/database";
 import {
-  EMPLOYEE_STATUSES,
   employeeConfigSchema,
   listEmployeesQuery,
   publishSchema,
@@ -16,6 +15,7 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
+import { decodeCursor, keysetPage, pagingContext } from "./cursor.ts";
 import { assertPublishable, release } from "./releases.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
@@ -79,7 +79,8 @@ const newestFirst = [{ updatedAt: "desc" as const }, { id: "desc" as const }];
 
 /**
  * A workspace's employees, most recently changed first: the archived ones, or the rest (the default).
- * The whole list: the dashboard counts it and pickers offer it. Plan limits bound the current list.
+ * The whole list: the Current tab searches and pages it in the browser, the dashboard counts it and
+ * pickers offer it. Plan limits bound the current list (50 at most); archived ones are paged (pageEmployees).
  */
 export async function listEmployees(scope: { organizationId: string; workspaceId: string }, archived = false): Promise<EmployeeSummary[]> {
   const employees = await prisma.aiEmployee.findMany({
@@ -90,31 +91,34 @@ export async function listEmployees(scope: { organizationId: string; workspaceId
   return toSummaries(employees);
 }
 
-/** One page of the list for the Employees page, with the tab's counts by status. */
+/**
+ * One cursor page of the tab, newest change first. The search runs on each employee's latest version (what the list
+ * shows), so a page is never short. Archived employees are not plan-limited, so the Archived tab pages here instead
+ * of loading every row; the (organizationId, workspaceId, status, updatedAt) index walks the tab in order.
+ */
 export async function pageEmployees(
   scope: { organizationId: string; workspaceId: string },
   { archived, q, limit, cursor }: { archived: boolean; q?: string; limit: number; cursor?: string },
 ): Promise<EmployeePage> {
-  const where = { ...within(scope), status: statusFilter(archived) };
-  const like = { contains: q, mode: "insensitive" as const };
-  const [rows, byStatus] = await Promise.all([
-    prisma.aiEmployee.findMany({
-      // Any version matching narrows it in SQL; the latest version's name or role decides below.
-      where: { ...where, ...(q && { versions: { some: { OR: [{ name: like }, { role: like }] } } }) },
-      orderBy: newestFirst,
-      take: limit + 1,
-      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
-      include: summaryInclude,
-    }),
-    prisma.aiEmployee.groupBy({ by: ["status"], where, _count: { _all: true } }),
-  ]);
-  const needle = q?.toLowerCase();
-  const data = toSummaries(rows.slice(0, limit)).filter(
-    (e) => !needle || e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle),
-  );
-  const counts = Object.fromEntries(EMPLOYEE_STATUSES.map((s) => [s, 0])) as EmployeePage["counts"];
-  for (const g of byStatus) counts[g.status] = g._count._all;
-  return { data, nextCursor: rows.length > limit ? rows[limit - 1]!.id : null, counts };
+  const context = pagingContext(scope.workspaceId, archived, q);
+  const after = decodeCursor(cursor, context, "date");
+  // Wildcards in the search match themselves, as Prisma's contains does elsewhere.
+  const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
+  const ids = await prisma.$queryRaw<{ id: string; updatedAt: Date }[]>`
+    SELECT e.id, e."updatedAt"
+    FROM "AIEmployee" e
+    JOIN LATERAL (SELECT v.name, v.role FROM "AIEmployeeVersion" v WHERE v."employeeId" = e.id ORDER BY v.number DESC LIMIT 1) latest ON true
+    WHERE e."organizationId" = ${scope.organizationId} AND e."workspaceId" = ${scope.workspaceId}
+      AND ${archived ? Prisma.sql`e.status = 'ARCHIVED'` : Prisma.sql`e.status <> 'ARCHIVED'`}
+      AND (${term}::text IS NULL OR latest.name ILIKE ${term} OR latest.role ILIKE ${term})
+      AND ${after ? Prisma.sql`(e."updatedAt", e.id) < (${after.value}, ${after.id})` : Prisma.sql`true`}
+    ORDER BY e."updatedAt" DESC, e.id DESC
+    LIMIT ${limit + 1}`;
+  const { page, nextCursor } = keysetPage(ids, limit, (r) => r.updatedAt, context);
+  const rows = await prisma.aiEmployee.findMany({ where: { ...within(scope), id: { in: page.map((r) => r.id) } }, include: summaryInclude });
+  const position = new Map(page.map((r, i) => [r.id, i]));
+  rows.sort((x, y) => position.get(x.id)! - position.get(y.id)!);
+  return { data: toSummaries(rows), nextCursor };
 }
 
 /**

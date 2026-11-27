@@ -108,7 +108,8 @@ model AiEmployee {
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
 
-  @@index([organizationId, workspaceId, status])
+  // A tab (current or archived) newest change first; also serves every lookup by status alone.
+  @@index([organizationId, workspaceId, status, updatedAt])
   @@map("AIEmployee")
 }
 
@@ -180,6 +181,8 @@ model Conversation {
   @@index([organizationId, workspaceId, status, updatedAt])
   // Conversations started per day (handoff analytics, reports, dashboard).
   @@index([organizationId, workspaceId, createdAt])
+  // The insights sweep: conversations that went quiet in the last 3 days, across every organization.
+  @@index([updatedAt])
 }
 
 // Conversation intelligence stored per conversation (the analyzer output the insights overview counts).
@@ -1402,6 +1405,8 @@ model WebhookDelivery {
   @@unique([endpointId, eventId])
   @@index([status, nextAttemptAt])
   @@index([organizationId, createdAt])
+  // One endpoint's delivery log, newest first, a page at a time.
+  @@index([endpointId, createdAt])
 }
 
 /**

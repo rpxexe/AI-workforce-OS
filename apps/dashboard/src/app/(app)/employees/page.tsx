@@ -1,6 +1,6 @@
 "use client";
 
-import type { EmployeeDetail, EmployeePage, EmployeeSummary } from "@workforce/shared";
+import type { EmployeeDetail, EmployeePage, EmployeeStatus, EmployeeSummary } from "@workforce/shared";
 import { Archive, Bot, Copy, Ellipsis, Eye, Pencil, Plus, Search, SearchX, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -25,8 +25,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LANGUAGES } from "@workforce/shared";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
-import { LoadMoreButton, useLoadMore } from "@/components/load-more";
+import { TablePager, useCursorPaged, usePaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
@@ -41,7 +40,6 @@ const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
   publishedVersion: 1,
   updatedAt: "2026-01-01T00:00:00.000Z",
 }));
-const SAMPLE_PAGE: EmployeePage = { data: SAMPLE, nextCursor: null, counts: { DRAFT: 0, ACTIVE: 5, PAUSED: 0, ARCHIVED: 5 } };
 
 export default withWorkspace(function EmployeesPage({ workspace }) {
   const isAdmin = useIsAdmin();
@@ -52,17 +50,33 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
   const [archived, setArchived] = useState(false);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
-  // Wait for a pause in typing before asking the server.
+  // The Archived tab asks the server; wait for a pause in typing first.
   useEffect(() => {
     const timer = setTimeout(() => setSearch(query.trim()), 300);
     return () => clearTimeout(timer);
   }, [query]);
   const searchRef = useRef<HTMLInputElement>(null);
-  const path = `${base}?archived=${archived}&limit=50${search ? `&q=${encodeURIComponent(search)}` : ""}`;
-  const { data, error, loading, reload } = useApiQuery<EmployeePage>(path, { keepPrevious: true });
-  const more = useLoadMore(path, data);
+
+  // Current: the whole tab (plans cap employees at 50), searched and paged here with no more requests.
+  const current = useApiQuery<EmployeeSummary[]>(archived ? null : `${base}?archived=false`, { keepPrevious: true });
+  const needle = query.trim().toLowerCase();
+  const matches = current.data && (needle ? current.data.filter((e) => e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle)) : current.data);
+  const local = usePaged(matches ?? [], 20, needle);
+  // Archived: not plan-limited, so cursor pages and the search come from the server (a new search starts at page 1).
+  const paged = useCursorPaged(search);
+  const old = useApiQuery<EmployeePage>(
+    archived ? `${base}?archived=true&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}` : null,
+    { keepPrevious: true },
+  );
+  // While a page loads, `old.data` is still the previous one: its cursor must not open yet another page.
+  const serverPager = paged.pager({ nextCursor: old.loading ? null : (old.data?.nextCursor ?? null), rows: old.loading ? 1 : (old.data?.data.length ?? 1) });
+
+  const { error, loading, reload } = archived ? old : current;
+  const view = archived
+    ? old.data && { rows: old.data.data, pager: serverPager, searching: search !== "" }
+    : matches && { rows: local.rows, pager: local.pager, searching: needle !== "" };
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
-  const nameOf = (id: string) => more.rows?.find((e) => e.id === id)?.name ?? "Employee";
+  const nameOf = (id: string) => view?.rows.find((e) => e.id === id)?.name ?? "Employee";
 
   /** Runs a row action, then refreshes the list. */
   const run = async (action: () => Promise<unknown>) => {
@@ -128,20 +142,19 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
               maxLength={100}
             />
           </InputGroup>
-          {data && !archived && <Counts counts={data.counts} />}
+          {current.data && !archived && <Counts data={current.data} />}
         </div>
       )}
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data && { ...data, data: more.rows ?? [] }} sample={SAMPLE_PAGE} id="employees-list" label="Loading employees">
-          {(page) => (
+        <Skullet data={view} sample={{ rows: SAMPLE, pager: local.pager, searching: false }} id="employees-list" label="Loading employees">
+          {(view) => (
             <EmployeeList
-              data={page.data}
-              total={archived ? page.counts.ARCHIVED : page.counts.DRAFT + page.counts.ACTIVE + page.counts.PAUSED}
+              {...view}
               archived={archived}
-              query={search}
+              query={query}
               clearQuery={() => {
                 setQuery("");
                 // The Clear button unmounts with the empty state; keep keyboard focus in the search box.
@@ -157,15 +170,16 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
           )}
         </Skullet>
       )}
-      {!error && <LoadMoreButton {...more} loading={more.loading || loading} label="Load more employees" />}
 
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
 });
 
-/** Counts over the whole tab from the server, not just the loaded page. */
-function Counts({ counts }: { counts: EmployeePage["counts"] }) {
+/** Counts over the whole tab, not the search or the page. */
+function Counts({ data }: { data: EmployeeSummary[] }) {
+  const counts = { DRAFT: 0, ACTIVE: 0, PAUSED: 0, ARCHIVED: 0 } satisfies Record<EmployeeStatus, number>;
+  for (const e of data) counts[e.status]++;
   return (
     <div className="flex flex-wrap gap-2">
       <Badge variant="outline">{counts.ACTIVE} active</Badge>
@@ -176,8 +190,9 @@ function Counts({ counts }: { counts: EmployeePage["counts"] }) {
 }
 
 function EmployeeList({
-  data,
-  total,
+  rows,
+  pager,
+  searching,
   archived,
   query,
   clearQuery,
@@ -188,8 +203,9 @@ function EmployeeList({
   setStatus,
   setConfirm,
 }: {
-  data: EmployeeSummary[];
-  total: number;
+  rows: EmployeeSummary[];
+  pager: Pager;
+  searching: boolean;
   archived: boolean;
   query: string;
   clearQuery: () => void;
@@ -200,8 +216,8 @@ function EmployeeList({
   setStatus: (id: string, status: "PAUSED" | "ARCHIVED") => void;
   setConfirm: (confirm: Confirmation) => void;
 }) {
-  const employees = usePaged(data, 20, `${archived}:${query}`);
-  return total === 0 ? (
+  // Page 1 has no rows: the tab is empty, or nothing matches the search.
+  return rows.length === 0 && pager.page === 0 && !searching ? (
         archived ? (
           <EmptyState icon={Archive} title="No archived employees" description="Employees you archive are kept here and can be restored." />
         ) : (
@@ -217,7 +233,7 @@ function EmployeeList({
             {newButton}
           </EmptyState>
         )
-      ) : data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState icon={SearchX} title={`No employees match "${query.trim()}"`} description="Try another name or role.">
           <Button variant="outline" onClick={clearQuery}>
             Clear search
@@ -239,7 +255,7 @@ function EmployeeList({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {employees.rows.map((e) => (
+              {rows.map((e) => (
                 <TableRow key={e.id}>
                   <TableCell>
                     <Link href={`/employees/${e.id}`} className="group flex min-w-0 items-center gap-3">
@@ -323,7 +339,7 @@ function EmployeeList({
               ))}
             </TableBody>
           </Table>
-          <TablePager {...employees.pager} className="px-4 pb-3" />
+          <TablePager {...pager} className="px-4 pb-3" />
         </Card>
       );
 }

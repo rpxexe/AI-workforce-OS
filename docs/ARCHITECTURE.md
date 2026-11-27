@@ -183,7 +183,7 @@ GET   /health                                   public
 GET   /ws                                       WebSocket echo (placeholder transport)
 GET   /workspaces                               member; provisions org + Default on first call
 POST  /workspaces                               admin
-GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; no ?limit=: the whole list as an array (pickers; the dashboard calls listEmployees); ?limit=1-100 [&cursor=] [&q= latest name/role]: EmployeePage { data, nextCursor, counts by status for the tab }, newest change first
+GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; without ?limit= the whole list as an array, newest change first (pickers, the Current tab: plans cap it at 50; listEmployees for the dashboard); with ?limit=: EmployeePage { data, nextCursor }, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list), [&q= latest name/role] (the Archived tab, which plans do not cap)
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
@@ -195,7 +195,8 @@ GET   .../employees/:id/conversations/:cid      member; with messages
 POST  .../employees/:id/messages                admin; body { conversationId?, message, customer? }; SSE reply
 GET   .../employees/:id/knowledge               member; sources attached to the employee
 PUT   .../employees/:id/knowledge               admin; body { sourceIds }; replaces the set
-GET   /workspaces/:workspaceId/knowledge/sources            member; KnowledgeSourceSummary[]: documentCount plus readyDocuments, processingDocuments (pending + processing), failedDocuments (one groupBy)
+GET   /workspaces/:workspaceId/knowledge/sources            member; KnowledgeSourcePage { data, nextCursor } by name then id, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?q= name/description; ?filter=all|filled|empty; each source with documentCount and ready/processing/failed counts
+GET   /workspaces/:workspaceId/knowledge/sources/summary    member; KnowledgeSourceCounts { sources, emptySources, documents, readyDocuments, processingDocuments, failedDocuments } for ?q= (the page's tiles, once per search)
 POST  .../knowledge/sources                     admin; body { name, description? }
 GET   .../knowledge/sources/:sourceId           member; with documents and their status
 DELETE .../knowledge/sources/:sourceId          admin; removes documents, chunks, attachments
@@ -218,7 +219,8 @@ GET   .../calls/:callId                         member; participants and transcr
 POST  /voice/:provider/inbound                  provider webhook (twilio|telnyx; checked): answers with <Connect><Stream>
 POST  /voice/:provider/status                   call status callback (checked); ?callId= on outbound calls
 GET   /voice/:provider/stream                   WebSocket: the provider's media stream (token-checked on start)
-GET   /workspaces/:workspaceId/workflows        member; ?deleted=true lists deleted ones instead; WorkflowListItem[] (newest 200): trigger (published version, else latest), runCount, lastRunAt, lastRunStatus (one DISTINCT ON query)
+GET   /workspaces/:workspaceId/workflows        member; WorkflowPage { data, nextCursor }, updatedAt then id newest first, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?q= name/description; ?status=; ?deleted=true lists deleted ones instead; items carry trigger, runCount, lastRunAt, lastRunStatus
+GET   /workspaces/:workspaceId/workflows/summary member; WorkflowListSummary { total, statuses, unpublished, runs, failing } for ?q= (the page's tiles, once per search; deleted ones excluded)
 POST  /workspaces/:workspaceId/workflows        admin; body { name, description?, definition? } (blank: trigger -> end)
 POST  .../workflows/validate                    member; body { definition }; returns { issues }
 GET   .../workflows/:id                         member; ?version=n; definition, versions, issues, hookUrl (admins only)
@@ -327,12 +329,13 @@ PATCH /developer/webhooks/:id                   admin; { url?, description?, eve
 POST  /developer/webhooks/:id/rotate-secret     admin; { keepOldForHours: 0..168 }; the new secret once; both sign during the grace period
 POST  /developer/webhooks/:id/test              admin; sends webhook.test now (any subscription, even turned off); the delivery with its attempt
 DELETE /developer/webhooks/:id                  admin; deliveries go with it; 204
-GET   /developer/webhooks/:id/deliveries        member; { data, nextCursor }, newest first, with payload and attempts; ?status= ?event= ?limit= ?cursor=
+GET   /developer/webhooks/:id/deliveries        member; { data, nextCursor }, newest first, with payload and attempts, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?status= ?event=; no count (a log)
 POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fresh attempts (same event id); 409 if pending
 GET   /developer/audit                          admin; newest 100 developer audit entries
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
-GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (50) &cursor=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany) follow ?q= only
+GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor }, last seen then id newest first, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone
+GET   /workspaces/:workspaceId/customers/counts member; CustomerCounts { total, seenThisWeek, withEmail, withPhone, reachable, withCompany } for ?q=, one SQL pass (tiles and filter chips, once per search)
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
 DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited

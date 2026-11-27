@@ -5,7 +5,6 @@ import { Activity, AtSign, Building2, ChevronRight, Mail, Phone, Search, SearchX
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CustomerAvatar, RelativeTime } from "@/components/customers/meta";
-import { LoadMoreButton, useLoadMore } from "@/components/load-more";
 import { Skeleton as Skullet } from "skullet/react";
 import { EmptyState, ErrorState, PageHeader, StatTile } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -15,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useApiQuery } from "@/lib/api";
 import { withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
+import { TablePager, useCursorPaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: CustomerSummary[] = Array.from({ length: 6 }, (_, i) => ({
@@ -36,11 +35,7 @@ const FILTERS: Record<CustomerFilter, { label: string; count: (c: CustomerCounts
   phone: { label: "Has phone", count: (c) => c.withPhone },
 };
 type Filter = CustomerFilter;
-const SAMPLE_PAGE: CustomerPage = {
-  data: SAMPLE,
-  nextCursor: null,
-  counts: { total: 6, seenThisWeek: 6, withEmail: 6, withPhone: 6, reachable: 6, withCompany: 6 },
-};
+const SAMPLE_PAGE: CustomerPage = { data: SAMPLE, nextCursor: null };
 
 export default withWorkspace(function CustomersPage({ workspace }) {
   const [query, setQuery] = useState("");
@@ -53,9 +48,19 @@ export default withWorkspace(function CustomersPage({ workspace }) {
   }, [query]);
 
   const base = `/workspaces/${workspace.id}/customers`;
-  const path = `${base}?filter=${filter}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
+  // Cursor pages from the server: each page starts after the last row of the one before, so customers seen or
+  // added meanwhile never repeat or skip a row. A new search or filter starts again at page 1 with no cursor.
+  const paged = useCursorPaged(`${search}:${filter}`);
+  const path = `${base}?filter=${filter}&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
   const { data, error, loading, reload } = useApiQuery<CustomerPage>(path, { keepPrevious: true });
-  const more = useLoadMore(path, data);
+  // Tiles and filter counts: one request per search, not per page or filter.
+  const { data: counts } = useApiQuery<CustomerCounts>(`${base}/counts${search ? `?q=${encodeURIComponent(search)}` : ""}`, { keepPrevious: true });
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({
+    nextCursor: loading ? null : (data?.nextCursor ?? null),
+    rows: loading ? 1 : (data?.data.length ?? 1),
+    total: counts && FILTERS[filter].count(counts),
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -64,7 +69,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
         description={`People your AI employees in the ${workspace.name} workspace have talked to, and what they remember about them.`}
       />
 
-      {!error && <Stats counts={data?.counts} search={search} />}
+      {!error && <Stats counts={counts} search={search} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <InputGroup className="sm:max-w-sm">
@@ -92,7 +97,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           {(Object.keys(FILTERS) as Filter[]).map((k) => (
             <ToggleGroupItem key={k} value={k} className="px-3">
               {FILTERS[k].label}
-              {data && k !== "all" && <span className="text-muted-foreground tabular-nums">{FILTERS[k].count(data.counts).toLocaleString()}</span>}
+              {counts && k !== "all" && <span className="text-muted-foreground tabular-nums">{FILTERS[k].count(counts).toLocaleString()}</span>}
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
@@ -101,11 +106,11 @@ export default withWorkspace(function CustomersPage({ workspace }) {
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data && { ...data, data: more.rows ?? [] }} sample={SAMPLE_PAGE} id="customers-list" label="Loading customers">
+        <Skullet data={data} sample={SAMPLE_PAGE} id="customers-list" label="Loading customers">
           {(page) => (
             <CustomerList
               data={page.data}
-              total={page.counts.total}
+              pager={pager}
               search={search}
               filter={filter}
               loading={loading}
@@ -114,7 +119,6 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           )}
         </Skullet>
       )}
-      {!error && <LoadMoreButton {...more} loading={more.loading || loading} label="Load more customers" />}
     </div>
   );
 });
@@ -134,22 +138,21 @@ function Stats({ counts, search }: { counts: CustomerCounts | undefined; search:
 
 function CustomerList({
   data,
-  total,
+  pager,
   search,
   filter,
   loading,
   clearFilter,
 }: {
   data: CustomerSummary[];
-  total: number;
+  pager: Pager;
   search: string;
   filter: Filter;
   loading: boolean;
   clearFilter: () => void;
 }) {
-  const customers = usePaged(data, 20, `${search}:${filter}`);
-
-  if (total === 0) {
+  // Page 1 empty: nobody at all (or for the search) under "All"; under another filter, nobody it keeps.
+  if (data.length === 0 && filter === "all") {
     return search ? (
       <EmptyState icon={SearchX} title="No customers match" description={`Nobody found for “${search}”. Try part of a name, email or phone number.`} />
     ) : (
@@ -185,7 +188,7 @@ function CustomerList({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {customers.rows.map((c) => (
+          {data.map((c) => (
             <TableRow key={c.id} className="group">
               <TableCell className="max-w-64">
                 <Link href={`/customers/${c.id}`} className="flex min-w-0 items-center gap-3">
@@ -232,7 +235,7 @@ function CustomerList({
           ))}
         </TableBody>
       </Table>
-      <TablePager {...customers.pager} className="px-4 pb-3" />
+      <TablePager {...pager} className="px-4 pb-3" />
     </Card>
   );
 }

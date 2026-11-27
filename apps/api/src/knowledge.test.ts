@@ -14,7 +14,8 @@ import {
   type KnowledgeMatch,
   type KnowledgeSource,
   type KnowledgeSourceDetail,
-  type KnowledgeSourceSummary,
+  type KnowledgeSourceCounts,
+  type KnowledgeSourcePage,
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
@@ -219,7 +220,7 @@ test("bad uploads are refused or marked failed, and reprocessing replaces chunks
   assert.match(byName["blank.txt"]?.error ?? "", /No text was found/);
   assert.equal(byName["pricing.txt"]?.status, "READY");
   // The list counts each source's documents by status.
-  const listed = (await call("GET", `${knowledge()}/sources`, memberOf(orgA))).json<KnowledgeSourceSummary[]>().find((s) => s.id === scratch);
+  const listed = (await call("GET", `${knowledge()}/sources?q=scratch`, memberOf(orgA))).json<KnowledgeSourcePage>().data.find((s) => s.id === scratch);
   assert.deepEqual(
     [listed?.documentCount, listed?.readyDocuments, listed?.processingDocuments, listed?.failedDocuments],
     [3, 1, 0, 2],
@@ -266,6 +267,7 @@ test("isolation: another organization or workspace cannot read, search, change o
   // Using our workspace id: the workspace itself is not found.
   for (const [method, url] of [
     ["GET", `${knowledge()}/sources`],
+    ["GET", `${knowledge()}/sources/summary`],
     ["GET", `${knowledge()}/sources/${sourceId}`],
     ["DELETE", `${knowledge()}/sources/${sourceId}`],
     ["DELETE", `${knowledge()}/documents/${doc.id}`],
@@ -280,7 +282,8 @@ test("isolation: another organization or workspace cannot read, search, change o
     [outsider, wsB],
     [adminOf(orgA), wsA2],
   ] as const) {
-    assert.deepEqual((await call("GET", `${knowledge(ws)}/sources`, headers)).json(), []);
+    assert.deepEqual((await call("GET", `${knowledge(ws)}/sources`, headers)).json(), { data: [], nextCursor: null });
+    assert.equal((await call("GET", `${knowledge(ws)}/sources/summary`, headers)).json<KnowledgeSourceCounts>().sources, 0);
     assert.equal((await call("GET", `${knowledge(ws)}/sources/${sourceId}`, headers)).statusCode, 404);
     assert.equal((await call("DELETE", `${knowledge(ws)}/sources/${sourceId}`, headers)).statusCode, 404);
     assert.equal((await call("DELETE", `${knowledge(ws)}/documents/${doc.id}`, headers)).statusCode, 404);
@@ -298,4 +301,65 @@ test("isolation: another organization or workspace cannot read, search, change o
 
   // Everything is still there for its owner.
   assert.equal((await documents()).length, 5);
+});
+
+test("sources are listed by name a page at a time, searched on the server, and counted for the tiles", async () => {
+  // A workspace of its own, so the other tests' sources do not change the numbers.
+  const ws = (await call("POST", "/workspaces", adminOf(orgA), { name: "Paging" })).json<Workspace>().id;
+  const names = ["Alpha guide", "Beta FAQ", "Gamma guide", "Delta notes", "Epsilon guide"];
+  const ids = Object.fromEntries(await Promise.all(names.map(async (n) => [n, (await createSource(n, ws)).id] as const)));
+  await upload("a.txt", Buffer.from("alpha one"), adminOf(orgA), ids["Alpha guide"], ws);
+  await upload("b.txt", Buffer.from("alpha two"), adminOf(orgA), ids["Alpha guide"], ws);
+  await upload("c.pdf", Buffer.from("not a pdf"), adminOf(orgA), ids["Gamma guide"], ws);
+  for (const source of [ids["Alpha guide"], ids["Gamma guide"]])
+    for (let i = 0; i < 100 && (await prisma.knowledgeDocument.count({ where: { sourceId: source, status: { in: ["PENDING", "PROCESSING"] } } })) > 0; i++)
+      await new Promise((r) => setTimeout(r, 50));
+
+  const list = (query: string, headers = memberOf(orgA)) => call("GET", `${knowledge(ws)}/sources?${query}`, headers);
+  const all = async (query: string) => {
+    const seen: KnowledgeSourcePage["data"] = [];
+    let cursor: string | null = null;
+    do {
+      const res = await list(`${query}&limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      assert.equal(res.statusCode, 200, res.payload);
+      const page = res.json<KnowledgeSourcePage>();
+      assert.ok(page.data.length <= 2);
+      seen.push(...page.data);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return seen;
+  };
+
+  // Every source once, in name order (names share a case, so the database collation agrees with localeCompare), across three pages; the last page has no cursor.
+  const sorted = await all("filter=all");
+  assert.deepEqual(sorted.map((s) => s.name), [...names].sort((a, b) => a.localeCompare(b)));
+  // Document counts are per source on every page.
+  const alpha = sorted.find((s) => s.name === "Alpha guide");
+  const gamma = sorted.find((s) => s.name === "Gamma guide");
+  assert.deepEqual([alpha?.documentCount, alpha?.readyDocuments, alpha?.failedDocuments], [2, 2, 0]);
+  assert.deepEqual([gamma?.documentCount, gamma?.readyDocuments, gamma?.failedDocuments], [1, 0, 1]);
+  assert.ok(sorted.filter((s) => s !== alpha && s !== gamma).every((s) => s.documentCount === 0 && s.readyDocuments === 0));
+
+  // The search is case-insensitive and holds across pages; the filters split on documents.
+  assert.deepEqual((await all("q=GUIDE")).map((s) => s.name), ["Alpha guide", "Epsilon guide", "Gamma guide"]);
+  assert.deepEqual((await all("q=guide&filter=empty")).map((s) => s.name), ["Epsilon guide"]);
+  assert.deepEqual((await all("filter=filled")).map((s) => s.name), ["Alpha guide", "Gamma guide"]);
+
+  // The tiles count the whole workspace, or the search, without listing it.
+  const summary = async (q?: string) =>
+    (await call("GET", `${knowledge(ws)}/sources/summary${q ? `?q=${q}` : ""}`, memberOf(orgA))).json<KnowledgeSourceCounts>();
+  assert.deepEqual(await summary(), { sources: 5, emptySources: 3, documents: 3, readyDocuments: 2, processingDocuments: 0, failedDocuments: 1 });
+  assert.deepEqual(await summary("gamma"), { sources: 1, emptySources: 0, documents: 1, readyDocuments: 0, processingDocuments: 0, failedDocuments: 1 });
+
+  // A cursor works only for the list it came from.
+  const first = (await list("q=guide&limit=1")).json<KnowledgeSourcePage>();
+  assert.ok(first.nextCursor);
+  assert.equal((await list(`q=notes&limit=1&cursor=${first.nextCursor}`)).statusCode, 400);
+  assert.equal((await list(`q=guide&filter=empty&limit=1&cursor=${first.nextCursor}`)).statusCode, 400);
+  assert.equal((await list("limit=1&cursor=not-a-cursor")).statusCode, 400);
+  assert.equal((await list(`q=guide&limit=1&cursor=${first.nextCursor}`)).json<KnowledgeSourcePage>().data[0]?.name, "Epsilon guide");
+
+  // Another organization sees neither the list nor the numbers.
+  assert.equal((await list("limit=1", adminOf(orgB))).statusCode, 404);
+  assert.equal((await call("GET", `${knowledge(ws)}/sources/summary`, adminOf(orgB))).statusCode, 404);
 });

@@ -106,8 +106,8 @@ export const rotateWebhookSecretSchema = z.object({ keepOldForHours: z.number().
 export const deliveriesQuerySchema = z.object({
   status: z.enum(["pending", "succeeded", "failed"]).optional(),
   event: z.string().max(50).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(1000).optional(),
 });
 
 export const webhookEndpointSchema = z.object({
@@ -187,6 +187,7 @@ export type WebhookDeliveryRecord = {
   payload: unknown;
 };
 
+/** One page of deliveries, newest first; pass `nextCursor` back as ?cursor= (same ?status= and ?event=) for the next. */
 export type WebhookDeliveryPage = { data: WebhookDeliveryRecord[]; nextCursor: string | null };
 
 export type DeveloperAuditEntry = {

@@ -8,18 +8,21 @@ import {
   knowledgeKindOf,
   knowledgeSearchSchema,
   knowledgeSourceSchema,
+  listKnowledgeSourcesQuery,
   uploadQuerySchema,
   type KnowledgeDocument,
   type KnowledgeKind,
   type KnowledgeMatch,
   type KnowledgeSource,
+  type KnowledgeSourceCounts,
   type KnowledgeSourceDetail,
-  type KnowledgeSourceSummary,
+  type KnowledgeSourcePage,
   type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
+import { cursorQuery, decodeCursor, keysetAfter, keysetPage, pagingContext } from "./cursor.ts";
 import { employeeParams, within, type Scope } from "./employees.ts";
 import type { ProviderService } from "./providers/service.ts";
 
@@ -27,6 +30,7 @@ const id = z.string().min(1);
 const workspaceParams = z.object({ workspaceId: id });
 const sourceParams = workspaceParams.extend({ sourceId: id });
 const documentParams = workspaceParams.extend({ documentId: id });
+const listQuery = listKnowledgeSourcesQuery.extend(cursorQuery);
 
 // Never select `content` (the file's bytes) for a listing.
 const documentSelect = {
@@ -138,20 +142,60 @@ export function knowledgeRoutes(
     return document;
   };
 
-  app.get(`${base}/sources`, async (req): Promise<KnowledgeSourceSummary[]> => {
-    const scope = await inWorkspace(member(req), workspaceParams.parse(req.params).workspaceId);
-    const [sources, byStatus] = await Promise.all([
-      prisma.knowledgeSource.findMany({ where: within(scope), orderBy: { name: "asc" }, include: sourceInclude }),
-      prisma.knowledgeDocument.groupBy({ by: ["sourceId", "status"], where: within(scope), _count: { _all: true } }),
+  /** The caller's sources matching ?q= (name or description, case-insensitive). */
+  const sourcesMatching = (scope: Scope, q: string | undefined): Prisma.KnowledgeSourceWhereInput => {
+    const like = { contains: q, mode: "insensitive" as const };
+    return { ...within(scope), ...(q && { OR: [{ name: like }, { description: like }] }) };
+  };
+  /** Sums groupBy rows by document status into ready / processing (pending included) / failed. */
+  const byStatus = (groups: { status: string; _count: { _all: number } }[]) => {
+    const count = (...statuses: string[]) => groups.filter((g) => statuses.includes(g.status)).reduce((sum, g) => sum + g._count._all, 0);
+    return { readyDocuments: count("READY"), processingDocuments: count("PENDING", "PROCESSING"), failedDocuments: count("FAILED") };
+  };
+
+  // Sources by name (unique in a workspace; id breaks ties anyway), one page at a time; documents counted for that page only.
+  app.get(`${base}/sources`, async (req): Promise<KnowledgeSourcePage> => {
+    const { workspaceId } = workspaceParams.parse(req.params);
+    const { q, filter, limit, cursor } = listQuery.parse(req.query);
+    const scope = await inWorkspace(member(req), workspaceId);
+    const search = q || undefined;
+    // A cursor only continues the list it came from: same workspace, search and filter.
+    const context = pagingContext(scope.workspaceId, search, filter);
+    const after = decodeCursor(cursor, context, "text");
+    const filters = { all: {}, filled: { documents: { some: {} } }, empty: { documents: { none: {} } } } satisfies Record<string, Prisma.KnowledgeSourceWhereInput>;
+    const rows = await prisma.knowledgeSource.findMany({
+      where: { AND: [sourcesMatching(scope, search), filters[filter], keysetAfter("name", after, "asc")] },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
+      include: sourceInclude,
+      take: limit + 1,
+    });
+    const { page, nextCursor } = keysetPage(rows, limit, (s) => s.name, context);
+    const groups = page.length
+      ? await prisma.knowledgeDocument.groupBy({
+          by: ["sourceId", "status"],
+          where: { ...within(scope), sourceId: { in: page.map((s) => s.id) } },
+          _count: { _all: true },
+        })
+      : [];
+    return {
+      data: page.map((s) => ({ ...toSource(s), ...byStatus(groups.filter((g) => g.sourceId === s.id)) })),
+      nextCursor,
+    };
+  });
+
+  // The Knowledge page's tiles, over every source matching ?q=, counted in the database.
+  app.get(`${base}/sources/summary`, async (req): Promise<KnowledgeSourceCounts> => {
+    const { workspaceId } = workspaceParams.parse(req.params);
+    const { q } = listKnowledgeSourcesQuery.pick({ q: true }).parse(req.query);
+    const scope = await inWorkspace(member(req), workspaceId);
+    const where = sourcesMatching(scope, q || undefined);
+    const [sources, emptySources, groups] = await Promise.all([
+      prisma.knowledgeSource.count({ where }),
+      prisma.knowledgeSource.count({ where: { AND: [where, { documents: { none: {} } }] } }),
+      prisma.knowledgeDocument.groupBy({ by: ["status"], where: { ...within(scope), ...(q && { source: where }) }, _count: { _all: true } }),
     ]);
-    const countOf = (sourceId: string, ...statuses: string[]) =>
-      byStatus.filter((g) => g.sourceId === sourceId && statuses.includes(g.status)).reduce((sum, g) => sum + g._count._all, 0);
-    return sources.map((s) => ({
-      ...toSource(s),
-      readyDocuments: countOf(s.id, "READY"),
-      processingDocuments: countOf(s.id, "PENDING", "PROCESSING"),
-      failedDocuments: countOf(s.id, "FAILED"),
-    }));
+    const documents = groups.reduce((sum, g) => sum + g._count._all, 0);
+    return { sources, emptySources, documents, ...byStatus(groups) };
   });
 
   app.post(`${base}/sources`, async (req, reply) => {

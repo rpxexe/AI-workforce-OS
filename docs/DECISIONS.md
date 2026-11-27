@@ -541,3 +541,22 @@ Real sign-in needs a person. To exercise the UI automatically, temporarily alias
 and `@clerk/nextjs/server` to stubs via `turbopack.resolveAlias`, run the API through
 `buildApp({ authenticate })` with a fixed identity, and drive headless Edge over the DevTools
 protocol. Remove all of it afterwards; none of it is in the repo.
+
+## Unbounded lists page by keyset cursor; counts come from their own request
+
+Every list that can grow without bound (customers, workflows, knowledge sources, archived employees, webhook
+deliveries) pages by keyset (apps/api/src/cursor.ts): the cursor holds the last row's sort value and id and a
+fingerprint of tenant, search and filters, and the next page asks for rows after that pair. OFFSET repeated and
+skipped rows whenever the list changed between clicks (customers move whenever they talk), and grew slower with depth;
+keyset reads only the page (customers: 0.2 ms at row 10,000 of 300k, against 9 ms with OFFSET). It does not freeze
+the list: a row whose sort value changes moves to its new place. Cursors are not signed: every query also filters on
+the caller's tenant, and a cursor used with another search or filter is a 400.
+
+Pages never count. Tiles and "of N" come from a separate counts/summary request per search (customers/counts,
+workflows/summary, knowledge/sources/summary), so changing page costs one indexed range read. The delivery log has no
+count at all. The footer (useCursorPaged, rules in lib/cursor-pages.ts with tests) has first, previous and next but
+no last page, since a page's cursor comes from the one before; Next is off while a page loads.
+
+Bounded lists load whole and page in the browser with `usePaged`: current employees (50 per plan), an employee's
+attached knowledge (20 at most). Migrations that build or drop indexes on big tables use `CREATE/DROP INDEX
+CONCURRENTLY` alone in their file (it cannot run in a transaction).

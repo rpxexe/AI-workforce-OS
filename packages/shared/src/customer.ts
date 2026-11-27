@@ -13,13 +13,19 @@ export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 export const CUSTOMER_FILTERS = ["all", "week", "email", "phone"] as const;
 export type CustomerFilter = (typeof CUSTOMER_FILTERS)[number];
 
-/** ?q= search, ?filter= (seen in the last 7 days, has email, has phone), and a cursor page newest first by last seen. */
+/**
+ * ?q= search, ?filter= (seen in the last 7 days, has email, has phone), ?limit= rows newest first by last seen, and
+ * ?cursor= from the previous page's nextCursor (only valid for the same search and filter).
+ */
 export const listCustomersQuery = z.object({
   q: z.string().trim().max(100).optional(),
   filter: z.enum(CUSTOMER_FILTERS).default("all"),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().min(1).max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(1000).optional(),
 });
+
+/** ?q= for the counts: the same search as the list, every filter counted at once. */
+export const customerCountsQuery = z.object({ q: z.string().trim().max(100).optional() });
 
 /** A person correcting a remembered value. The same safety checks as extraction apply on the server. */
 export const updateMemorySchema = z.object({ value: z.string().trim().min(1, "Enter a value").max(200, "Keep it under 200 characters") });
@@ -47,7 +53,7 @@ export type CustomerSummary = {
   lastSeenAt: string;
 };
 
-/** Whole-workspace counts for the list's tiles and filters; they follow ?q= but not ?filter= or paging. */
+/** GET …/customers/counts: whole-workspace numbers for the tiles and filter chips; they follow ?q=, not ?filter= or paging. */
 export type CustomerCounts = {
   total: number;
   seenThisWeek: number;
@@ -58,8 +64,8 @@ export type CustomerCounts = {
   withCompany: number;
 };
 
-/** One page of the customer list; pass `nextCursor` back as ?cursor= for the next one (null: no more). */
-export type CustomerPage = { data: CustomerSummary[]; nextCursor: string | null; counts: CustomerCounts };
+/** One page of the customer list; `nextCursor` asks for the page after it (null: the list ends here). Counts: GET …/customers/counts. */
+export type CustomerPage = { data: CustomerSummary[]; nextCursor: string | null };
 
 export type CustomerDetail = CustomerSummary & {
   memories: CustomerMemoryItem[];

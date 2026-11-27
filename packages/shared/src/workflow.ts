@@ -362,9 +362,26 @@ export const runWorkflowSchema = z.object({ input: z.record(z.string(), z.unknow
 /** Copies a version (the latest by default) into a new draft workflow. */
 export const duplicateWorkflowSchema = z.object({ version: z.number().int().positive().optional() });
 
+export const WORKFLOW_STATUSES = ["DRAFT", "ACTIVE", "PAUSED"] as const;
+
+/**
+ * The workflow list: ?q= (name or description contains, any case), ?status=, ?deleted=true for deleted ones instead.
+ * The API adds ?limit= and ?cursor= (from the previous page's nextCursor, only valid for the same list). Tiles take ?q= only.
+ */
+export const listWorkflowsQuery = z.object({
+  q: z
+    .string()
+    .trim()
+    .max(100)
+    .optional()
+    .transform((v) => v || undefined),
+  status: z.enum(WORKFLOW_STATUSES).optional(),
+  deleted: z.literal("true").optional(),
+});
+
 // ---- API responses (dates are ISO strings) ----
 
-export type WorkflowStatus = "DRAFT" | "ACTIVE" | "PAUSED";
+export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
 
 export type WorkflowSummary = {
   id: string;
@@ -384,6 +401,21 @@ export type WorkflowListItem = WorkflowSummary & {
   runCount: number;
   lastRunAt: string | null;
   lastRunStatus: WorkflowExecutionStatus | null;
+};
+
+/** One page of the workflow list, newest change first. `nextCursor` asks for the page after it (null: the list ends here). */
+export type WorkflowPage = { data: WorkflowListItem[]; nextCursor: string | null };
+
+/** The list's tiles over every workflow matching ?q= in the workspace (not deleted ones), whatever the page or status. */
+export type WorkflowListSummary = {
+  total: number;
+  statuses: Record<WorkflowStatus, number>;
+  /** The latest version is not the live one (or nothing is live). */
+  unpublished: number;
+  /** Runs of these workflows, ever. */
+  runs: number;
+  /** Workflows whose latest run failed. */
+  failing: number;
 };
 
 /** What deleting a workflow affects. */
