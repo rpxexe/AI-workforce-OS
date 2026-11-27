@@ -5,7 +5,7 @@ import {
   leadFollowUpWorkflow,
   type EmployeeSummary,
   type WorkflowDetail,
-  type WorkflowListItem,
+  type WorkflowPage,
   type WorkflowSummary,
 } from "@workforce/shared";
 import { History, Plus } from "lucide-react";
@@ -14,7 +14,8 @@ import { useState, type FormEvent } from "react";
 import { formatDate } from "@/components/employees/meta";
 import { Skeleton as Skullet } from "skullet/react";
 import { ErrorState, PageHeader } from "@/components/states";
-import { WorkflowList } from "@/components/workflows/workflow-list";
+import { TablePager, useCursorPaged } from "@/components/table-pager";
+import { SAMPLE_PAGE, WorkflowList } from "@/components/workflows/workflow-list";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -23,22 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 
-// Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
-const SAMPLE: WorkflowListItem[] = Array.from({ length: 5 }, (_, i) => ({
-  id: `sample-${i}`,
-  name: "New lead follow-up",
-  description: "Call new leads and book a meeting",
-  status: "ACTIVE",
-  latestVersion: 2,
-  publishedVersion: 2,
-  updatedAt: "2026-01-01T00:00:00.000Z",
-  deletedAt: "2026-01-01T00:00:00.000Z",
-  trigger: "manual",
-  runCount: 12,
-  lastRunAt: "2026-01-01T00:00:00.000Z",
-  lastRunStatus: "COMPLETED",
-}));
-const SAMPLE_DELETED = SAMPLE.slice(0, 3);
+const SAMPLE_DELETED: WorkflowPage = { data: SAMPLE_PAGE.data.slice(0, 3), nextCursor: null };
 
 function NewWorkflow({ workspaceId, onCancel }: { workspaceId: string; onCancel: () => void }) {
   const api = useApi();
@@ -128,10 +114,15 @@ function NewWorkflow({ workspaceId, onCancel }: { workspaceId: string; onCancel:
   );
 }
 
-/** Deleted workflows, newest first, each with Restore. Admins only. */
+/** Deleted workflows, newest first, a cursor page at a time, each with Restore. Admins only. */
 function DeletedWorkflows({ workspaceId, onRestored }: { workspaceId: string; onRestored: () => void }) {
   const api = useApi();
-  const { data, error, reload } = useApiQuery<WorkflowSummary[]>(`/workspaces/${workspaceId}/workflows?deleted=true`);
+  const paged = useCursorPaged("deleted");
+  const { data, error, loading, reload } = useApiQuery<WorkflowPage>(`/workspaces/${workspaceId}/workflows?deleted=true&${paged.query}`, {
+    keepPrevious: true,
+  });
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({ nextCursor: loading ? null : (data?.nextCursor ?? null), rows: loading ? 1 : (data?.data.length ?? 1) });
   const [busy, setBusy] = useState<string>();
   if (error) return <ErrorState message={error.message} onRetry={reload} />;
   const restore = async (workflow: WorkflowSummary) => {
@@ -148,11 +139,11 @@ function DeletedWorkflows({ workspaceId, onRestored }: { workspaceId: string; on
   };
   return (
     <Skullet data={data} sample={SAMPLE_DELETED} id="workflows-deleted" label="Loading deleted workflows">
-      {(data) => data.length === 0 ? <p className="text-sm text-muted-foreground">No deleted workflows.</p> : (
+      {(page) => page.data.length === 0 ? <p className="text-sm text-muted-foreground">No deleted workflows.</p> : (
     <div className="flex flex-col gap-2">
       <Card className="gap-0 py-0">
         <ul className="divide-y">
-          {data.map((w) => (
+          {page.data.map((w) => (
             <li key={w.id} className="flex items-center justify-between gap-4 px-4 py-3">
               <span className="min-w-0">
                 <span className="block truncate font-medium">{w.name}</span>
@@ -165,6 +156,7 @@ function DeletedWorkflows({ workspaceId, onRestored }: { workspaceId: string; on
             </li>
           ))}
         </ul>
+        <TablePager {...pager} className="border-t px-4 py-3" />
       </Card>
       <p className="text-xs text-muted-foreground">A restored workflow comes back paused. Resume it to run it again.</p>
     </div>
@@ -175,8 +167,9 @@ function DeletedWorkflows({ workspaceId, onRestored }: { workspaceId: string; on
 
 export default withWorkspace(function WorkflowsPage({ workspace }) {
   const isAdmin = useIsAdmin();
-  const { data, error, reload } = useApiQuery<WorkflowListItem[]>(`/workspaces/${workspace.id}/workflows`);
   const [creating, setCreating] = useState(false);
+  // Bumped after a restore so the list and its tiles load again.
+  const [refresh, setRefresh] = useState(0);
   const [showDeleted, setShowDeleted] = useState(false);
 
   const newButton = isAdmin && !creating && (
@@ -192,19 +185,13 @@ export default withWorkspace(function WorkflowsPage({ workspace }) {
         {newButton}
       </PageHeader>
       {creating && <NewWorkflow workspaceId={workspace.id} onCancel={() => setCreating(false)} />}
-      {error ? (
-        <ErrorState message={error.message} onRetry={reload} />
-      ) : (
-        <Skullet data={data} sample={SAMPLE} id="workflows-list" label="Loading workflows">
-          {(data) => <WorkflowList data={data} isAdmin={isAdmin} newButton={newButton} />}
-        </Skullet>
-      )}
+      <WorkflowList workspaceId={workspace.id} isAdmin={isAdmin} newButton={newButton} refresh={refresh} />
       {isAdmin && (
         <div className="flex flex-col gap-3">
           <Button variant="ghost" size="sm" className="w-fit" onClick={() => setShowDeleted((v) => !v)} aria-expanded={showDeleted}>
             {showDeleted ? "Hide deleted workflows" : "Show deleted workflows"}
           </Button>
-          {showDeleted && <DeletedWorkflows workspaceId={workspace.id} onRestored={reload} />}
+          {showDeleted && <DeletedWorkflows workspaceId={workspace.id} onRestored={() => setRefresh((n) => n + 1)} />}
         </div>
       )}
     </div>

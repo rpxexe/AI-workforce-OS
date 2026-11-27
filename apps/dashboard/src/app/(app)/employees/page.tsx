@@ -25,7 +25,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LANGUAGES } from "@workforce/shared";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged, useServerPaged, type Pager } from "@/components/table-pager";
+import { TablePager, useCursorPaged, usePaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
@@ -62,13 +62,14 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
   const needle = query.trim().toLowerCase();
   const matches = current.data && (needle ? current.data.filter((e) => e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle)) : current.data);
   const local = usePaged(matches ?? [], 20, needle);
-  // Archived: not plan-limited, so each page and the search come from the server.
-  const paged = useServerPaged(search);
+  // Archived: not plan-limited, so cursor pages and the search come from the server (a new search starts at page 1).
+  const paged = useCursorPaged(search);
   const old = useApiQuery<EmployeePage>(
     archived ? `${base}?archived=true&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}` : null,
     { keepPrevious: true },
   );
-  const serverPager = paged.pager(old.data?.total ?? 0);
+  // While a page loads, `old.data` is still the previous one: its cursor must not open yet another page.
+  const serverPager = paged.pager({ nextCursor: old.loading ? null : (old.data?.nextCursor ?? null), rows: old.loading ? 1 : (old.data?.data.length ?? 1) });
 
   const { error, loading, reload } = archived ? old : current;
   const view = archived
@@ -215,7 +216,8 @@ function EmployeeList({
   setStatus: (id: string, status: "PAUSED" | "ARCHIVED") => void;
   setConfirm: (confirm: Confirmation) => void;
 }) {
-  return pager.total === 0 && !searching ? (
+  // Page 1 has no rows: the tab is empty, or nothing matches the search.
+  return rows.length === 0 && pager.page === 0 && !searching ? (
         archived ? (
           <EmptyState icon={Archive} title="No archived employees" description="Employees you archive are kept here and can be restored." />
         ) : (
@@ -231,7 +233,7 @@ function EmployeeList({
             {newButton}
           </EmptyState>
         )
-      ) : pager.total === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState icon={SearchX} title={`No employees match "${query.trim()}"`} description="Try another name or role.">
           <Button variant="outline" onClick={clearQuery}>
             Clear search

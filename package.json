@@ -7,7 +7,7 @@
     "dev": "pnpm --parallel --filter @workforce/api --filter @workforce/dashboard dev",
     "typecheck": "tsc --noEmit && pnpm --filter @workforce/dashboard typecheck",
     "lint": "eslint . && pnpm --filter @workforce/dashboard lint",
-    "test": "pnpm --filter @workforce/api test",
+    "test": "pnpm --filter @workforce/api test && pnpm --filter @workforce/dashboard test",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "db:generate": "pnpm --filter @workforce/database generate",

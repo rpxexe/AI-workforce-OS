@@ -108,7 +108,8 @@ model AiEmployee {
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
 
-  @@index([organizationId, workspaceId, status])
+  // A tab (current or archived) newest change first; also serves every lookup by status alone.
+  @@index([organizationId, workspaceId, status, updatedAt])
   @@map("AIEmployee")
 }
 

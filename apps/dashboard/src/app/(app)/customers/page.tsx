@@ -35,12 +35,7 @@ const FILTERS: Record<CustomerFilter, { label: string; count: (c: CustomerCounts
   phone: { label: "Has phone", count: (c) => c.withPhone },
 };
 type Filter = CustomerFilter;
-const SAMPLE_PAGE: CustomerPage = {
-  data: SAMPLE,
-  nextCursor: null,
-  total: 6,
-  counts: { total: 6, seenThisWeek: 6, withEmail: 6, withPhone: 6, reachable: 6, withCompany: 6 },
-};
+const SAMPLE_PAGE: CustomerPage = { data: SAMPLE, nextCursor: null };
 
 export default withWorkspace(function CustomersPage({ workspace }) {
   const [query, setQuery] = useState("");
@@ -58,8 +53,14 @@ export default withWorkspace(function CustomersPage({ workspace }) {
   const paged = useCursorPaged(`${search}:${filter}`);
   const path = `${base}?filter=${filter}&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
   const { data, error, loading, reload } = useApiQuery<CustomerPage>(path, { keepPrevious: true });
+  // Tiles and filter counts: one request per search, not per page or filter.
+  const { data: counts } = useApiQuery<CustomerCounts>(`${base}/counts${search ? `?q=${encodeURIComponent(search)}` : ""}`, { keepPrevious: true });
   // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
-  const pager = paged.pager({ total: data?.total ?? 0, nextCursor: loading ? null : (data?.nextCursor ?? null), rows: loading ? 1 : (data?.data.length ?? 1) });
+  const pager = paged.pager({
+    nextCursor: loading ? null : (data?.nextCursor ?? null),
+    rows: loading ? 1 : (data?.data.length ?? 1),
+    total: counts && FILTERS[filter].count(counts),
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -68,7 +69,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
         description={`People your AI employees in the ${workspace.name} workspace have talked to, and what they remember about them.`}
       />
 
-      {!error && <Stats counts={data?.counts} search={search} />}
+      {!error && <Stats counts={counts} search={search} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <InputGroup className="sm:max-w-sm">
@@ -96,7 +97,7 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           {(Object.keys(FILTERS) as Filter[]).map((k) => (
             <ToggleGroupItem key={k} value={k} className="px-3">
               {FILTERS[k].label}
-              {data && k !== "all" && <span className="text-muted-foreground tabular-nums">{FILTERS[k].count(data.counts).toLocaleString()}</span>}
+              {counts && k !== "all" && <span className="text-muted-foreground tabular-nums">{FILTERS[k].count(counts).toLocaleString()}</span>}
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
@@ -109,7 +110,6 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           {(page) => (
             <CustomerList
               data={page.data}
-              total={page.counts.total}
               pager={pager}
               search={search}
               filter={filter}
@@ -138,7 +138,6 @@ function Stats({ counts, search }: { counts: CustomerCounts | undefined; search:
 
 function CustomerList({
   data,
-  total,
   pager,
   search,
   filter,
@@ -146,14 +145,14 @@ function CustomerList({
   clearFilter,
 }: {
   data: CustomerSummary[];
-  total: number;
   pager: Pager;
   search: string;
   filter: Filter;
   loading: boolean;
   clearFilter: () => void;
 }) {
-  if (total === 0) {
+  // Page 1 empty: nobody at all (or for the search) under "All"; under another filter, nobody it keeps.
+  if (data.length === 0 && filter === "all") {
     return search ? (
       <EmptyState icon={SearchX} title="No customers match" description={`Nobody found for “${search}”. Try part of a name, email or phone number.`} />
     ) : (
@@ -164,7 +163,7 @@ function CustomerList({
       />
     );
   }
-  if (pager.total === 0) {
+  if (data.length === 0) {
     return (
       <EmptyState icon={SearchX} title={`No customers match “${FILTERS[filter].label}”`} description="Try another filter.">
         <Button variant="outline" onClick={clearFilter}>

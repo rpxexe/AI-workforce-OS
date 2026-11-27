@@ -22,6 +22,15 @@ export const uploadQuerySchema = z.object({
     .refine((name) => knowledgeKindOf(name) !== undefined, "Upload a PDF, DOCX, TXT or CSV file"),
 });
 
+export const KNOWLEDGE_SOURCE_FILTERS = ["all", "filled", "empty"] as const;
+export type KnowledgeSourceFilter = (typeof KNOWLEDGE_SOURCE_FILTERS)[number];
+
+/** ?q= searches source names and descriptions; ?filter= keeps sources with documents (filled) or without (empty). Paging fields are added by the API. */
+export const listKnowledgeSourcesQuery = z.object({
+  q: z.string().trim().max(100).optional(),
+  filter: z.enum(KNOWLEDGE_SOURCE_FILTERS).default("all"),
+});
+
 /** Replaces the set of sources an employee answers from. */
 export const employeeKnowledgeSchema = z.object({ sourceIds: z.array(z.string().min(1)).max(20) });
 
@@ -58,7 +67,20 @@ export type KnowledgeSource = {
 /** A source in the list, with its documents counted by status (processing includes pending). */
 export type KnowledgeSourceSummary = KnowledgeSource & { readyDocuments: number; processingDocuments: number; failedDocuments: number };
 
-export type KnowledgeSourceDetail = KnowledgeSource & { documents: KnowledgeDocument[] };
+/** One page of sources, by name; `nextCursor` opens the next page, null on the last. */
+export type KnowledgeSourcePage = { data: KnowledgeSourceSummary[]; nextCursor: string | null };
+
+/** Headline numbers over every source matching the search (processing includes pending). */
+export type KnowledgeSourceCounts = {
+  sources: number;
+  emptySources: number;
+  documents: number;
+  readyDocuments: number;
+  processingDocuments: number;
+  failedDocuments: number;
+};
+
+export type KnowledgeSourceDetail =KnowledgeSource & { documents: KnowledgeDocument[] };
 
 /** One excerpt found by a search, with enough to trace it back to where it came from. */
 export type KnowledgeMatch = {

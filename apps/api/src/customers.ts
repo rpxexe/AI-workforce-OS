@@ -1,6 +1,7 @@
 import { prisma, type Prisma } from "@workforce/database";
 import { factWrites, PROFILE_KEYS, validFact } from "@workforce/memory";
 import {
+  customerCountsQuery,
   listCustomersQuery,
   updateMemorySchema,
   type CustomerDetail,
@@ -70,54 +71,60 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
     return memory;
   };
 
+  /** The search's match, shared by the list and the counts so the tiles always agree with the rows. */
+  const searchOf = (scope: Member & { workspaceId: string }, q: string | undefined): Prisma.CustomerWhereInput => {
+    const like = { contains: q, mode: "insensitive" as const };
+    return {
+      ...within(scope),
+      ...(q && { OR: [{ externalId: like }, { profile: { OR: [{ name: like }, { email: like }, { phone: like }, { company: like }] } }] }),
+    };
+  };
+  const weekAgo = () => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  // One page of customers, newest seen first. No counting here: the tiles come from /customers/counts, once per search.
   app.get("/workspaces/:workspaceId/customers", async (req): Promise<CustomerPage> => {
     const { workspaceId } = customerParams.pick({ workspaceId: true }).parse(req.params);
     const { q, filter, limit, cursor } = listCustomersQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
     // A cursor only continues the list it came from: same workspace, search and filter.
     const context = pagingContext(scope.workspaceId, q, filter);
-    const after = decodeCursor(cursor, context);
-    const like = { contains: q, mode: "insensitive" as const };
-    const where: Prisma.CustomerWhereInput = {
-      ...within(scope),
-      ...(q && {
-        OR: [{ externalId: like }, { profile: { OR: [{ name: like }, { email: like }, { phone: like }, { company: like }] } }],
-      }),
-    };
-    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const has = (field: "email" | "phone" | "company"): Prisma.CustomerWhereInput => ({ profile: { [field]: { not: null } } });
+    const after = decodeCursor(cursor, context, "date");
+    const has = (field: "email" | "phone"): Prisma.CustomerWhereInput => ({ profile: { [field]: { not: null } } });
     const filters: Record<CustomerFilter, Prisma.CustomerWhereInput> = {
       all: {},
-      week: { lastSeenAt: { gte: weekAgo } },
+      week: { lastSeenAt: { gte: weekAgo() } },
       email: has("email"),
       phone: has("phone"),
     };
-    // Same match as `where` (Prisma's insensitive contains, wildcards escaped), so the tiles agree with the list.
-    const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
-    const [rows, [counts]] = await Promise.all([
-      prisma.customer.findMany({
-        where: { AND: [where, filters[filter], keysetAfter("lastSeenAt", after)] },
-        include: { profile: true },
-        orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
-        take: limit + 1,
-      }),
-      // Every tile in one pass over the search's customers, not one count query each.
-      prisma.$queryRaw<CustomerCounts[]>`
-        SELECT count(*)::int AS total,
-               (count(*) FILTER (WHERE c."lastSeenAt" >= ${weekAgo}))::int AS "seenThisWeek",
-               count(p.email)::int AS "withEmail",
-               count(p.phone)::int AS "withPhone",
-               (count(*) FILTER (WHERE p.email IS NOT NULL OR p.phone IS NOT NULL))::int AS reachable,
-               count(p.company)::int AS "withCompany"
-        FROM "Customer" c LEFT JOIN "CustomerProfile" p ON p."customerId" = c.id
-        WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId}
-          AND (${term}::text IS NULL OR c."externalId" ILIKE ${term} OR p.name ILIKE ${term}
-               OR p.email ILIKE ${term} OR p.phone ILIKE ${term} OR p.company ILIKE ${term})`,
-    ]);
-    const c = counts!;
-    const total = { all: c.total, week: c.seenThisWeek, email: c.withEmail, phone: c.withPhone }[filter];
+    const rows = await prisma.customer.findMany({
+      where: { AND: [searchOf(scope, q), filters[filter], keysetAfter("lastSeenAt", after)] },
+      include: { profile: true },
+      orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    });
     const { page, nextCursor } = keysetPage(rows, limit, (r) => r.lastSeenAt, context);
-    return { data: page.map(toSummary), nextCursor, total, counts: c };
+    return { data: page.map(toSummary), nextCursor };
+  });
+
+  // The tiles and filter counts for a search: every number in one pass over the search's customers.
+  app.get("/workspaces/:workspaceId/customers/counts", async (req): Promise<CustomerCounts> => {
+    const { workspaceId } = customerParams.pick({ workspaceId: true }).parse(req.params);
+    const { q } = customerCountsQuery.parse(req.query);
+    const scope = await inWorkspace(member(req), workspaceId);
+    // Same match as searchOf (Prisma's insensitive contains, wildcards escaped).
+    const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
+    const [counts] = await prisma.$queryRaw<CustomerCounts[]>`
+      SELECT count(*)::int AS total,
+             (count(*) FILTER (WHERE c."lastSeenAt" >= ${weekAgo()}))::int AS "seenThisWeek",
+             count(p.email)::int AS "withEmail",
+             count(p.phone)::int AS "withPhone",
+             (count(*) FILTER (WHERE p.email IS NOT NULL OR p.phone IS NOT NULL))::int AS reachable,
+             count(p.company)::int AS "withCompany"
+      FROM "Customer" c LEFT JOIN "CustomerProfile" p ON p."customerId" = c.id
+      WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId}
+        AND (${term}::text IS NULL OR c."externalId" ILIKE ${term} OR p.name ILIKE ${term}
+             OR p.email ILIKE ${term} OR p.phone ILIKE ${term} OR p.company ILIKE ${term})`;
+    return counts!;
   });
 
   app.get("/workspaces/:workspaceId/customers/:customerId", async (req): Promise<CustomerDetail> => {

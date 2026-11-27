@@ -39,7 +39,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { TablePager, useServerPaged } from "@/components/table-pager";
+import { TablePager, useCursorPaged } from "@/components/table-pager";
 import { API_URL, ApiRequestError, useApi, useApiQuery } from "@/lib/api";
 import { useWorkspaces } from "@/lib/workspace";
 
@@ -585,17 +585,19 @@ type HookSheet =
 function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAdmin: boolean }) {
   const api = useApi();
   const [event, setEvent] = useState("all");
-  const [result, setResult] = useState<WebhookDeliveryPage | null>(null);
+  // The page shown and the request it answered, so a page still loading is told apart from the one shown.
+  const [result, setResult] = useState<{ path: string; page: WebhookDeliveryPage } | null>(null);
   const [error, setError] = useState<string>();
-  // Each page comes from the server; another event filter starts at page 1.
-  const paged = useServerPaged(event, 10);
-  const pager = paged.pager(result?.total ?? 0);
+  // A log: cursor pages from the server, no total. Another event filter starts again at page 1.
+  const paged = useCursorPaged(event, 10);
   const path = `/developer/webhooks/${endpoint.id}/deliveries?${paged.query}${event === "all" ? "" : `&event=${event}`}`;
+  const loading = result?.path !== path;
+  const pager = paged.pager({ nextCursor: loading ? null : (result?.page.nextCursor ?? null), rows: loading ? 1 : (result?.page.data.length ?? 1) });
   const load = useCallback(
     () =>
       api<WebhookDeliveryPage>(path).then(
         (page) => {
-          setResult(page);
+          setResult({ path, page });
           setError(undefined);
         },
         (err: unknown) => setError(errorOf(err)),
@@ -639,7 +641,7 @@ function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAd
           Refresh
         </Button>
       </div>
-      <Skullet data={result?.data ?? null} sample={SAMPLE_DELIVERIES} id="webhook-deliveries" label="Loading deliveries">
+      <Skullet data={result?.page.data ?? null} sample={SAMPLE_DELIVERIES} id="webhook-deliveries" label="Loading deliveries">
         {(items) =>
           items.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing sent yet. Events appear here within seconds of happening.</p>

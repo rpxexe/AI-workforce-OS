@@ -20,8 +20,8 @@ import {
   type WorkflowDetail,
   type WorkflowExecutionDetail,
   type WorkflowExecutionSummary,
-  type WorkflowListItem,
-  type WorkflowSummary,
+  type WorkflowListSummary,
+  type WorkflowPage,
   type Workspace,
 } from "@workforce/shared";
 import type { STTProvider } from "@workforce/stt";
@@ -35,9 +35,11 @@ import { adminOf, deleteOrgs, headerAuth, memberOf, newOrg } from "./testing.ts"
 const TZ = "Asia/Kolkata";
 const orgA = newOrg();
 const orgB = newOrg();
+const orgC = newOrg(); // an empty workspace of its own, so list pages and tiles are exact
 let app: Awaited<ReturnType<typeof buildApp>>;
 let ws: string;
 let wsB: string;
+let wsC: string;
 let ava: string; // published, has a phone number and the calendar tool
 const bus = liveBus();
 
@@ -152,6 +154,7 @@ before(async () => {
   const workspaceOf = async (org: string) => (await inject("GET", "/workspaces", undefined, adminOf(org))).json<Workspace[]>()[0]?.id ?? "";
   ws = await workspaceOf(orgA);
   wsB = await workspaceOf(orgB);
+  wsC = await workspaceOf(orgC);
   const res = await inject("POST", `/workspaces/${ws}/employees`, { ...defaultEmployeeConfig(TZ), name: "Ava", role: "Sales assistant" });
   ava = res.json<EmployeeDetail>().id;
   assert.equal((await inject("POST", `/workspaces/${ws}/employees/${ava}/publish`, { version: 1 })).statusCode, 200);
@@ -178,7 +181,7 @@ beforeEach(() => {
   respond = () => Response.json({ ok: true });
 });
 after(async () => {
-  await deleteOrgs(orgA, orgB);
+  await deleteOrgs(orgA, orgB, orgC);
   await app.close();
 });
 
@@ -340,7 +343,7 @@ test("a failed step fails the run; retry runs it again from that step", async ()
   );
   assert.deepEqual(done.steps[3]?.output, { status: 200, body: { received: true } });
   // The list shows the trigger, how many runs and how the latest one ended (a retry is the same run).
-  const row = (await inject("GET", `/workspaces/${ws}/workflows`)).json<WorkflowListItem[]>().find((w) => w.id === id);
+  const row = (await inject("GET", `/workspaces/${ws}/workflows?limit=100`)).json<WorkflowPage>().data.find((w) => w.id === id);
   assert.deepEqual([row?.trigger, row?.runCount, row?.lastRunStatus], ["manual", 1, "COMPLETED"]);
   assert.ok(row?.lastRunAt);
   // Only failed runs can be retried.
@@ -422,17 +425,126 @@ test("roles, isolation and the webhook token", async () => {
   // Another organization sees nothing.
   assert.equal((await inject("GET", `/workspaces/${ws}/workflows/${id}`, undefined, adminOf(orgB))).statusCode, 404);
   assert.equal((await inject("GET", `/workspaces/${wsB}/workflows/${id}`, undefined, adminOf(orgB))).statusCode, 404);
-  assert.deepEqual((await inject("GET", `/workspaces/${wsB}/workflows`, undefined, adminOf(orgB))).json(), []);
+  assert.deepEqual((await inject("GET", `/workspaces/${wsB}/workflows`, undefined, adminOf(orgB))).json(), { data: [], nextCursor: null });
   // A draft's trigger comes from its latest version; never run means no runs.
   const hooked = blankWorkflow();
   const webhook = await createWorkflow({ ...hooked, nodes: hooked.nodes.map((n) => (n.type === "trigger" ? { ...n, config: { kind: "webhook" } } : n)) });
-  const listed = (await inject("GET", `/workspaces/${ws}/workflows`)).json<WorkflowListItem[]>().find((w) => w.id === webhook.id);
+  const listed = (await inject("GET", `/workspaces/${ws}/workflows?limit=100`)).json<WorkflowPage>().data.find((w) => w.id === webhook.id);
   assert.deepEqual([listed?.trigger, listed?.runCount, listed?.lastRunAt, listed?.lastRunStatus], ["webhook", 0, null, null]);
   // A wrong token is a 404; a manual-trigger workflow cannot be started by webhook.
   const path = new URL(hookUrl ?? "").pathname;
   assert.equal((await app.inject({ method: "POST", url: `${path}x`, payload: {} })).statusCode, 404);
   await publish(id);
   assert.equal((await app.inject({ method: "POST", url: path, payload: {} })).statusCode, 409);
+});
+
+test("the list pages with cursors, searches and filters on the server; the tiles count the whole workspace", async () => {
+  const adminC = adminOf(orgC);
+  const callC = (method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, payload?: unknown, headers: Headers = adminC) =>
+    inject(method, `/workspaces/${wsC}/workflows${path}`, payload, headers);
+  const list = async (query: string) => {
+    const res = await callC("GET", `?${query}`);
+    assert.equal(res.statusCode, 200, res.payload);
+    return res.json<WorkflowPage>();
+  };
+  const summary = async (query = "") => (await callC("GET", `/summary${query}`)).json<WorkflowListSummary>();
+  /** Follows nextCursor to the end and returns every page's names. */
+  const walk = async (query: string) => {
+    const pages: string[][] = [];
+    let cursor: string | null = null;
+    do {
+      const page: WorkflowPage = await list(`${query}&limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      pages.push(page.data.map((w) => w.name));
+      cursor = page.nextCursor;
+    } while (cursor);
+    return pages;
+  };
+
+  assert.deepEqual(await list(""), { data: [], nextCursor: null });
+  assert.deepEqual(await summary(), { total: 0, statuses: { DRAFT: 0, ACTIVE: 0, PAUSED: 0 }, unpublished: 0, runs: 0, failing: 0 });
+
+  const ids: Record<string, string> = {};
+  for (const [name, description] of [
+    ["Alpha", "Calls new leads"],
+    ["Beta", ""],
+    ["Gamma", "Welcome email"],
+    ["Delta", "Lead nurture"],
+    ["Epsilon 100%", ""],
+  ]) {
+    const res = await callC("POST", "", { name, description, definition: blankWorkflow() });
+    assert.equal(res.statusCode, 201, res.payload);
+    ids[name!] = res.json<WorkflowDetail>().id;
+  }
+  // Alpha and Beta live (ACTIVE), Beta then paused; Gamma live with a newer draft saved after; Delta and Epsilon drafts.
+  for (const name of ["Alpha", "Beta", "Gamma"]) assert.equal((await callC("POST", `/${ids[name]}/publish`, { version: 1 })).statusCode, 200);
+  assert.equal((await callC("PATCH", `/${ids.Beta}/status`, { status: "PAUSED" })).statusCode, 200);
+  assert.equal((await callC("PUT", `/${ids.Gamma}`, { name: "Gamma", description: "Welcome email", definition: blankWorkflow() })).statusCode, 200);
+  // Runs written directly (finished, so the runner leaves them alone): Alpha's latest failed, Beta's earlier one did.
+  const runOf = async (name: string, status: "COMPLETED" | "FAILED", minutesAgo: number) => {
+    const version = await prisma.workflowVersion.findFirstOrThrow({ where: { workflowId: ids[name] }, orderBy: { number: "asc" } });
+    await prisma.workflowExecution.create({
+      data: {
+        organizationId: orgC,
+        workspaceId: wsC,
+        workflowId: ids[name]!,
+        versionId: version.id,
+        status,
+        input: {},
+        startedBy: "test",
+        runAt: null,
+        finishedAt: new Date(),
+        createdAt: new Date(Date.now() - minutesAgo * 60_000),
+      },
+    });
+  };
+  await runOf("Alpha", "COMPLETED", 3);
+  await runOf("Alpha", "FAILED", 1);
+  await runOf("Beta", "FAILED", 3);
+  await runOf("Beta", "COMPLETED", 1);
+  await runOf("Gamma", "COMPLETED", 1);
+
+  // Newest change first, two at a time, ending with no cursor; the rows carry their own runs.
+  const all = await list("limit=100");
+  assert.deepEqual(all.data.map((w) => w.name), ["Gamma", "Beta", "Alpha", "Epsilon 100%", "Delta"]);
+  assert.deepEqual(await walk(""), [["Gamma", "Beta"], ["Alpha", "Epsilon 100%"], ["Delta"]]);
+  const alpha = all.data.find((w) => w.name === "Alpha");
+  assert.deepEqual([alpha?.runCount, alpha?.lastRunStatus, alpha?.trigger], [2, "FAILED", "manual"]);
+
+  // Search (name or description, any case, % taken literally) and status, across pages.
+  assert.deepEqual(await walk("q=LEAD"), [["Alpha", "Delta"]]);
+  assert.deepEqual(await walk("q=a"), [["Gamma", "Beta"], ["Alpha", "Delta"]]);
+  assert.deepEqual(await walk("q=100%25"), [["Epsilon 100%"]]);
+  assert.deepEqual(await walk("status=DRAFT"), [["Epsilon 100%", "Delta"]]);
+  assert.deepEqual(await walk("status=ACTIVE&q=a"), [["Gamma", "Alpha"]]);
+  assert.deepEqual(await list("q=nothing-like-this"), { data: [], nextCursor: null });
+
+  assert.deepEqual(await summary(), {
+    total: 5,
+    statuses: { DRAFT: 2, ACTIVE: 2, PAUSED: 1 },
+    unpublished: 3, // Gamma (v2 not live), Delta and Epsilon (never published)
+    runs: 5,
+    failing: 1, // Alpha; Beta's failure is not its latest run
+  });
+  assert.deepEqual(await summary("?q=lead"), { total: 2, statuses: { DRAFT: 1, ACTIVE: 1, PAUSED: 0 }, unpublished: 1, runs: 2, failing: 1 });
+
+  // A cursor only continues its own list: another search, status or the deleted list is a 400, as is garbage.
+  const first = await list("limit=2");
+  assert.ok(first.nextCursor);
+  for (const other of [`q=a&cursor=${first.nextCursor}`, `status=DRAFT&cursor=${first.nextCursor}`, `deleted=true&cursor=${first.nextCursor}`, "cursor=nope"])
+    assert.equal((await callC("GET", `?limit=2&${other}`)).statusCode, 400, other);
+  for (const bad of ["limit=0", "limit=101", "status=nope"]) assert.equal((await callC("GET", `?${bad}`)).statusCode, 400, bad);
+
+  // Deleted ones leave the list and the tiles, and page in a list of their own.
+  for (const name of ["Delta", "Epsilon 100%"]) assert.equal((await callC("DELETE", `/${ids[name]}`)).statusCode, 204);
+  assert.deepEqual(await walk(""), [["Gamma", "Beta"], ["Alpha"]]);
+  assert.deepEqual(await walk("deleted=true"), [["Epsilon 100%", "Delta"]]);
+  assert.ok((await list("deleted=true")).data.every((w) => w.deletedAt));
+  assert.deepEqual([(await summary()).total, (await summary()).statuses.DRAFT], [3, 0]);
+
+  // Another organization: its own (empty) list, and a 404 for this workspace.
+  assert.equal((await callC("GET", "", undefined, adminOf(orgA))).statusCode, 404);
+  assert.equal((await callC("GET", "/summary", undefined, adminOf(orgA))).statusCode, 404);
+  assert.equal((await inject("GET", `/workspaces/${wsB}/workflows/summary`, undefined, adminOf(orgB))).json<WorkflowListSummary>().total, 0);
 });
 
 test("validation: references to other steps, and yes/no paths only out of conditions", () => {
@@ -473,8 +585,8 @@ test("delete checks what depends on the workflow and asks before stopping runs; 
   const stopped = await execution(started.id);
   assert.deepEqual([stopped.status, stopped.error], ["FAILED", "Stopped: the workflow was deleted"]);
   assert.equal((await inject("GET", `/workspaces/${ws}/workflows/${id}`)).statusCode, 404);
-  assert.ok(!(await inject("GET", `/workspaces/${ws}/workflows`)).json<WorkflowSummary[]>().some((w) => w.id === id));
-  const deleted = (await inject("GET", `/workspaces/${ws}/workflows?deleted=true`)).json<WorkflowSummary[]>().find((w) => w.id === id);
+  assert.ok(!(await inject("GET", `/workspaces/${ws}/workflows?limit=100`)).json<WorkflowPage>().data.some((w) => w.id === id));
+  const deleted = (await inject("GET", `/workspaces/${ws}/workflows?deleted=true`)).json<WorkflowPage>().data.find((w) => w.id === id);
   assert.ok(deleted?.deletedAt);
   assert.equal((await inject("POST", `/workspaces/${ws}/workflows/${id}/executions`, { input: {} })).statusCode, 404);
   assert.equal((await inject("POST", `/workspaces/${ws}/workflow-executions/${started.id}/retry`)).statusCode, 409);

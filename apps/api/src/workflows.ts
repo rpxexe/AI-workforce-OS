@@ -10,6 +10,7 @@ import {
   runWorkflowSchema,
   saveWorkflowSchema,
   setWorkflowStatusSchema,
+  listWorkflowsQuery,
   validateWorkflow,
   workflowDefinitionSchema,
   type ApiError,
@@ -22,12 +23,16 @@ import {
   type WorkflowExecutionSummary,
   type WorkflowIssue,
   type WorkflowListItem,
+  type WorkflowListSummary,
+  type WorkflowPage,
+  type WorkflowStatus,
   type WorkflowSummary,
 } from "@workforce/shared";
 import { WorkflowStartError, type WorkflowEngine } from "@workforce/workflows";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
+import { cursorQuery, decodeCursor, keysetAfter, keysetPage, pagingContext } from "./cursor.ts";
 import { within } from "./employees.ts";
 
 type Tenant = { organizationId: string; workspaceId: string };
@@ -37,7 +42,7 @@ const workflowParams = workspaceParams.extend({ id: z.string().min(1) });
 const executionParams = workspaceParams.extend({ executionId: z.string().min(1) });
 const hookParams = z.object({ id: z.string().min(1), token: z.string().min(1) });
 const versionQuery = z.object({ version: z.coerce.number().int().positive().optional() });
-const listQuery = z.object({ deleted: z.literal("true").optional() });
+const listQuery = listWorkflowsQuery.extend(cursorQuery);
 const deleteQuery = z.object({ stopRuns: z.literal("true").optional() });
 const IN_PROGRESS = ["QUEUED", "RUNNING", "WAITING"] as const;
 
@@ -79,7 +84,13 @@ const toExecution = (e: Prisma.WorkflowExecutionGetPayload<{ include: typeof exe
   runAt: e.runAt?.toISOString() ?? null,
 });
 
-const sameSecret = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** The tenant's workflows, narrowed to names or descriptions containing `q` (any case) when given. */
+const searchOf = (scope: Tenant, q: string | undefined): Prisma.WorkflowWhereInput => ({
+  ...within(scope),
+  ...(q && { OR: [{ name: { contains: q, mode: "insensitive" } }, { description: { contains: q, mode: "insensitive" } }] }),
+});
+
+const sameSecret =(a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /**
  * Workflows (the journey builder): definitions and their versions, publishing, pausing, runs.
@@ -177,20 +188,23 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
     return err;
   };
 
-  app.get(base, async (req): Promise<WorkflowListItem[]> => {
+  app.get(base, async (req): Promise<WorkflowPage> => {
     const { workspaceId } = workspaceParams.parse(req.params);
+    const { q, status, deleted, limit, cursor } = listQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
-    const { deleted } = listQuery.parse(req.query);
-    const workflows = await prisma.workflow.findMany({
-      where: { ...within(scope), deletedAt: deleted ? { not: null } : null },
-      orderBy: { updatedAt: "desc" },
-      // shortcut: the whole list (the page searches, filters, counts and pages it in the browser); move those to the
-      // server with a cursor, as on Customers, when a workspace has thousands of workflows
+    // A cursor only continues the list it came from: same workspace, search, status and deleted or not.
+    const context = pagingContext(scope.workspaceId, q, status, deleted);
+    const after = decodeCursor(cursor, context, "date");
+    const rows = await prisma.workflow.findMany({
+      where: { AND: [{ ...searchOf(scope, q), deletedAt: deleted ? { not: null } : null, status }, keysetAfter("updatedAt", after)] },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
       include: {
         versions: { ...summaryInclude.versions, select: { ...summaryInclude.versions.select, definition: true }, take: 1 },
         publishedVersion: { select: { number: true, definition: true } },
       },
     });
+    const { page: workflows, nextCursor } = keysetPage(rows, limit, (w) => w.updatedAt, context);
     const ids = workflows.map((w) => w.id);
     // Each workflow's latest run and its run count in one pass over the (workflowId, createdAt) index.
     const runs = ids.length
@@ -202,7 +216,7 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
           ORDER BY "workflowId", "createdAt" DESC, id DESC`
       : [];
     const runsOf = new Map(runs.map((r) => [r.workflowId, r]));
-    return workflows.map((w) => {
+    const data = workflows.map((w) => {
       const last = runsOf.get(w.id);
       return {
         ...toSummary(w),
@@ -212,6 +226,39 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
         lastRunStatus: last?.status ?? null,
       };
     });
+    return { data, nextCursor };
+  });
+
+  app.get(`${base}/summary`, async (req): Promise<WorkflowListSummary> => {
+    const { workspaceId } = workspaceParams.parse(req.params);
+    const { q } = listWorkflowsQuery.pick({ q: true }).parse(req.query);
+    const scope = await inWorkspace(member(req), workspaceId);
+    // Same match as the list (Prisma's insensitive contains, wildcards escaped), so the tiles agree with it.
+    const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
+    // Every tile in one pass over the search's workflows; each one's latest version and runs come from its own index range.
+    const [row] = await prisma.$queryRaw<(Omit<WorkflowListSummary, "statuses"> & Record<WorkflowStatus, number>)[]>`
+      SELECT count(*)::int AS total,
+             (count(*) FILTER (WHERE w.status = 'DRAFT'))::int AS "DRAFT",
+             (count(*) FILTER (WHERE w.status = 'ACTIVE'))::int AS "ACTIVE",
+             (count(*) FILTER (WHERE w.status = 'PAUSED'))::int AS "PAUSED",
+             (count(*) FILTER (WHERE pv.number IS DISTINCT FROM coalesce(lv.number, 0)))::int AS unpublished,
+             coalesce(sum(r.runs), 0)::int AS runs,
+             (count(*) FILTER (WHERE r.last = 'FAILED'))::int AS failing
+      FROM "Workflow" w
+      LEFT JOIN "WorkflowVersion" pv ON pv.id = w."publishedVersionId"
+      LEFT JOIN LATERAL (SELECT max(v.number) AS number FROM "WorkflowVersion" v WHERE v."workflowId" = w.id) lv ON true
+      LEFT JOIN LATERAL (
+        SELECT count(*) AS runs,
+               (SELECT e.status::text FROM "WorkflowExecution" e
+                WHERE e."organizationId" = w."organizationId" AND e."workspaceId" = w."workspaceId" AND e."workflowId" = w.id
+                ORDER BY e."createdAt" DESC, e.id DESC LIMIT 1) AS last
+        FROM "WorkflowExecution" e
+        WHERE e."organizationId" = w."organizationId" AND e."workspaceId" = w."workspaceId" AND e."workflowId" = w.id
+      ) r ON true
+      WHERE w."organizationId" = ${scope.organizationId} AND w."workspaceId" = ${scope.workspaceId} AND w."deletedAt" IS NULL
+        AND (${term}::text IS NULL OR w.name ILIKE ${term} OR w.description ILIKE ${term})`;
+    const { DRAFT, ACTIVE, PAUSED, ...rest } = row!;
+    return { ...rest, statuses: { DRAFT, ACTIVE, PAUSED } };
   });
 
   app.post(base, async (req, reply): Promise<WorkflowDetail> => {

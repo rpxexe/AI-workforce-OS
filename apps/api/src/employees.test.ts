@@ -234,20 +234,25 @@ test("list: the whole tab newest change first, archived on its own tab, and noth
   assert.deepEqual((await list("?archived=true")).map((e) => e.name), ["Two"]);
   assert.equal((await call("GET", `${employees(ws)}?archived=maybe`, memberOf(orgA))).statusCode, 400);
 
-  // ?page=: one page and the total. Archiving One last puts it first; the search reads the latest version only.
+  // ?limit=: cursor pages. Archiving One last puts it first; the search reads the latest version only.
   await call("PATCH", `${employees(ws)}/${ids[2]}/status`, adminOf(orgA), { status: "ARCHIVED" });
   await call("PUT", `${employees(ws)}/${ids[0]}`, adminOf(orgA), config({ name: "Tres" }));
   const page = async (query: string) => (await call("GET", `${employees(ws)}?${query}`, memberOf(orgA))).json<EmployeePage>();
-  const first = await page("archived=true&page=1&limit=1");
-  assert.deepEqual([first.data.map((e) => e.name), first.total], [["One"], 2]);
-  assert.deepEqual((await page("archived=true&page=2&limit=1")).data.map((e) => e.name), ["Two"]);
-  assert.deepEqual((await page("archived=true&page=3&limit=1")).data, []);
-  assert.deepEqual(await page("archived=true&page=1&q=TWO"), { data: (await page("archived=true&page=2&limit=1")).data, total: 1 });
-  assert.equal((await page("page=1&q=three")).total, 0);
-  assert.deepEqual((await page("page=1&q=tres")).data.map((e) => e.name), ["Tres"]);
-  assert.equal((await page("page=1&q=%25")).total, 0);
-  for (const bad of ["page=0", "page=1&limit=101"]) assert.equal((await call("GET", `${employees(ws)}?${bad}`, memberOf(orgA))).statusCode, 400, bad);
-  assert.deepEqual(await (await call("GET", `${employees(wsB)}?archived=true&page=1`, adminOf(orgB))).json<EmployeePage>(), { data: [], total: 0 });
+  const first = await page("archived=true&limit=1");
+  assert.equal(first.data[0]?.name, "One");
+  assert.ok(first.nextCursor);
+  const second = await page(`archived=true&limit=1&cursor=${first.nextCursor}`);
+  assert.deepEqual([second.data.map((e) => e.name), second.nextCursor], [["Two"], null]);
+  // Restoring One between pages moves it out of the tab; the next page still carries on after the last row shown.
+  await call("PATCH", `${employees(ws)}/${ids[2]}/status`, adminOf(orgA), { status: "PAUSED" });
+  assert.deepEqual((await page(`archived=true&limit=1&cursor=${first.nextCursor}`)).data.map((e) => e.name), ["Two"]);
+  assert.deepEqual((await page("archived=true&limit=5&q=TWO")).data.map((e) => e.name), ["Two"]);
+  assert.deepEqual((await page("limit=5&q=three")).data, []);
+  assert.deepEqual((await page("limit=5&q=tres")).data.map((e) => e.name), ["Tres"]);
+  assert.deepEqual((await page("limit=5&q=%25")).data, []);
+  for (const bad of ["limit=0", "limit=101", "limit=1&cursor=nope", `limit=1&cursor=${first.nextCursor}`])
+    assert.equal((await call("GET", `${employees(ws)}?${bad}`, memberOf(orgA))).statusCode, 400, bad);
+  assert.deepEqual(await (await call("GET", `${employees(wsB)}?archived=true&limit=5`, adminOf(orgB))).json<EmployeePage>(), { data: [], nextCursor: null });
   assert.equal((await call("GET", employees(ws), adminOf(orgB))).statusCode, 404);
   assert.deepEqual((await call("GET", employees(wsB), adminOf(orgB))).json<EmployeeSummary[]>(), []);
 });

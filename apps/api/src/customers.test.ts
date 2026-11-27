@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { prisma } from "@workforce/database";
 import { factWrites, identifyCustomer, parseExtraction } from "@workforce/memory";
-import { defaultEmployeeConfig, type CustomerDetail, type CustomerExport, type CustomerPage, type EmployeeDetail, type Workspace } from "@workforce/shared";
+import { defaultEmployeeConfig, type CustomerCounts, type CustomerDetail, type CustomerExport, type CustomerPage, type EmployeeDetail, type Workspace } from "@workforce/shared";
 import { adminOf, deleteOrgs, memberOf, newOrg, testApp } from "./testing.ts";
 
 const orgA = newOrg();
@@ -134,15 +134,14 @@ test("the list pages newest first by last seen, filters on the server, and count
 
   const first = await list("&limit=3");
   assert.deepEqual(first.data.map((c) => c.id), ids.slice(0, 3));
-  assert.deepEqual(first.counts, { total: 7, seenThisWeek: 4, withEmail: 3, withPhone: 3, reachable: 5, withCompany: 2 });
-  assert.equal(first.total, 7);
+  const counts = async (query: string) => (await call("GET", `/workspaces/${wsA}/customers/counts?q=pager${query}`, memberOf(orgA))).json<CustomerCounts>();
+  assert.deepEqual(await counts(""), { total: 7, seenThisWeek: 4, withEmail: 3, withPhone: 3, reachable: 5, withCompany: 2 });
   assert.ok(first.nextCursor);
   const second = await list(`&limit=3&cursor=${first.nextCursor}`);
   assert.deepEqual(second.data.map((c) => c.id), ids.slice(3, 6));
   const third = await list(`&limit=3&cursor=${second.nextCursor}`);
   // End of the list: no cursor for a page after it.
-  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor, third.total], [ids.slice(6), null, 7]);
-  assert.deepEqual(third.counts, first.counts);
+  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor], [ids.slice(6), null]);
   assert.equal((await list("&limit=7")).nextCursor, null);
 
   const ofFilter = async (filter: string) => (await list(`&filter=${filter}`)).data.map((c) => c.externalId);
@@ -150,7 +149,7 @@ test("the list pages newest first by last seen, filters on the server, and count
   assert.deepEqual(await ofFilter("email"), ["pager-0", "pager-2", "pager-4"]);
   assert.deepEqual(await ofFilter("phone"), ["pager-1", "pager-2", "pager-5"]);
   const both = await list("&filter=phone&limit=2");
-  assert.deepEqual([both.data.length, both.total, both.counts.total], [2, 3, 7]);
+  assert.equal(both.data.length, 2);
   // The cursor carries on inside the filter.
   const rest = await list(`&filter=phone&limit=2&cursor=${both.nextCursor}`);
   assert.deepEqual([rest.data.map((c) => c.externalId), rest.nextCursor], [["pager-5"], null]);
@@ -160,7 +159,7 @@ test("the list pages newest first by last seen, filters on the server, and count
     assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${other}`, memberOf(orgA))).statusCode, 400, other);
 
   // Search wildcards match themselves in the counts, as in the list.
-  assert.equal((await list("%25&limit=1")).counts.total, 0);
+  assert.equal((await counts("%25")).total, 0);
 
   const forged = Buffer.from(JSON.stringify({ at: "not a date", id: ids[0], context: "x".repeat(16) })).toString("base64url");
   for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&cursor=nope", `&cursor=${forged}`])
@@ -301,8 +300,9 @@ test("another organization's customer is a 404 on every route and nothing change
       assert.equal(res.statusCode, 404, `${method} ${url}`);
     }
   const outside = (await call("GET", `/workspaces/${wsB}/customers?q=Pia`, adminOf(orgB))).json<CustomerPage>();
-  assert.deepEqual([outside.data, outside.counts.total], [[], 0]);
-  assert.equal(outside.total, 0);
+  assert.deepEqual(outside.data, []);
+  assert.equal((await call("GET", `/workspaces/${wsB}/customers/counts?q=Pia`, adminOf(orgB))).json<CustomerCounts>().total, 0);
+  assert.equal((await call("GET", `/workspaces/${wsA}/customers/counts`, adminOf(orgB))).statusCode, 404);
 
   // A memory id from another customer of the same organization is a 404 too.
   const other = await seedCustomer("other@example.com", "Otto");

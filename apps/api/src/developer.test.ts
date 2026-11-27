@@ -605,10 +605,12 @@ test("webhooks: secret rotation signs with both secrets, test events, catching u
   // Paged delivery log, filtered by event.
   const page = (await call("GET", `/developer/webhooks/${id}/deliveries?limit=2&event=webhook.test`, undefined, memberOf(orgA))).json<WebhookDeliveryPage>();
   assert.equal(page.data.length, 2);
-  assert.ok(page.total >= 3);
-  const rest = (await call("GET", `/developer/webhooks/${id}/deliveries?limit=2&event=webhook.test&page=2`, undefined, memberOf(orgA))).json<WebhookDeliveryPage>();
+  assert.ok(page.nextCursor);
+  const rest = (await call("GET", `/developer/webhooks/${id}/deliveries?limit=2&event=webhook.test&cursor=${page.nextCursor}`, undefined, memberOf(orgA))).json<WebhookDeliveryPage>();
   assert.ok(rest.data.length >= 1);
-  assert.equal(rest.total, page.total);
+  assert.ok(!rest.data.some((d) => page.data.some((p) => p.id === d.id)));
+  // A cursor is tied to its filter: reused with another one it is refused.
+  assert.equal((await call("GET", `/developer/webhooks/${id}/deliveries?limit=2&cursor=${page.nextCursor}`, undefined, memberOf(orgA))).statusCode, 400);
   assert.ok(!rest.data.some((d) => page.data.some((p) => p.id === d.id)));
   await call("DELETE", `/developer/webhooks/${id}`);
 });

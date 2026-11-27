@@ -26,6 +26,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { assertPublicBaseUrl } from "../ai.ts";
 import { guards, httpError, type Authenticate, type Member } from "../auth.ts";
+import { decodeCursor, keysetAfter, keysetPage, pagingContext } from "../cursor.ts";
 import { keyInclude, newKey, statusOf, toApiKeyInfo } from "./keys.ts";
 import { newWebhookSecret, type WebhookService } from "./webhooks.ts";
 
@@ -285,13 +286,16 @@ export function developerRoutes(app: FastifyInstance, authenticate: Authenticate
   app.get("/developer/webhooks/:id/deliveries", async (req): Promise<WebhookDeliveryPage> => {
     const auth = member(req);
     const endpoint = await findEndpoint(auth, idParams.parse(req.params).id);
-    const { status, event, page, limit } = deliveriesQuerySchema.parse(req.query);
-    const where = { endpointId: endpoint.id, ...(status && { status }), ...(event && { event }) };
-    const [rows, total] = await Promise.all([
-      prisma.webhookDelivery.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: (page - 1) * limit, take: limit }),
-      prisma.webhookDelivery.count({ where }),
-    ]);
-    return { data: rows.map(toDelivery), total };
+    const { status, event, limit, cursor } = deliveriesQuerySchema.parse(req.query);
+    // A log: cursor pages over the (endpointId, createdAt) index and no count, so a page costs the same at any depth.
+    const context = pagingContext(endpoint.id, status, event);
+    const rows = await prisma.webhookDelivery.findMany({
+      where: { endpointId: endpoint.id, ...(status && { status }), ...(event && { event }), ...keysetAfter("createdAt", decodeCursor(cursor, context, "date")) },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    });
+    const { page, nextCursor } = keysetPage(rows, limit, (r) => r.createdAt, context);
+    return { data: page.map(toDelivery), nextCursor };
   });
 
   // Sends a delivery again (a failed one, or a succeeded one the receiver lost), with a fresh set of attempts. Same event id.

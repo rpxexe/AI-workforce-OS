@@ -15,6 +15,7 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
+import { decodeCursor, keysetPage, pagingContext } from "./cursor.ts";
 import { assertPublishable, release } from "./releases.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
@@ -91,30 +92,33 @@ export async function listEmployees(scope: { organizationId: string; workspaceId
 }
 
 /**
- * One page of the tab, newest change first, and how many match. The search runs on each employee's latest
- * version (what the list shows), so a page is never short and the total is exact. Archived employees are not
- * plan-limited, so the Archived tab pages here instead of loading every row.
+ * One cursor page of the tab, newest change first. The search runs on each employee's latest version (what the list
+ * shows), so a page is never short. Archived employees are not plan-limited, so the Archived tab pages here instead
+ * of loading every row; the (organizationId, workspaceId, status, updatedAt) index walks the tab in order.
  */
 export async function pageEmployees(
   scope: { organizationId: string; workspaceId: string },
-  { archived, q, page, limit }: { archived: boolean; q?: string; page: number; limit: number },
+  { archived, q, limit, cursor }: { archived: boolean; q?: string; limit: number; cursor?: string },
 ): Promise<EmployeePage> {
+  const context = pagingContext(scope.workspaceId, archived, q);
+  const after = decodeCursor(cursor, context, "date");
   // Wildcards in the search match themselves, as Prisma's contains does elsewhere.
   const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
-  const matching = Prisma.sql`
+  const ids = await prisma.$queryRaw<{ id: string; updatedAt: Date }[]>`
+    SELECT e.id, e."updatedAt"
     FROM "AIEmployee" e
     JOIN LATERAL (SELECT v.name, v.role FROM "AIEmployeeVersion" v WHERE v."employeeId" = e.id ORDER BY v.number DESC LIMIT 1) latest ON true
     WHERE e."organizationId" = ${scope.organizationId} AND e."workspaceId" = ${scope.workspaceId}
       AND ${archived ? Prisma.sql`e.status = 'ARCHIVED'` : Prisma.sql`e.status <> 'ARCHIVED'`}
-      AND (${term}::text IS NULL OR latest.name ILIKE ${term} OR latest.role ILIKE ${term})`;
-  const [ids, [count]] = await Promise.all([
-    prisma.$queryRaw<{ id: string }[]>`SELECT e.id ${matching} ORDER BY e."updatedAt" DESC, e.id DESC OFFSET ${(page - 1) * limit} LIMIT ${limit}`,
-    prisma.$queryRaw<{ total: number }[]>`SELECT count(*)::int AS total ${matching}`,
-  ]);
-  const rows = await prisma.aiEmployee.findMany({ where: { ...within(scope), id: { in: ids.map((r) => r.id) } }, include: summaryInclude });
-  const position = new Map(ids.map((r, i) => [r.id, i]));
-  rows.sort((a, b) => position.get(a.id)! - position.get(b.id)!);
-  return { data: toSummaries(rows), total: count?.total ?? 0 };
+      AND (${term}::text IS NULL OR latest.name ILIKE ${term} OR latest.role ILIKE ${term})
+      AND ${after ? Prisma.sql`(e."updatedAt", e.id) < (${after.value}, ${after.id})` : Prisma.sql`true`}
+    ORDER BY e."updatedAt" DESC, e.id DESC
+    LIMIT ${limit + 1}`;
+  const { page, nextCursor } = keysetPage(ids, limit, (r) => r.updatedAt, context);
+  const rows = await prisma.aiEmployee.findMany({ where: { ...within(scope), id: { in: page.map((r) => r.id) } }, include: summaryInclude });
+  const position = new Map(page.map((r, i) => [r.id, i]));
+  rows.sort((x, y) => position.get(x.id)! - position.get(y.id)!);
+  return { data: toSummaries(rows), nextCursor };
 }
 
 /**
@@ -166,9 +170,9 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
 
   app.get(base, async (req): Promise<EmployeeSummary[] | EmployeePage> => {
     const { scope } = await scoped(req, member);
-    const { archived, q, page, limit } = listEmployeesQuery.parse(req.query);
-    if (page === undefined) return listEmployees(scope, archived === "true");
-    return pageEmployees(scope, { archived: archived === "true", q, page, limit });
+    const { archived, q, limit, cursor } = listEmployeesQuery.parse(req.query);
+    if (limit === undefined) return listEmployees(scope, archived === "true");
+    return pageEmployees(scope, { archived: archived === "true", q, limit, cursor });
   });
 
   app.post(base, async (req, reply) => {
