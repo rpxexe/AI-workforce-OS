@@ -1,10 +1,10 @@
 "use client";
 
-import type { EmployeeDetail, EmployeePage, EmployeeSummary } from "@workforce/shared";
+import type { EmployeeDetail, EmployeeStatus, EmployeeSummary } from "@workforce/shared";
 import { Archive, Bot, Copy, Ellipsis, Eye, Pencil, Plus, Search, SearchX, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { EmployeeAvatar, StatusBadge, formatDate, versionLabel } from "@/components/employees/meta";
 import { Skeleton as Skullet } from "skullet/react";
@@ -26,7 +26,6 @@ import { LANGUAGES } from "@workforce/shared";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
 import { TablePager, usePaged } from "@/components/table-pager";
-import { LoadMoreButton, useLoadMore } from "@/components/load-more";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
@@ -41,7 +40,6 @@ const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
   publishedVersion: 1,
   updatedAt: "2026-01-01T00:00:00.000Z",
 }));
-const SAMPLE_PAGE: EmployeePage = { data: SAMPLE, nextCursor: null, counts: { DRAFT: 0, ACTIVE: 5, PAUSED: 0, ARCHIVED: 5 } };
 
 export default withWorkspace(function EmployeesPage({ workspace }) {
   const isAdmin = useIsAdmin();
@@ -51,18 +49,11 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
 
   const [archived, setArchived] = useState(false);
   const [query, setQuery] = useState("");
-  const [search, setSearch] = useState("");
-  // Wait for a pause in typing before asking the server.
-  useEffect(() => {
-    const timer = setTimeout(() => setSearch(query.trim()), 300);
-    return () => clearTimeout(timer);
-  }, [query]);
   const searchRef = useRef<HTMLInputElement>(null);
-  const path = `${base}?archived=${archived}&limit=50${search ? `&q=${encodeURIComponent(search)}` : ""}`;
-  const { data, error, loading, reload } = useApiQuery<EmployeePage>(path, { keepPrevious: true });
-  const more = useLoadMore(path, data);
+  // The whole tab (plans cap employees at 50): search, counts and pages need no more requests.
+  const { data, error, loading, reload } = useApiQuery<EmployeeSummary[]>(`${base}?archived=${archived}`, { keepPrevious: true });
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
-  const nameOf = (id: string) => more.rows?.find((e) => e.id === id)?.name ?? "Employee";
+  const nameOf = (id: string) => data?.find((e) => e.id === id)?.name ?? "Employee";
 
   /** Runs a row action, then refreshes the list. */
   const run = async (action: () => Promise<unknown>) => {
@@ -128,20 +119,19 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
               maxLength={100}
             />
           </InputGroup>
-          {data && !archived && <Counts counts={data.counts} />}
+          {data && !archived && <Counts data={data} />}
         </div>
       )}
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data && { ...data, data: more.rows ?? [] }} sample={SAMPLE_PAGE} id="employees-list" label="Loading employees">
-          {(page) => (
+        <Skullet data={data} sample={SAMPLE} id="employees-list" label="Loading employees">
+          {(all) => (
             <EmployeeList
-              data={page.data}
-              total={archived ? page.counts.ARCHIVED : page.counts.DRAFT + page.counts.ACTIVE + page.counts.PAUSED}
+              all={all}
               archived={archived}
-              query={search}
+              query={query}
               clearQuery={() => {
                 setQuery("");
                 // The Clear button unmounts with the empty state; keep keyboard focus in the search box.
@@ -157,15 +147,16 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
           )}
         </Skullet>
       )}
-      {!error && <LoadMoreButton {...more} loading={more.loading || loading} label="Load more employees" />}
 
       <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
 });
 
-/** Counts over the whole tab from the server, not just the loaded page. */
-function Counts({ counts }: { counts: EmployeePage["counts"] }) {
+/** Counts over the whole tab, not the search or the page. */
+function Counts({ data }: { data: EmployeeSummary[] }) {
+  const counts = { DRAFT: 0, ACTIVE: 0, PAUSED: 0, ARCHIVED: 0 } satisfies Record<EmployeeStatus, number>;
+  for (const e of data) counts[e.status]++;
   return (
     <div className="flex flex-wrap gap-2">
       <Badge variant="outline">{counts.ACTIVE} active</Badge>
@@ -176,8 +167,7 @@ function Counts({ counts }: { counts: EmployeePage["counts"] }) {
 }
 
 function EmployeeList({
-  data,
-  total,
+  all,
   archived,
   query,
   clearQuery,
@@ -188,8 +178,7 @@ function EmployeeList({
   setStatus,
   setConfirm,
 }: {
-  data: EmployeeSummary[];
-  total: number;
+  all: EmployeeSummary[];
   archived: boolean;
   query: string;
   clearQuery: () => void;
@@ -200,8 +189,10 @@ function EmployeeList({
   setStatus: (id: string, status: "PAUSED" | "ARCHIVED") => void;
   setConfirm: (confirm: Confirmation) => void;
 }) {
-  const employees = usePaged(data, 20, `${archived}:${query}`);
-  return total === 0 ? (
+  const needle = query.trim().toLowerCase();
+  const data = needle ? all.filter((e) => e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle)) : all;
+  const employees = usePaged(data, 20, `${archived}:${needle}`);
+  return all.length === 0 ? (
         archived ? (
           <EmptyState icon={Archive} title="No archived employees" description="Employees you archive are kept here and can be restored." />
         ) : (

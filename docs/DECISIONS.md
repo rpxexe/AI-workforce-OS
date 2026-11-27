@@ -542,10 +542,10 @@ and `@clerk/nextjs/server` to stubs via `turbopack.resolveAlias`, run the API th
 `buildApp({ authenticate })` with a fixed identity, and drive headless Edge over the DevTools
 protocol. Remove all of it afterwards; none of it is in the repo.
 
-## List cursors carry the sort value (apps/api/src/paging.ts)
+## Dashboard lists use numbered pages, not "Load more"
 
-Customers and employees sort by timestamps that change (lastSeenAt, updatedAt). Prisma's `cursor: { id }` re-reads the
-cursor row, so a row seen or edited between pages restarted the list and a deleted one ended it. Cursors are
-`<iso time>~<id>` and pages filter `(time, id) <` that pair. A row that moves up between pages is not shown again on
-the next page; it is at the top on reload. Migrations that build indexes on big tables use `CREATE INDEX CONCURRENTLY`
-alone in their file (it cannot run in a transaction).
+Lists that grow without bound (customers, webhook deliveries) take `?page=&limit=` and return `total`; the dashboard
+drives the shadcn `TablePager` footer with `useServerPaged` (components/table-pager.tsx), so any page can be opened
+directly. Offset pages can shift by a row when rows change between clicks; acceptable for these lists. Bounded lists
+(employees: 50 per plan; workflows) load whole and page in the browser with `usePaged`. Migrations that build
+indexes on big tables use `CREATE INDEX CONCURRENTLY` alone in their file (it cannot run in a transaction).

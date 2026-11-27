@@ -5,7 +5,6 @@ import { Activity, AtSign, Building2, ChevronRight, Mail, Phone, Search, SearchX
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CustomerAvatar, RelativeTime } from "@/components/customers/meta";
-import { LoadMoreButton, useLoadMore } from "@/components/load-more";
 import { Skeleton as Skullet } from "skullet/react";
 import { EmptyState, ErrorState, PageHeader, StatTile } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -15,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useApiQuery } from "@/lib/api";
 import { withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
+import { TablePager, useServerPaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: CustomerSummary[] = Array.from({ length: 6 }, (_, i) => ({
@@ -38,7 +37,7 @@ const FILTERS: Record<CustomerFilter, { label: string; count: (c: CustomerCounts
 type Filter = CustomerFilter;
 const SAMPLE_PAGE: CustomerPage = {
   data: SAMPLE,
-  nextCursor: null,
+  total: 6,
   counts: { total: 6, seenThisWeek: 6, withEmail: 6, withPhone: 6, reachable: 6, withCompany: 6 },
 };
 
@@ -53,9 +52,11 @@ export default withWorkspace(function CustomersPage({ workspace }) {
   }, [query]);
 
   const base = `/workspaces/${workspace.id}/customers`;
-  const path = `${base}?filter=${filter}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
+  // Each page comes from the server; a new search or filter starts at page 1.
+  const paged = useServerPaged(`${search}:${filter}`);
+  const path = `${base}?filter=${filter}&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
   const { data, error, loading, reload } = useApiQuery<CustomerPage>(path, { keepPrevious: true });
-  const more = useLoadMore(path, data);
+  const pager = paged.pager(data?.total ?? 0);
 
   return (
     <div className="flex flex-col gap-6">
@@ -101,11 +102,12 @@ export default withWorkspace(function CustomersPage({ workspace }) {
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data && { ...data, data: more.rows ?? [] }} sample={SAMPLE_PAGE} id="customers-list" label="Loading customers">
+        <Skullet data={data} sample={SAMPLE_PAGE} id="customers-list" label="Loading customers">
           {(page) => (
             <CustomerList
               data={page.data}
               total={page.counts.total}
+              pager={pager}
               search={search}
               filter={filter}
               loading={loading}
@@ -114,7 +116,6 @@ export default withWorkspace(function CustomersPage({ workspace }) {
           )}
         </Skullet>
       )}
-      {!error && <LoadMoreButton {...more} loading={more.loading || loading} label="Load more customers" />}
     </div>
   );
 });
@@ -135,6 +136,7 @@ function Stats({ counts, search }: { counts: CustomerCounts | undefined; search:
 function CustomerList({
   data,
   total,
+  pager,
   search,
   filter,
   loading,
@@ -142,13 +144,12 @@ function CustomerList({
 }: {
   data: CustomerSummary[];
   total: number;
+  pager: Pager;
   search: string;
   filter: Filter;
   loading: boolean;
   clearFilter: () => void;
 }) {
-  const customers = usePaged(data, 20, `${search}:${filter}`);
-
   if (total === 0) {
     return search ? (
       <EmptyState icon={SearchX} title="No customers match" description={`Nobody found for “${search}”. Try part of a name, email or phone number.`} />
@@ -160,7 +161,7 @@ function CustomerList({
       />
     );
   }
-  if (data.length === 0) {
+  if (pager.total === 0) {
     return (
       <EmptyState icon={SearchX} title={`No customers match “${FILTERS[filter].label}”`} description="Try another filter.">
         <Button variant="outline" onClick={clearFilter}>
@@ -185,7 +186,7 @@ function CustomerList({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {customers.rows.map((c) => (
+          {data.map((c) => (
             <TableRow key={c.id} className="group">
               <TableCell className="max-w-64">
                 <Link href={`/customers/${c.id}`} className="flex min-w-0 items-center gap-3">
@@ -232,7 +233,7 @@ function CustomerList({
           ))}
         </TableBody>
       </Table>
-      <TablePager {...customers.pager} className="px-4 pb-3" />
+      <TablePager {...pager} className="px-4 pb-3" />
     </Card>
   );
 }

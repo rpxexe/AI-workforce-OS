@@ -16,7 +16,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
 import { within } from "./employees.ts";
-import { after, cursorOf } from "./paging.ts";
 
 const customerParams = z.object({ workspaceId: z.string().min(1), customerId: z.string().min(1) });
 const memoryParams = customerParams.extend({ memoryId: z.string().min(1) });
@@ -72,7 +71,7 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
 
   app.get("/workspaces/:workspaceId/customers", async (req): Promise<CustomerPage> => {
     const { workspaceId } = customerParams.pick({ workspaceId: true }).parse(req.params);
-    const { q, filter, limit, cursor } = listCustomersQuery.parse(req.query);
+    const { q, filter, page, limit } = listCustomersQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
     const like = { contains: q, mode: "insensitive" as const };
     const where: Prisma.CustomerWhereInput = {
@@ -93,10 +92,11 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
     const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
     const [rows, [counts]] = await Promise.all([
       prisma.customer.findMany({
-        where: { AND: [where, filters[filter], after("lastSeenAt", cursor)] },
+        where: { AND: [where, filters[filter]] },
         include: { profile: true },
         orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
-        take: limit + 1,
+        skip: (page - 1) * limit,
+        take: limit,
       }),
       // Every tile in one pass over the search's customers, not one count query each.
       prisma.$queryRaw<CustomerCounts[]>`
@@ -111,12 +111,9 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
           AND (${term}::text IS NULL OR c."externalId" ILIKE ${term} OR p.name ILIKE ${term}
                OR p.email ILIKE ${term} OR p.phone ILIKE ${term} OR p.company ILIKE ${term})`,
     ]);
-    const last = rows[limit - 1];
-    return {
-      data: rows.slice(0, limit).map(toSummary),
-      nextCursor: rows.length > limit && last ? cursorOf(last.lastSeenAt, last.id) : null,
-      counts: counts!,
-    };
+    const c = counts!;
+    const total = { all: c.total, week: c.seenThisWeek, email: c.withEmail, phone: c.withPhone }[filter];
+    return { data: rows.map(toSummary), total, counts: c };
   });
 
   app.get("/workspaces/:workspaceId/customers/:customerId", async (req): Promise<CustomerDetail> => {

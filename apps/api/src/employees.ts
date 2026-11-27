@@ -1,14 +1,12 @@
 import { configOf } from "@workforce/agent-runtime";
 import { Prisma, prisma } from "@workforce/database";
 import {
-  EMPLOYEE_STATUSES,
   employeeConfigSchema,
   listEmployeesQuery,
   publishSchema,
   setStatusSchema,
   type EmployeeConfig,
   type EmployeeDetail,
-  type EmployeePage,
   type EmployeeSummary,
   type EmployeeVersion,
   type UsageLimiter,
@@ -16,7 +14,6 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
-import { after, cursorOf } from "./paging.ts";
 import { assertPublishable, release } from "./releases.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
@@ -80,7 +77,9 @@ const newestFirst = [{ updatedAt: "desc" as const }, { id: "desc" as const }];
 
 /**
  * A workspace's employees, most recently changed first: the archived ones, or the rest (the default).
- * The whole list: the dashboard counts it and pickers offer it. Plan limits bound the current list.
+ * The whole list: the Employees page searches and pages it in the browser, the dashboard counts it and
+ * pickers offer it. Plan limits bound the current list (50 at most).
+ * shortcut: archived employees are not plan-limited; page on the server if a workspace archives thousands.
  */
 export async function listEmployees(scope: { organizationId: string; workspaceId: string }, archived = false): Promise<EmployeeSummary[]> {
   const employees = await prisma.aiEmployee.findMany({
@@ -89,43 +88,6 @@ export async function listEmployees(scope: { organizationId: string; workspaceId
     include: summaryInclude,
   });
   return toSummaries(employees);
-}
-
-/** One page of the list for the Employees page, with the tab's counts by status. */
-export async function pageEmployees(
-  scope: { organizationId: string; workspaceId: string },
-  { archived, q, limit, cursor }: { archived: boolean; q?: string; limit: number; cursor?: string },
-): Promise<EmployeePage> {
-  const where = { ...within(scope), status: statusFilter(archived) };
-  const like = { contains: q, mode: "insensitive" as const };
-  const needle = q?.toLowerCase();
-  const matches = (e: EmployeeSummary) => !needle || e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle);
-
-  // Any version matching narrows it in SQL; the latest version's name or role decides here. An employee whose old
-  // name matched is dropped, so read on until the page is full: a short page always means the list has ended.
-  const data: EmployeeSummary[] = [];
-  let next = cursor;
-  let more = true;
-  while (more && data.length < limit) {
-    const rows = await prisma.aiEmployee.findMany({
-      where: { ...where, ...(q && { versions: { some: { OR: [{ name: like }, { role: like }] } } }), ...after("updatedAt", next) },
-      orderBy: newestFirst,
-      take: limit + 1,
-      include: summaryInclude,
-    });
-    more = rows.length > limit;
-    for (const row of rows.slice(0, limit)) {
-      if (data.length === limit) {
-        more = true;
-        break;
-      }
-      data.push(...toSummaries([row]).filter(matches));
-      next = cursorOf(row.updatedAt, row.id);
-    }
-  }
-  const counts = Object.fromEntries(EMPLOYEE_STATUSES.map((s) => [s, 0])) as EmployeePage["counts"];
-  for (const g of await prisma.aiEmployee.groupBy({ by: ["status"], where, _count: { _all: true } })) counts[g.status] = g._count._all;
-  return { data, nextCursor: more ? (next ?? null) : null, counts };
 }
 
 /**
@@ -175,11 +137,10 @@ export function employeeRoutes(app: FastifyInstance, authenticate: Authenticate,
     return toDetail(employee);
   };
 
-  app.get(base, async (req): Promise<EmployeeSummary[] | EmployeePage> => {
+  app.get(base, async (req): Promise<EmployeeSummary[]> => {
     const { scope } = await scoped(req, member);
-    const { archived, q, limit, cursor } = listEmployeesQuery.parse(req.query);
-    if (limit === undefined) return listEmployees(scope, archived === "true");
-    return pageEmployees(scope, { archived: archived === "true", q, limit, cursor });
+    const { archived } = listEmployeesQuery.parse(req.query);
+    return listEmployees(scope, archived === "true");
   });
 
   app.post(base, async (req, reply) => {

@@ -32,7 +32,32 @@ export function usePaged<T>(rows: T[], initialSize = 20, resetKey?: unknown) {
   return { rows: rows.slice(current * size, (current + 1) * size), pager: { page: current, pages, size, total: rows.length, setPage, setSize } };
 }
 
-type Pager = ReturnType<typeof usePaged>["pager"];
+/**
+ * Pages a list the server pages: `query` (page=&limit=) goes on the request, and `pager(total)` feeds TablePager
+ * once the response says how many rows match. A new filter (resetKey) goes back to page 1.
+ */
+export function useServerPaged(resetKey: unknown, initialSize = 20) {
+  const [page, setPage] = useState(0);
+  const [size, setSizeState] = useState(initialSize);
+  const [lastKey, setLastKey] = useState(resetKey);
+  if (resetKey !== lastKey) {
+    setLastKey(resetKey);
+    setPage(0);
+  }
+  const setSize = (next: number) => {
+    setSizeState(next);
+    setPage(0);
+  };
+  const pager = (total: number) => {
+    const pages = Math.max(1, Math.ceil(total / size));
+    // Rows deleted from the last page: step back to the new last page (known only once a response has a total).
+    if (total > 0 && page > pages - 1) setPage(pages - 1);
+    return { page: Math.min(page, pages - 1), pages, size, total, setPage, setSize };
+  };
+  return { query: `page=${page + 1}&limit=${size}`, pager };
+}
+
+export type Pager = ReturnType<typeof usePaged>["pager"];
 
 /**
  * The data-table footer from the shadcn dashboard-01 block (rows per page, page number, first/previous/

@@ -183,7 +183,7 @@ GET   /health                                   public
 GET   /ws                                       WebSocket echo (placeholder transport)
 GET   /workspaces                               member; provisions org + Default on first call
 POST  /workspaces                               admin
-GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; no ?limit=: the whole list as an array (pickers; the dashboard calls listEmployees); ?limit=1-100 [&cursor=] [&q= latest name/role, the page still fills]: EmployeePage { data, nextCursor, counts by status for the tab }, newest change first
+GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; the whole list as an array, newest change first (plans cap employees at 50: the Employees page searches, counts and pages it in the browser; the dashboard calls listEmployees)
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
@@ -327,12 +327,12 @@ PATCH /developer/webhooks/:id                   admin; { url?, description?, eve
 POST  /developer/webhooks/:id/rotate-secret     admin; { keepOldForHours: 0..168 }; the new secret once; both sign during the grace period
 POST  /developer/webhooks/:id/test              admin; sends webhook.test now (any subscription, even turned off); the delivery with its attempt
 DELETE /developer/webhooks/:id                  admin; deliveries go with it; 204
-GET   /developer/webhooks/:id/deliveries        member; { data, nextCursor }, newest first, with payload and attempts; ?status= ?event= ?limit= ?cursor=
+GET   /developer/webhooks/:id/deliveries        member; { data, total }, newest first, with payload and attempts; ?status= ?event= ?page= (from 1) ?limit=1-100 (20); total follows the filters
 POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fresh attempts (same event id); 409 if pending
 GET   /developer/audit                          admin; newest 100 developer audit entries
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
-GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (50) &cursor=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany, one SQL pass) follow ?q= only
+GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, total, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?page= (from 1) &limit=1-100 (20); total follows ?q= and ?filter=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany, one SQL pass) follow ?q= only
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
 DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited

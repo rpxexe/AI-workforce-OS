@@ -285,14 +285,13 @@ export function developerRoutes(app: FastifyInstance, authenticate: Authenticate
   app.get("/developer/webhooks/:id/deliveries", async (req): Promise<WebhookDeliveryPage> => {
     const auth = member(req);
     const endpoint = await findEndpoint(auth, idParams.parse(req.params).id);
-    const { status, event, limit, cursor } = deliveriesQuerySchema.parse(req.query);
-    const rows = await prisma.webhookDelivery.findMany({
-      where: { endpointId: endpoint.id, ...(status && { status }), ...(event && { event }) },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: limit + 1,
-      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
-    });
-    return { data: rows.slice(0, limit).map(toDelivery), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
+    const { status, event, page, limit } = deliveriesQuerySchema.parse(req.query);
+    const where = { endpointId: endpoint.id, ...(status && { status }), ...(event && { event }) };
+    const [rows, total] = await Promise.all([
+      prisma.webhookDelivery.findMany({ where, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: (page - 1) * limit, take: limit }),
+      prisma.webhookDelivery.count({ where }),
+    ]);
+    return { data: rows.map(toDelivery), total };
   });
 
   // Sends a delivery again (a failed one, or a succeeded one the receiver lost), with a fresh set of attempts. Same event id.

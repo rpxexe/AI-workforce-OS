@@ -135,30 +135,26 @@ test("the list pages newest first by last seen, filters on the server, and count
   const first = await list("&limit=3");
   assert.deepEqual(first.data.map((c) => c.id), ids.slice(0, 3));
   assert.deepEqual(first.counts, { total: 7, seenThisWeek: 4, withEmail: 3, withPhone: 3, reachable: 5, withCompany: 2 });
-  assert.ok(first.nextCursor);
-  const second = await list(`&limit=3&cursor=${first.nextCursor}`);
+  assert.equal(first.total, 7);
+  const second = await list("&limit=3&page=2");
   assert.deepEqual(second.data.map((c) => c.id), ids.slice(3, 6));
-  const third = await list(`&limit=3&cursor=${second.nextCursor}`);
-  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor], [ids.slice(6), null]);
+  const third = await list("&limit=3&page=3");
+  assert.deepEqual([third.data.map((c) => c.id), third.total], [ids.slice(6), 7]);
   assert.deepEqual(third.counts, first.counts);
+  assert.deepEqual((await list("&limit=3&page=4")).data, []);
 
   const ofFilter = async (filter: string) => (await list(`&filter=${filter}`)).data.map((c) => c.externalId);
   assert.deepEqual(await ofFilter("week"), ["pager-0", "pager-1", "pager-2", "pager-3"]);
   assert.deepEqual(await ofFilter("email"), ["pager-0", "pager-2", "pager-4"]);
   assert.deepEqual(await ofFilter("phone"), ["pager-1", "pager-2", "pager-5"]);
   const both = await list("&filter=phone&limit=2");
-  assert.deepEqual([both.data.length, both.counts.total], [2, 7]);
-  assert.deepEqual((await list(`&filter=phone&limit=2&cursor=${both.nextCursor}`)).data.map((c) => c.externalId), ["pager-5"]);
-
-  // A customer seen again between pages moves to the top; the next page still carries on where the last one ended.
-  const before = await list("&limit=3");
-  await prisma.customer.update({ where: { id: ids[2] }, data: { lastSeenAt: new Date() } });
-  assert.deepEqual((await list(`&limit=3&cursor=${before.nextCursor}`)).data.map((c) => c.id), ids.slice(3, 6));
+  assert.deepEqual([both.data.length, both.total, both.counts.total], [2, 3, 7]);
+  assert.deepEqual((await list("&filter=phone&limit=2&page=2")).data.map((c) => c.externalId), ["pager-5"]);
 
   // Search wildcards match themselves in the counts, as in the list.
   assert.equal((await list("%25&limit=1")).counts.total, 0);
 
-  for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&cursor=nope"])
+  for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&page=0", "&page=x"])
     assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${bad}`, memberOf(orgA))).statusCode, 400, bad);
 });
 
@@ -254,9 +250,7 @@ test("another organization's customer is a 404 on every route and nothing change
     }
   const outside = (await call("GET", `/workspaces/${wsB}/customers?q=Pia`, adminOf(orgB))).json<CustomerPage>();
   assert.deepEqual([outside.data, outside.counts.total], [[], 0]);
-  // A cursor from org A does not open org A's list to org B.
-  const cursor = (await call("GET", `/workspaces/${wsB}/customers?cursor=${new Date().toISOString()}~${customerId}`, adminOf(orgB))).json<CustomerPage>();
-  assert.deepEqual(cursor.data, []);
+  assert.equal(outside.total, 0);
 
   // A memory id from another customer of the same organization is a 404 too.
   const other = await seedCustomer("other@example.com", "Otto");

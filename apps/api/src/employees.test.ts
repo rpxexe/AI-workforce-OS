@@ -7,7 +7,6 @@ import {
   type ApiError,
   type EmployeeConfig,
   type EmployeeDetail,
-  type EmployeePage,
   type EmployeeSummary,
   type Workspace,
 } from "@workforce/shared";
@@ -223,45 +222,18 @@ test("isolation: another organization or workspace cannot see or touch an employ
   assert.equal(await prisma.aiEmployee.count({ where: { organizationId: orgB } }), 0);
 });
 
-test("paging: ?limit= returns pages newest first with a cursor, ?q= on the latest name or role, and counts by status", async () => {
-  const ws = (await call("POST", "/workspaces", adminOf(orgA), { name: "Paging" })).json<Workspace>().id;
+test("list: the whole tab newest change first, archived on its own tab, and nothing from another organization", async () => {
+  const ws = (await call("POST", "/workspaces", adminOf(orgA), { name: "Listing" })).json<Workspace>().id;
   const ids: string[] = [];
-  for (const name of ["One", "Two", "Three", "Four", "Five"]) {
-    const res = await call("POST", employees(ws), adminOf(orgA), config({ name, role: name === "Four" ? "Billing lead" : "Support agent" }));
-    ids.unshift(res.json<EmployeeDetail>().id);
-  }
-  // Renamed: an older version's name no longer matches.
-  await call("PUT", `${employees(ws)}/${ids[0]}`, adminOf(orgA), config({ name: "Fifth" }));
+  for (const name of ["One", "Two", "Three"]) ids.unshift((await call("POST", employees(ws), adminOf(orgA), config({ name }))).json<EmployeeDetail>().id);
   await call("PATCH", `${employees(ws)}/${ids[1]}/status`, adminOf(orgA), { status: "ARCHIVED" });
-  const page = async (query: string) => (await call("GET", `${employees(ws)}?${query}`, memberOf(orgA))).json<EmployeePage>();
+  const list = async (query = "") => (await call("GET", `${employees(ws)}${query}`, memberOf(orgA))).json<EmployeeSummary[]>();
 
-  // Archiving touched ids[1] last, so the current tab is newest change first: Fifth (renamed), Three, Two, One.
-  const first = await page("limit=2");
-  assert.deepEqual(first.data.map((e) => e.name), ["Fifth", "Three"]);
-  assert.deepEqual(first.counts, { DRAFT: 4, ACTIVE: 0, PAUSED: 0, ARCHIVED: 0 });
-  const second = await page(`limit=2&cursor=${first.nextCursor}`);
-  assert.deepEqual([second.data.map((e) => e.name), second.nextCursor], [["Two", "One"], null]);
-
-  assert.deepEqual((await page("limit=10&q=five")).data, []);
-  assert.deepEqual((await page("limit=10&q=fifth")).data.map((e) => e.name), ["Fifth"]);
-  assert.deepEqual((await page("limit=10&q=billing&archived=true")).data.map((e) => e.name), ["Four"]);
-  assert.deepEqual((await page("limit=10&archived=true")).counts.ARCHIVED, 1);
-
-  // Fifth's earlier versions match "support", its latest does not: the page still fills, and a cursor follows.
-  await call("PUT", `${employees(ws)}/${ids[0]}`, adminOf(orgA), config({ name: "Fifth", role: "Sales" }));
-  const support = await page("limit=2&q=support");
-  assert.deepEqual(support.data.map((e) => e.name), ["Three", "Two"]);
-  assert.deepEqual((await page(`limit=2&q=support&cursor=${support.nextCursor}`)).data.map((e) => e.name), ["One"]);
-  assert.equal((await call("GET", `${employees(ws)}?limit=2&cursor=nope`, memberOf(orgA))).statusCode, 400);
-
-  // Without ?limit= the whole list comes back as before (pickers and the dashboard).
-  assert.equal((await call("GET", employees(ws), memberOf(orgA))).json<EmployeeSummary[]>().length, 4);
-  for (const bad of ["limit=0", "limit=101"]) assert.equal((await call("GET", `${employees(ws)}?${bad}`, memberOf(orgA))).statusCode, 400, bad);
-
-  // Another organization: 404 on the workspace, an empty page in its own even with this cursor.
-  assert.equal((await call("GET", `${employees(ws)}?limit=2`, adminOf(orgB))).statusCode, 404);
-  const outside = (await call("GET", `${employees(wsB)}?limit=2&cursor=${first.nextCursor}`, adminOf(orgB))).json<EmployeePage>();
-  assert.deepEqual([outside.data, outside.nextCursor, outside.counts.DRAFT], [[], null, 0]);
+  assert.deepEqual((await list()).map((e) => e.name), ["Three", "One"]);
+  assert.deepEqual((await list("?archived=true")).map((e) => e.name), ["Two"]);
+  assert.equal((await call("GET", `${employees(ws)}?archived=maybe`, memberOf(orgA))).statusCode, 400);
+  assert.equal((await call("GET", employees(ws), adminOf(orgB))).statusCode, 404);
+  assert.deepEqual((await call("GET", employees(wsB), adminOf(orgB))).json<EmployeeSummary[]>(), []);
 });
 
 test("database: version numbers are unique per employee, and deleting an organization removes its data", async () => {

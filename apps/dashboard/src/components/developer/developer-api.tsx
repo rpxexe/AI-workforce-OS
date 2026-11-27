@@ -39,6 +39,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { TablePager, useServerPaged } from "@/components/table-pager";
 import { API_URL, ApiRequestError, useApi, useApiQuery } from "@/lib/api";
 import { useWorkspaces } from "@/lib/workspace";
 
@@ -584,27 +585,29 @@ type HookSheet =
 function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAdmin: boolean }) {
   const api = useApi();
   const [event, setEvent] = useState("all");
-  const [items, setItems] = useState<WebhookDeliveryRecord[] | null>(null);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [result, setResult] = useState<WebhookDeliveryPage | null>(null);
   const [error, setError] = useState<string>();
-  const path = `/developer/webhooks/${endpoint.id}/deliveries?limit=50${event === "all" ? "" : `&event=${event}`}`;
+  // Each page comes from the server; another event filter starts at page 1.
+  const paged = useServerPaged(event, 10);
+  const pager = paged.pager(result?.total ?? 0);
+  const path = `/developer/webhooks/${endpoint.id}/deliveries?${paged.query}${event === "all" ? "" : `&event=${event}`}`;
   const load = useCallback(
-    (after: string | null) =>
-      api<WebhookDeliveryPage>(after ? `${path}&cursor=${after}` : path).then(
+    () =>
+      api<WebhookDeliveryPage>(path).then(
         (page) => {
-          setItems((prev) => (after ? [...(prev ?? []), ...page.data] : page.data));
-          setCursor(page.nextCursor);
+          setResult(page);
+          setError(undefined);
         },
         (err: unknown) => setError(errorOf(err)),
       ),
     [api, path],
   );
   useEffect(() => {
-    void load(null);
+    void load();
   }, [load]);
   const redeliver = (id: string) =>
     api(`/developer/webhook-deliveries/${id}/redeliver`, { method: "POST", toast: { loading: "Sending delivery again…", success: "Delivery sent again" } }).then(
-      () => load(null),
+      () => load(),
       () => {
         // The toast in useApi shows why it failed.
       },
@@ -632,11 +635,11 @@ function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAd
             ))}
           </SelectContent>
         </Select>
-        <Button size="sm" variant="outline" onClick={() => void load(null)}>
+        <Button size="sm" variant="outline" onClick={() => void load()}>
           Refresh
         </Button>
       </div>
-      <Skullet data={items} sample={SAMPLE_DELIVERIES} id="webhook-deliveries" label="Loading deliveries">
+      <Skullet data={result?.data ?? null} sample={SAMPLE_DELIVERIES} id="webhook-deliveries" label="Loading deliveries">
         {(items) =>
           items.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing sent yet. Events appear here within seconds of happening.</p>
@@ -689,11 +692,7 @@ function Deliveries({ endpoint, isAdmin }: { endpoint: WebhookEndpointInfo; isAd
           )
         }
       </Skullet>
-      {cursor && (
-        <Button size="sm" variant="outline" onClick={() => void load(cursor)}>
-          Load more
-        </Button>
-      )}
+      <TablePager {...pager} />
     </div>
   );
 }
