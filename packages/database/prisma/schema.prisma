@@ -180,6 +180,8 @@ model Conversation {
   @@index([organizationId, workspaceId, status, updatedAt])
   // Conversations started per day (handoff analytics, reports, dashboard).
   @@index([organizationId, workspaceId, createdAt])
+  // The insights sweep: conversations that went quiet in the last 3 days, across every organization.
+  @@index([updatedAt])
 }
 
 // Conversation intelligence stored per conversation (the analyzer output the insights overview counts).

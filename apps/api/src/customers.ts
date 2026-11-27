@@ -4,6 +4,7 @@ import {
   listCustomersQuery,
   updateMemorySchema,
   type CustomerDetail,
+  type CustomerCounts,
   type CustomerExport,
   type CustomerFilter,
   type CustomerMemoryItem,
@@ -15,6 +16,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
 import { within } from "./employees.ts";
+import { after, cursorOf } from "./paging.ts";
 
 const customerParams = z.object({ workspaceId: z.string().min(1), customerId: z.string().min(1) });
 const memoryParams = customerParams.extend({ memoryId: z.string().min(1) });
@@ -87,26 +89,33 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
       email: has("email"),
       phone: has("phone"),
     };
-    const count = (extra: Prisma.CustomerWhereInput) => prisma.customer.count({ where: { AND: [where, extra] } });
-    const [rows, total, seenThisWeek, withEmail, withPhone, reachable, withCompany] = await Promise.all([
+    // Same match as `where` (Prisma's insensitive contains, wildcards escaped), so the tiles agree with the list.
+    const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
+    const [rows, [counts]] = await Promise.all([
       prisma.customer.findMany({
-        where: { AND: [where, filters[filter]] },
+        where: { AND: [where, filters[filter], after("lastSeenAt", cursor)] },
         include: { profile: true },
         orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
         take: limit + 1,
-        ...(cursor && { cursor: { id: cursor }, skip: 1 }),
       }),
-      count({}),
-      count(filters.week),
-      count(filters.email),
-      count(filters.phone),
-      count({ OR: [has("email"), has("phone")] }),
-      count(has("company")),
+      // Every tile in one pass over the search's customers, not one count query each.
+      prisma.$queryRaw<CustomerCounts[]>`
+        SELECT count(*)::int AS total,
+               (count(*) FILTER (WHERE c."lastSeenAt" >= ${weekAgo}))::int AS "seenThisWeek",
+               count(p.email)::int AS "withEmail",
+               count(p.phone)::int AS "withPhone",
+               (count(*) FILTER (WHERE p.email IS NOT NULL OR p.phone IS NOT NULL))::int AS reachable,
+               count(p.company)::int AS "withCompany"
+        FROM "Customer" c LEFT JOIN "CustomerProfile" p ON p."customerId" = c.id
+        WHERE c."organizationId" = ${scope.organizationId} AND c."workspaceId" = ${scope.workspaceId}
+          AND (${term}::text IS NULL OR c."externalId" ILIKE ${term} OR p.name ILIKE ${term}
+               OR p.email ILIKE ${term} OR p.phone ILIKE ${term} OR p.company ILIKE ${term})`,
     ]);
+    const last = rows[limit - 1];
     return {
       data: rows.slice(0, limit).map(toSummary),
-      nextCursor: rows.length > limit ? rows[limit - 1]!.id : null,
-      counts: { total, seenThisWeek, withEmail, withPhone, reachable, withCompany },
+      nextCursor: rows.length > limit && last ? cursorOf(last.lastSeenAt, last.id) : null,
+      counts: counts!,
     };
   });
 

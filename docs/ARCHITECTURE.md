@@ -183,7 +183,7 @@ GET   /health                                   public
 GET   /ws                                       WebSocket echo (placeholder transport)
 GET   /workspaces                               member; provisions org + Default on first call
 POST  /workspaces                               admin
-GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; no ?limit=: the whole list as an array (pickers; the dashboard calls listEmployees); ?limit=1-100 [&cursor=] [&q= latest name/role]: EmployeePage { data, nextCursor, counts by status for the tab }, newest change first
+GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; no ?limit=: the whole list as an array (pickers; the dashboard calls listEmployees); ?limit=1-100 [&cursor=] [&q= latest name/role, the page still fills]: EmployeePage { data, nextCursor, counts by status for the tab }, newest change first
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
@@ -332,7 +332,7 @@ POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fr
 GET   /developer/audit                          admin; newest 100 developer audit entries
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
-GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (50) &cursor=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany) follow ?q= only
+GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (50) &cursor=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany, one SQL pass) follow ?q= only
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
 DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited

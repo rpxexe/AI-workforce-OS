@@ -150,7 +150,15 @@ test("the list pages newest first by last seen, filters on the server, and count
   assert.deepEqual([both.data.length, both.counts.total], [2, 7]);
   assert.deepEqual((await list(`&filter=phone&limit=2&cursor=${both.nextCursor}`)).data.map((c) => c.externalId), ["pager-5"]);
 
-  for (const bad of ["&limit=0", "&limit=101", "&filter=nope"])
+  // A customer seen again between pages moves to the top; the next page still carries on where the last one ended.
+  const before = await list("&limit=3");
+  await prisma.customer.update({ where: { id: ids[2] }, data: { lastSeenAt: new Date() } });
+  assert.deepEqual((await list(`&limit=3&cursor=${before.nextCursor}`)).data.map((c) => c.id), ids.slice(3, 6));
+
+  // Search wildcards match themselves in the counts, as in the list.
+  assert.equal((await list("%25&limit=1")).counts.total, 0);
+
+  for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&cursor=nope"])
     assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${bad}`, memberOf(orgA))).statusCode, 400, bad);
 });
 
@@ -247,7 +255,7 @@ test("another organization's customer is a 404 on every route and nothing change
   const outside = (await call("GET", `/workspaces/${wsB}/customers?q=Pia`, adminOf(orgB))).json<CustomerPage>();
   assert.deepEqual([outside.data, outside.counts.total], [[], 0]);
   // A cursor from org A does not open org A's list to org B.
-  const cursor = (await call("GET", `/workspaces/${wsB}/customers?cursor=${customerId}`, adminOf(orgB))).json<CustomerPage>();
+  const cursor = (await call("GET", `/workspaces/${wsB}/customers?cursor=${new Date().toISOString()}~${customerId}`, adminOf(orgB))).json<CustomerPage>();
   assert.deepEqual(cursor.data, []);
 
   // A memory id from another customer of the same organization is a 404 too.

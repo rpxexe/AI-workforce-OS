@@ -16,6 +16,7 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
+import { after, cursorOf } from "./paging.ts";
 import { assertPublishable, release } from "./releases.ts";
 
 type VersionRow = Prisma.AiEmployeeVersionGetPayload<object>;
@@ -97,24 +98,34 @@ export async function pageEmployees(
 ): Promise<EmployeePage> {
   const where = { ...within(scope), status: statusFilter(archived) };
   const like = { contains: q, mode: "insensitive" as const };
-  const [rows, byStatus] = await Promise.all([
-    prisma.aiEmployee.findMany({
-      // Any version matching narrows it in SQL; the latest version's name or role decides below.
-      where: { ...where, ...(q && { versions: { some: { OR: [{ name: like }, { role: like }] } } }) },
+  const needle = q?.toLowerCase();
+  const matches = (e: EmployeeSummary) => !needle || e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle);
+
+  // Any version matching narrows it in SQL; the latest version's name or role decides here. An employee whose old
+  // name matched is dropped, so read on until the page is full: a short page always means the list has ended.
+  const data: EmployeeSummary[] = [];
+  let next = cursor;
+  let more = true;
+  while (more && data.length < limit) {
+    const rows = await prisma.aiEmployee.findMany({
+      where: { ...where, ...(q && { versions: { some: { OR: [{ name: like }, { role: like }] } } }), ...after("updatedAt", next) },
       orderBy: newestFirst,
       take: limit + 1,
-      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
       include: summaryInclude,
-    }),
-    prisma.aiEmployee.groupBy({ by: ["status"], where, _count: { _all: true } }),
-  ]);
-  const needle = q?.toLowerCase();
-  const data = toSummaries(rows.slice(0, limit)).filter(
-    (e) => !needle || e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle),
-  );
+    });
+    more = rows.length > limit;
+    for (const row of rows.slice(0, limit)) {
+      if (data.length === limit) {
+        more = true;
+        break;
+      }
+      data.push(...toSummaries([row]).filter(matches));
+      next = cursorOf(row.updatedAt, row.id);
+    }
+  }
   const counts = Object.fromEntries(EMPLOYEE_STATUSES.map((s) => [s, 0])) as EmployeePage["counts"];
-  for (const g of byStatus) counts[g.status] = g._count._all;
-  return { data, nextCursor: rows.length > limit ? rows[limit - 1]!.id : null, counts };
+  for (const g of await prisma.aiEmployee.groupBy({ by: ["status"], where, _count: { _all: true } })) counts[g.status] = g._count._all;
+  return { data, nextCursor: more ? (next ?? null) : null, counts };
 }
 
 /**

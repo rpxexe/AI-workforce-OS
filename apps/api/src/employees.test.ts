@@ -247,13 +247,20 @@ test("paging: ?limit= returns pages newest first with a cursor, ?q= on the lates
   assert.deepEqual((await page("limit=10&q=billing&archived=true")).data.map((e) => e.name), ["Four"]);
   assert.deepEqual((await page("limit=10&archived=true")).counts.ARCHIVED, 1);
 
+  // Fifth's earlier versions match "support", its latest does not: the page still fills, and a cursor follows.
+  await call("PUT", `${employees(ws)}/${ids[0]}`, adminOf(orgA), config({ name: "Fifth", role: "Sales" }));
+  const support = await page("limit=2&q=support");
+  assert.deepEqual(support.data.map((e) => e.name), ["Three", "Two"]);
+  assert.deepEqual((await page(`limit=2&q=support&cursor=${support.nextCursor}`)).data.map((e) => e.name), ["One"]);
+  assert.equal((await call("GET", `${employees(ws)}?limit=2&cursor=nope`, memberOf(orgA))).statusCode, 400);
+
   // Without ?limit= the whole list comes back as before (pickers and the dashboard).
   assert.equal((await call("GET", employees(ws), memberOf(orgA))).json<EmployeeSummary[]>().length, 4);
   for (const bad of ["limit=0", "limit=101"]) assert.equal((await call("GET", `${employees(ws)}?${bad}`, memberOf(orgA))).statusCode, 400, bad);
 
   // Another organization: 404 on the workspace, an empty page in its own even with this cursor.
   assert.equal((await call("GET", `${employees(ws)}?limit=2`, adminOf(orgB))).statusCode, 404);
-  const outside = (await call("GET", `${employees(wsB)}?limit=2&cursor=${ids[2]}`, adminOf(orgB))).json<EmployeePage>();
+  const outside = (await call("GET", `${employees(wsB)}?limit=2&cursor=${first.nextCursor}`, adminOf(orgB))).json<EmployeePage>();
   assert.deepEqual([outside.data, outside.nextCursor, outside.counts.DRAFT], [[], null, 0]);
 });
 

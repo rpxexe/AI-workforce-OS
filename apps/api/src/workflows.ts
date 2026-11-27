@@ -184,8 +184,8 @@ export function workflowRoutes(app: FastifyInstance, authenticate: Authenticate,
     const workflows = await prisma.workflow.findMany({
       where: { ...within(scope), deletedAt: deleted ? { not: null } : null },
       orderBy: { updatedAt: "desc" },
-      // shortcut: no pagination, add a cursor when a workspace nears 200 workflows
-      take: 200,
+      // shortcut: the whole list (the page searches, filters, counts and pages it in the browser); move those to the
+      // server with a cursor, as on Customers, when a workspace has thousands of workflows
       include: {
         versions: { ...summaryInclude.versions, select: { ...summaryInclude.versions.select, definition: true }, take: 1 },
         publishedVersion: { select: { number: true, definition: true } },
