@@ -520,7 +520,7 @@ function SectionMenu({ section }: { section: SectionId }) {
     <nav
       aria-label="Settings sections"
       className={cn(
-        "hidden shrink-0 flex-col gap-1 overflow-hidden rounded-lg border bg-card p-2 shadow-sm dark:shadow-none transition-[width] duration-200 lg:sticky lg:top-16 lg:flex",
+        "hidden shrink-0 flex-col gap-1 overflow-hidden rounded-lg border bg-card p-2 shadow-sm dark:shadow-none transition-[width] duration-200 lg:sticky lg:top-2 lg:flex",
         collapsed ? "w-14" : "w-56",
       )}
     >

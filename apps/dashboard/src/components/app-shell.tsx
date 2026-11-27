@@ -314,10 +314,11 @@ export function AppShell({ children, defaultOpen }: { children: ReactNode; defau
       <TooltipProvider>
         <SidebarProvider defaultOpen={defaultOpen}>
           <AppSidebar />
-          {/* min-w-0: lets truncated text shrink instead of widening the page past the viewport. */}
-          <SidebarInset className="min-w-0">
+          {/* min-w-0: lets truncated text shrink instead of widening the page past the viewport. Exactly the window's
+              height: the header stays put and only the content under it scrolls, so its scrollbar starts below the header. */}
+          <SidebarInset className="h-svh min-w-0 overflow-hidden">
             {/* Three columns: the page title, the search box centred, the account controls. */}
-            <header className="sticky top-0 z-10 grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-2 border-b bg-background/80 px-4 backdrop-blur md:grid-cols-[1fr_minmax(0,24rem)_1fr]">
+            <header className="z-10 grid h-14 shrink-0 grid-cols-[auto_1fr_auto] items-center gap-2 border-b bg-background/80 px-4 backdrop-blur md:grid-cols-[1fr_minmax(0,24rem)_1fr]">
               <div className="flex min-w-0 items-center gap-2">
                 <SidebarTrigger className="-ml-1" />
                 <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
@@ -330,8 +331,12 @@ export function AppShell({ children, defaultOpen }: { children: ReactNode; defau
                 <ThemeToggle />
               </div>
             </header>
-            <div className="mx-auto w-full max-w-6xl flex-1 p-4 md:p-6">
-              {isLoaded && !orgId ? <ChooseOrganization /> : <WorkspaceGate>{children}</WorkspaceGate>}
+            {/* The page's scroll area. The gutter stays reserved when a page is short (a skeleton), so content doesn't
+                jump sideways when it loads. */}
+            <div data-slot="page-scroll" className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+              <div className="mx-auto w-full max-w-6xl p-4 md:p-6">
+                {isLoaded && !orgId ? <ChooseOrganization /> : <WorkspaceGate>{children}</WorkspaceGate>}
+              </div>
             </div>
           </SidebarInset>
         </SidebarProvider>
