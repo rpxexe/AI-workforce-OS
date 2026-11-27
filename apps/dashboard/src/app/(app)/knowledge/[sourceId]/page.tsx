@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/attachment";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -56,8 +56,8 @@ const working = (d: KnowledgeDocument) => d.status === "PENDING" || d.status ===
 
 const FILTERS: Record<KnowledgeDocumentFilter, string> = { all: "All", ready: "Ready", processing: "Processing", failed: "Failed" };
 
-/** A file picked or dropped in this visit, shown as an attachment until it is dismissed. */
-type PickedFile = { id: string; name: string; size: number; state: "uploading" | "done" | "error"; message: string };
+/** A file picked or dropped in this visit, shown as an attachment until it is dismissed. "selected" waits for the Upload button. */
+type PickedFile = { id: string; name: string; size: number; state: "selected" | "uploading" | "done" | "error"; message: string; file?: File };
 
 /** Why a file cannot be uploaded, or null when it can. */
 const problemOf = (f: File) =>
@@ -190,28 +190,40 @@ function SourceView({
   const [dragging, setDragging] = useState(false);
   const patch = (id: string, change: Partial<PickedFile>) => setUploads((list) => list.map((u) => (u.id === id ? { ...u, ...change } : u)));
 
-  /** Uploads one file at a time; each shows its own state, so a bad file does not stop the others. */
-  const uploadFiles = async (files: File[]) => {
+  const selected = uploads.filter((u) => u.state === "selected");
+
+  /** Adds picked or dropped files to the selection; nothing is sent until Upload. Files that cannot be uploaded show why. */
+  const select = (files: File[]) => {
     if (files.length === 0) return;
-    const batch = files.map((file) => {
-      const problem = problemOf(file);
-      return {
-        file,
-        entry: { id: crypto.randomUUID(), name: file.name, size: file.size, state: problem ? "error" : "uploading", message: problem ?? "Uploading" } satisfies PickedFile,
-      };
+    setUploads((list) => {
+      // Finished uploads from earlier make way for the new selection; failed ones stay until dismissed.
+      const kept = list.filter((u) => u.state !== "done");
+      const fresh = files
+        .filter((f) => !kept.some((u) => u.state === "selected" && u.name === f.name && u.size === f.size))
+        .map((file): PickedFile => {
+          const problem = problemOf(file);
+          return problem
+            ? { id: crypto.randomUUID(), name: file.name, size: file.size, state: "error", message: problem }
+            : { id: crypto.randomUUID(), name: file.name, size: file.size, state: "selected", message: "Ready to upload", file };
+        });
+      return [...kept, ...fresh];
     });
-    // Finished uploads from earlier make way for the new batch; failed ones stay until dismissed.
-    setUploads((list) => [...list.filter((u) => u.state !== "done"), ...batch.map((b) => b.entry)]);
+  };
+
+  /** Uploads the selected files one at a time; each shows its own state, so a bad file does not stop the others. */
+  const uploadSelected = async () => {
+    const batch = selected;
+    if (batch.length === 0) return;
+    setUploads((list) => list.map((u) => (u.state === "selected" ? { ...u, state: "uploading", message: "Uploading" } : u)));
     setUploading(true);
     let uploaded = false;
-    for (const { file, entry } of batch) {
-      if (entry.state === "error") continue;
+    for (const entry of batch) {
       try {
-        await api(`${base}/sources/${sourceId}/documents?name=${encodeURIComponent(file.name)}`, { method: "POST", file, toast: false });
-        patch(entry.id, { state: "done", message: "Uploaded, now processing" });
+        await api(`${base}/sources/${sourceId}/documents?name=${encodeURIComponent(entry.name)}`, { method: "POST", file: entry.file, toast: false });
+        patch(entry.id, { state: "done", message: "Uploaded, now processing", file: undefined });
         uploaded = true;
       } catch (err) {
-        patch(entry.id, { state: "error", message: err instanceof Error ? err.message : "Upload failed" });
+        patch(entry.id, { state: "error", message: err instanceof Error ? err.message : "Upload failed", file: undefined });
       }
     }
     setUploading(false);
@@ -220,12 +232,12 @@ function SourceView({
   const upload = (event: ChangeEvent<HTMLInputElement>) => {
     const files = [...(event.target.files ?? [])];
     event.target.value = ""; // so picking the same file again still fires
-    void uploadFiles(files);
+    select(files);
   };
   const drop = (event: DragEvent) => {
     event.preventDefault();
     setDragging(false);
-    void uploadFiles([...event.dataTransfer.files]);
+    select([...event.dataTransfer.files]);
   };
 
   const { passages, processingDocuments: processing, failedDocuments: failed } = data;
@@ -253,10 +265,6 @@ function SourceView({
               tabIndex={-1}
               aria-hidden
             />
-            <Button onClick={() => picker.current?.click()} disabled={uploading}>
-              {uploading ? <Spinner /> : <Upload aria-hidden />}
-              {uploading ? "Uploading" : "Upload documents"}
-            </Button>
             <Button
               variant="outline"
               onClick={() =>
@@ -304,40 +312,67 @@ function SourceView({
               <Upload aria-hidden />
             </AttachmentMedia>
             <AttachmentContent className="flex-none">
-              <AttachmentTitle>{dragging ? "Drop to upload" : "Drop files here, or click to choose"}</AttachmentTitle>
+              <AttachmentTitle>{dragging ? "Drop to add" : "Drop files here, or click to choose"}</AttachmentTitle>
               <AttachmentDescription>PDF, DOCX, TXT or CSV, up to {formatSize(MAX_UPLOAD_BYTES)} each</AttachmentDescription>
             </AttachmentContent>
           </Attachment>
 
           {uploads.length > 0 && (
-            <AttachmentGroup aria-live="polite">
-              {uploads.map((u) => (
-                <Attachment key={u.id} state={u.state} className="max-w-72">
-                  <AttachmentMedia>
-                    {u.state === "uploading" ? (
-                      <Spinner />
-                    ) : u.state === "error" ? (
-                      <CircleAlert aria-hidden />
-                    ) : (
-                      <CircleCheck className="text-success" aria-hidden />
+            <Card className="gap-4 py-4">
+              <CardHeader className="px-4">
+                <CardTitle>{uploading ? "Uploading" : selected.length > 0 ? "Ready to upload" : "Uploads"}</CardTitle>
+                <CardDescription>
+                  {selected.length > 0
+                    ? `${selected.length} ${selected.length === 1 ? "file" : "files"} selected · ${formatSize(selected.reduce((s, u) => s + u.size, 0))}. Nothing is sent until you upload.`
+                    : "Uploaded files are processed in the background."}
+                </CardDescription>
+                {(selected.length > 0 || uploading) && (
+                  <CardAction className="flex items-center gap-2">
+                    {!uploading && (
+                      <Button variant="ghost" size="sm" onClick={() => setUploads((list) => list.filter((u) => u.state !== "selected"))}>
+                        Clear
+                      </Button>
                     )}
-                  </AttachmentMedia>
-                  <AttachmentContent>
-                    <AttachmentTitle title={u.name}>{u.name}</AttachmentTitle>
-                    <AttachmentDescription title={u.message}>
-                      {formatSize(u.size)} · {u.message}
-                    </AttachmentDescription>
-                  </AttachmentContent>
-                  {u.state !== "uploading" && (
-                    <AttachmentActions>
-                      <AttachmentAction aria-label={`Dismiss ${u.name}`} onClick={() => setUploads((list) => list.filter((x) => x.id !== u.id))}>
-                        <X aria-hidden />
-                      </AttachmentAction>
-                    </AttachmentActions>
-                  )}
-                </Attachment>
-              ))}
-            </AttachmentGroup>
+                    <Button size="sm" onClick={uploadSelected} disabled={uploading || selected.length === 0}>
+                      {uploading ? <Spinner /> : <Upload aria-hidden />}
+                      {uploading ? "Uploading" : "Upload"}
+                    </Button>
+                  </CardAction>
+                )}
+              </CardHeader>
+              <CardContent className="px-4">
+                <AttachmentGroup aria-live="polite">
+                  {uploads.map((u) => (
+                    <Attachment key={u.id} state={u.state === "selected" ? "idle" : u.state} className="max-w-72">
+                      <AttachmentMedia>
+                        {u.state === "uploading" ? (
+                          <Spinner />
+                        ) : u.state === "selected" ? (
+                          <FileText aria-hidden />
+                        ) : u.state === "error" ? (
+                          <CircleAlert aria-hidden />
+                        ) : (
+                          <CircleCheck className="text-success" aria-hidden />
+                        )}
+                      </AttachmentMedia>
+                      <AttachmentContent>
+                        <AttachmentTitle title={u.name}>{u.name}</AttachmentTitle>
+                        <AttachmentDescription title={u.message}>
+                          {formatSize(u.size)} · {u.message}
+                        </AttachmentDescription>
+                      </AttachmentContent>
+                      {u.state !== "uploading" && (
+                        <AttachmentActions>
+                          <AttachmentAction aria-label={`Remove ${u.name}`} onClick={() => setUploads((list) => list.filter((x) => x.id !== u.id))}>
+                            <X aria-hidden />
+                          </AttachmentAction>
+                        </AttachmentActions>
+                      )}
+                    </Attachment>
+                  ))}
+                </AttachmentGroup>
+              </CardContent>
+            </Card>
           )}
         </section>
       )}

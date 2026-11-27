@@ -179,8 +179,9 @@ function CustomerList({
         <TableHeader>
           <TableRow>
             <TableHead>Customer</TableHead>
-            <TableHead className="hidden md:table-cell">Contact</TableHead>
-            <TableHead className="hidden lg:table-cell">Company</TableHead>
+            {/* Breakpoints are the viewport's, which includes the 256px sidebar: one step later than usual so the table fits its card. */}
+            <TableHead className="hidden lg:table-cell">Contact</TableHead>
+            <TableHead className="hidden xl:table-cell">Company</TableHead>
             <TableHead className="text-right">Last seen</TableHead>
             <TableHead className="w-10">
               <span className="sr-only">Opens</span>
@@ -199,7 +200,7 @@ function CustomerList({
                   </span>
                 </Link>
               </TableCell>
-              <TableCell className="hidden max-w-64 text-muted-foreground md:table-cell">
+              <TableCell className="hidden max-w-64 text-muted-foreground lg:table-cell">
                 {c.email || c.phone ? (
                   <span className="flex min-w-0 flex-col gap-0.5 text-sm">
                     {c.email && (
@@ -221,7 +222,7 @@ function CustomerList({
                   "—"
                 )}
               </TableCell>
-              <TableCell className="hidden max-w-48 text-muted-foreground lg:table-cell">
+              <TableCell className="hidden max-w-48 text-muted-foreground xl:table-cell">
                 <span className="block truncate">{c.company ?? "—"}</span>
               </TableCell>
               <TableCell className="text-right text-muted-foreground">

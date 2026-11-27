@@ -22,6 +22,8 @@ pnpm inngest:dev  # Inngest dev server for durable background jobs (with INNGEST
 
 ## Rules that are easy to break
 
+- Search and read code through graphify first (graph in `graphify-out/`: `GRAPH_REPORT.md`,
+  `graph.json`). Open raw files only for the exact lines needed to edit.
 - Code outside the dashboard runs on Node directly (type stripping): no enums or parameter
   properties, and relative imports end in `.ts`.
 - Every tenant query filters on `organizationId` (and `workspaceId`) taken from the verified
