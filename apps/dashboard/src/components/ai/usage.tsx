@@ -94,7 +94,8 @@ function UsageReport({ data, days }: { data: AiUsageSummary; days: string }) {
   ) : (
     // Skullet wraps its content in a block, so this keeps the gaps the card content used to give.
     <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      {/* The card drops its side padding around tables so they run edge to edge; everything else gets it back. */}
+      <div className="grid grid-cols-2 gap-3 px-4 md:grid-cols-5">
         <StatTile label="Calls" icon={Activity} value={count(data.totals.calls)} />
         <StatTile label="Failed" icon={CircleX} value={count(data.totals.failures)} />
         <StatTile label="Fallbacks" icon={Shuffle} value={count(data.totals.fallbacks)} />
@@ -134,7 +135,7 @@ function UsageReport({ data, days }: { data: AiUsageSummary; days: string }) {
         </Table>
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 px-4">
         {data.byTask.map((t) => (
           <Badge key={t.task} variant="outline">
             {taskLabel(t.task)}: {count(t.calls)} calls, {money(t.costUsd)}
@@ -143,7 +144,7 @@ function UsageReport({ data, days }: { data: AiUsageSummary; days: string }) {
       </div>
 
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-medium">Recent calls</h3>
+        <h3 className="px-4 text-sm font-medium">Recent calls</h3>
         <div className="overflow-x-auto">
           <Table>
             <TableHeader>
