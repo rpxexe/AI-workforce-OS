@@ -1,6 +1,6 @@
 // Human + AI collaboration: handoff states and triggers, the agents' inbox, the AI Copilot, handoff analytics.
 import { z } from "zod";
-import type { ConversationMessage } from "./conversation.ts";
+import type { ConversationMessage, MessageWindow } from "./conversation.ts";
 import type { MessageSource } from "./knowledge.ts";
 import type { ConversationInsight } from "./insights.ts";
 import type { CallTransferRecord } from "./voice.ts";
@@ -46,10 +46,16 @@ export const HANDOFF_TRIGGER_LABELS: Record<HandoffTrigger, string> = {
 export const INBOX_VIEWS = ["queue", "mine", "waiting", "human_active", "ai_active", "reopened", "resolved", "all"] as const;
 export type InboxView = (typeof INBOX_VIEWS)[number];
 
+/** ?view= and ?employeeId=, then ?limit= rows and ?cursor= from the last page's nextCursor (only valid for the same view and employee). */
 export const inboxQuerySchema = z.object({
   view: z.enum(INBOX_VIEWS).default("queue"),
   employeeId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(1000).optional(),
 });
+
+/** ?employeeId= for the counts: every view counted at once. */
+export const inboxCountsQuerySchema = z.object({ employeeId: z.string().min(1).optional() });
 
 /** What an agent can do to a conversation from the inbox. */
 export const conversationActionSchema = z.discriminatedUnion("action", [
@@ -102,7 +108,11 @@ export type InboxItem = {
   updatedAt: string;
 };
 
-export type InboxResponse = { items: InboxItem[]; counts: Record<InboxView, number> };
+/** One page of a view (the queue oldest first, the others newest first); nextCursor null ends it. Counts: GET …/inbox/counts. */
+export type InboxPage = { data: InboxItem[]; nextCursor: string | null };
+export type InboxCounts = Record<InboxView, number>;
+
+
 
 export type Citation = MessageSource & { excerpt: string };
 
@@ -118,8 +128,7 @@ export type CopilotSuggestion = {
   createdAt: string;
 };
 
-export type InboxConversation = Omit<InboxItem, "lastMessage" | "handoff"> & {
-  messages: ConversationMessage[];
+export type InboxConversation = Omit<InboxItem, "lastMessage" | "handoff"> & MessageWindow & {
   handoffs: HandoffRecord[];
   /** Newest first. */
   suggestions: CopilotSuggestion[];

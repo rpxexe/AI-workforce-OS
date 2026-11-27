@@ -8,6 +8,8 @@ import {
   type ConversationMessage,
   type ConversationStatus,
   type ConversationSummary,
+  type ConversationSummaryPage,
+  type MessagePage,
   type EmployeeDetail,
   type ToolExecutionRecord,
   defaultEmployeeConfig,
@@ -15,9 +17,11 @@ import {
 import { ArrowLeft, ArrowUp, Bot, CircleAlert, MessageCircleDashed, Plus, UserRoundCheck } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Checkpoint, MessageSources, MessageTools, useToolExecutions } from "@/components/chat/message-parts";
 import { EmployeeAvatar, formatDate } from "@/components/employees/meta";
+import { LoadOnView } from "@/components/load-on-view";
+import { catchUp, mergeMessages } from "@/lib/messages";
 import { ErrorState } from "@/components/states";
 import { Skeleton as Skullet } from "skullet/react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -62,12 +66,15 @@ const SAMPLE: EmployeeDetail = {
 };
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this list; never shown as data.
-const SAMPLE_HISTORY: ConversationSummary[] = Array.from({ length: 4 }, (_, i) => ({
-  id: `sample-${i}`,
-  title: "Question about an order delivery",
-  updatedAt: "2026-01-01T00:00:00.000Z",
-  status: "AI_ACTIVE",
-}));
+const SAMPLE_HISTORY: ConversationSummaryPage = {
+  data: Array.from({ length: 4 }, (_, i) => ({
+    id: `sample-${i}`,
+    title: "Question about an order delivery",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    status: "AI_ACTIVE",
+  })),
+  nextCursor: null,
+};
 
 function ChatBubble({
   role,
@@ -127,7 +134,23 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
   const path = `/workspaces/${workspace.id}/employees/${id}`;
 
   const employee = useApiQuery<EmployeeDetail>(path);
-  const history = useApiQuery<ConversationSummary[]>(`${path}/conversations`);
+  const history = useApiQuery<ConversationSummaryPage>(`${path}/conversations`);
+  // Pages after the first, loaded as the list scrolls to its end; `cursor` opens the next one (null: no more).
+  const [older, setOlder] = useState<{ rows: ConversationSummary[]; cursor: string | null }>();
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderCursor = older ? older.cursor : (history.data?.nextCursor ?? null);
+  const loadOlder = async () => {
+    if (!olderCursor || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api<ConversationSummaryPage>(`${path}/conversations?cursor=${encodeURIComponent(olderCursor)}`);
+      setOlder((o) => ({ rows: [...(o?.rows ?? []), ...page.data], cursor: page.nextCursor }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load older conversations. Try again.");
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   const [conversationId, setConversationId] = useState<string>();
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -142,20 +165,62 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
   const [notice, setNotice] = useState<string>();
   const withPeople = status === "WAITING_FOR_HUMAN" || status === "HUMAN_ACTIVE";
   const executions = useToolExecutions(workspace.id, conversationId, messages);
+  /** Opens the page of messages before the ones shown (null: none, or a conversation started here). */
+  const [earlierCursor, setEarlierCursor] = useState<string | null>(null);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  /** Where the next poll continues; unset until the open conversation's detail was read. */
+  const newest = useRef<string>(undefined);
+  const openConversation = useRef(conversationId);
+  useEffect(() => {
+    openConversation.current = conversationId;
+  });
 
+  // While people have it, poll for only what is new (following …/messages/new when more than one window came in).
   useEffect(() => {
     if (!withPeople || !conversationId) return;
-    const timer = setInterval(() => {
-      api<ConversationDetail>(`${path}/conversations/${conversationId}`).then(
-        (detail) => {
-          setMessages(detail.messages);
-          setStatus(detail.status);
-        },
-        () => {},
-      );
+    const conversationPath = `${path}/conversations/${conversationId}`;
+    let active = true;
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const after = newest.current;
+        const detail = await api<ConversationDetail>(after ? `${conversationPath}?after=${encodeURIComponent(after)}` : conversationPath);
+        const rest = detail.caughtUp ? { messages: [], cursor: detail.newestCursor } : await catchUp(api, conversationPath, detail.newestCursor);
+        if (!active) return;
+        newest.current = rest.cursor;
+        if (!after) setEarlierCursor(detail.olderCursor);
+        setMessages((current) => mergeMessages(current, [...detail.messages, ...rest.messages]));
+        setStatus(detail.status);
+      } catch {
+        // The next poll tries again.
+      } finally {
+        polling = false;
+      }
     }, 4000);
-    return () => clearInterval(timer);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [api, path, conversationId, withPeople]);
+
+  const loadEarlier = async () => {
+    if (!earlierCursor || !conversationId || loadingEarlier) return;
+    const openId = conversationId;
+    setLoadingEarlier(true);
+    try {
+      const page = await api<MessagePage>(`${path}/conversations/${openId}/messages?cursor=${encodeURIComponent(earlierCursor)}`);
+      // Another conversation was opened meanwhile: this page is not its.
+      if (openConversation.current !== openId) return;
+      setMessages((current) => mergeMessages(page.data, current));
+      setEarlierCursor(page.nextCursor);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load earlier messages. Try again.");
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
 
   if (employee.error) return <ErrorState message={employee.error.message} onRetry={employee.reload} />;
   const view = (data: EmployeeDetail) => {
@@ -167,6 +232,8 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
     const startNew = () => {
       setConversationId(undefined);
       setMessages([]);
+      setEarlierCursor(null);
+      newest.current = undefined;
       setError(undefined);
       setStatus(undefined);
       setNotice(undefined);
@@ -178,6 +245,8 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
         const detail = await api<ConversationDetail>(`${path}/conversations/${conversation.id}`);
         setConversationId(detail.id);
         setMessages(detail.messages);
+        setEarlierCursor(detail.olderCursor);
+        newest.current = detail.newestCursor;
         setCustomer(detail.customer ?? "");
         setStatus(detail.status);
         setNotice(undefined);
@@ -216,7 +285,7 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
             setStatus(e.conversation.status);
             setNotice(e.handoff && `Handed to people: ${HANDOFF_TRIGGER_LABELS[e.handoff.trigger]}. ${e.handoff.reason}`);
             setMessages((current) => [...current, ...e.messages]);
-            history.setData([e.conversation, ...(history.data ?? []).filter((c) => c.id !== e.conversation.id)]);
+            history.setData({ data: [e.conversation, ...(history.data?.data ?? []).filter((c) => c.id !== e.conversation.id)], nextCursor: history.data?.nextCursor ?? null });
           }
           finished ||= e.type !== "text";
         });
@@ -268,8 +337,11 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
                 <p className="text-sm text-destructive">{history.error.message}</p>
               ) : (
                 <Skullet data={history.data} sample={SAMPLE_HISTORY} id="employee-chat-history" label="Loading past conversations">
-                  {(conversations) =>
-                    conversations.length === 0 ? (
+                  {(first) => {
+                    // A chat that moved to the top (a new message) is shown there, not again further down.
+                    const onTop = new Set(first.data.map((c) => c.id));
+                    const conversations = [...first.data, ...(older?.rows.filter((c) => !onTop.has(c.id)) ?? [])];
+                    return conversations.length === 0 ? (
                       <p className="text-sm text-muted-foreground">None yet. Send a message to start one.</p>
                     ) : (
                       <ul className="flex max-h-96 flex-col gap-1 overflow-y-auto lg:max-h-none">
@@ -288,9 +360,14 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
                             </Button>
                           </li>
                         ))}
+                        {olderCursor && (
+                          <li>
+                            <LoadOnView onView={loadOlder} loading={loadingOlder} label="Loading older conversations" />
+                          </li>
+                        )}
                       </ul>
-                    )
-                  }
+                    );
+                  }}
                 </Skullet>
               )}
             </CardContent>
@@ -311,7 +388,9 @@ export default withWorkspace(function EmployeeChatPage({ workspace }) {
               <MessageScrollerProvider autoScroll>
                 <MessageScroller className="min-h-0 flex-1">
                   <MessageScrollerViewport>
-                    <MessageScrollerContent role="log" aria-label="Conversation" aria-busy={busy} className="gap-4 p-4">
+                    <MessageScrollerContent role="log" aria-label="Conversation" aria-busy={busy || loadingEarlier} className="gap-4 p-4">
+                      {/* Earlier pages are prepended; the viewport keeps what you were reading in place. */}
+                      {earlierCursor && <LoadOnView onView={loadEarlier} loading={loadingEarlier} label="Loading earlier messages" />}
                       {messages.map((m, i) => {
                         const switched = answererChanged(messages, i);
                         return (

@@ -190,15 +190,17 @@ PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
 POST  .../employees/:id/publish                 admin; body { version }; first publish activates; 409 while a rollout runs or for an unapproved suggestion's version; logs a release
 PATCH .../employees/:id/status                  admin; ACTIVE | PAUSED | ARCHIVED
 POST  .../employees/:id/duplicate               admin; new draft from the latest version
-GET   .../employees/:id/conversations           member; newest 50
-GET   .../employees/:id/conversations/:cid      member; with messages
+GET   .../employees/:id/conversations           member; ConversationSummaryPage { data, nextCursor }, updatedAt then id newest first, cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400)
+GET   .../employees/:id/conversations/:cid      member; with MessageWindow { messages (newest 100, oldest first), olderCursor, newestCursor, caughtUp }; ?after=<newestCursor> returns only newer messages (at most 100, caughtUp false when more wait)
+GET   .../employees/:id/conversations/:cid/messages[/new]  member; MessagePage of older messages (?cursor=) / NewMessages { data, cursor, more } after ?after= (shared code: apps/api/src/messages.ts)
 POST  .../employees/:id/messages                admin; body { conversationId?, message, customer? }; SSE reply
 GET   .../employees/:id/knowledge               member; sources attached to the employee
 PUT   .../employees/:id/knowledge               admin; body { sourceIds }; replaces the set
 GET   /workspaces/:workspaceId/knowledge/sources            member; KnowledgeSourcePage { data, nextCursor } by name then id, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?q= name/description; ?filter=all|filled|empty; each source with documentCount and ready/processing/failed counts
 GET   /workspaces/:workspaceId/knowledge/sources/summary    member; KnowledgeSourceCounts { sources, emptySources, documents, readyDocuments, processingDocuments, failedDocuments } for ?q= (the page's tiles, once per search)
 POST  .../knowledge/sources                     admin; body { name, description? }
-GET   .../knowledge/sources/:sourceId           member; with documents and their status
+GET   .../knowledge/sources/:sourceId           member; KnowledgeSourceDetail: the source with documentCount, ready/processing/failed counts, passages, totalBytes (no document list)
+GET   .../knowledge/sources/:sourceId/documents member; KnowledgeDocumentPage { data, nextCursor }, newest first, cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400); ?status=all|ready|processing|failed
 DELETE .../knowledge/sources/:sourceId          admin; removes documents, chunks, attachments
 POST  .../knowledge/sources/:sourceId/documents?name=       admin; the file is the request body
                                                 (application/octet-stream, 10 MB limit)
@@ -232,7 +234,7 @@ DELETE .../workflows/:id                        admin; 409 while runs are in pro
 POST  .../workflows/:id/restore                 admin; undeletes, PAUSED (DRAFT if never published)
 POST  .../workflows/:id/duplicate               admin; body { version? }; new DRAFT workflow "Copy of ...", 201
 POST  .../workflows/:id/executions              admin; body { input }; 202, runs the published version
-GET   .../workflows/:id/executions              member; newest 50
+GET   .../workflows/:id/executions              member; WorkflowExecutionPage { data, nextCursor }, newest first, cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400)
 GET   /workspaces/:workspaceId/workflow-executions/:executionId   member; with steps and definition
 POST  .../workflow-executions/:executionId/retry                admin; FAILED only, from the failed step
 POST  .../workflow-executions/:executionId/resume               admin; continues a Human Handoff
@@ -250,8 +252,10 @@ GET   /chat/:key/demo                           public; a page showing the widge
 POST  /chat/:key/session                        public, origin-checked; { visitorId? } or { customer, customerHash }; token, greeting, history
 POST  /chat/:key/messages                       public, origin-checked, Bearer session token; { message }; SSE reply (ChatStreamEvent)
 GET   /chat/:key/messages?after=                public, Bearer session token; { status, messages }: agents' messages since `after`
-GET   /workspaces/:workspaceId/inbox            member; ?view=queue|mine|waiting|human_active|ai_active|reopened|resolved|all ?employeeId=; { items, counts }
-GET   /workspaces/:workspaceId/conversations/:conversationId            member; messages, handoffs, Copilot suggestions, canReply
+GET   /workspaces/:workspaceId/inbox            member; ?view=queue|mine|waiting|human_active|ai_active|reopened|resolved|all [&employeeId=]; InboxPage { data, nextCursor } (queue oldest first, other views newest first by updatedAt then id), cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400)
+GET   /workspaces/:workspaceId/inbox/counts     member; InboxCounts, one count per view [?employeeId=] (tabs, the live queue badge, employee tiles)
+GET   /workspaces/:workspaceId/conversations/:conversationId            member; messages, handoffs, Copilot suggestions, canReply; transcript as MessageWindow { messages (newest 100, oldest first), olderCursor, newestCursor, caughtUp }; ?after=<newestCursor> returns only newer messages (at most 100, caughtUp false when more wait)
+GET   .../conversations/:conversationId/messages[/new]  member; MessagePage of older messages (?cursor=) / NewMessages { data, cursor, more } after ?after=
 PATCH .../conversations/:conversationId         member; { action: take_over | assign (userId|null) | return_to_ai | resolve | reopen }; 409 if it moved
 POST  .../conversations/:conversationId/messages  member; { text, suggestionId? }; takes over, sends on the channel (502 if that fails), then stores
 POST  .../conversations/:conversationId/copilot   member; a CopilotSuggestion
@@ -318,7 +322,7 @@ POST  /voice/:provider/c/:connection/inbound|status|transfer   as the platform's
 GET   /voice/:provider/c/:connection/stream     the media stream of a call on that connection
 GET|POST /channels/whatsapp/:provider/c/:connection/webhook   as the platform's, for an organization's WhatsApp connection
 POST  /channels/email/resend/c/:connection/webhook             received mail through an organization's Resend connection
-GET   /developer/api-keys                       member; ApiKeyInfo[] (never the secret)
+GET   /developer/api-keys                       member; ApiKeyPage { data: ApiKeyInfo[] (never the secret), nextCursor }, newest first, revoked included, cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400)
 POST  /developer/api-keys                       admin; { name, workspaceId, scopes, expiresInDays?, rateLimitPerMinute?, allowedIps? }; 201 CreatedApiKey: the only response with the secret
 PATCH /developer/api-keys/:id                   admin; { name?, rateLimitPerMinute?, allowedIps? }; 409 when revoked
 POST  /developer/api-keys/:id/rotate            admin; { expireOldInHours: 0..168 }; a new key, the old one expires then (0: revoked); 409 unless active
@@ -331,7 +335,7 @@ POST  /developer/webhooks/:id/test              admin; sends webhook.test now (a
 DELETE /developer/webhooks/:id                  admin; deliveries go with it; 204
 GET   /developer/webhooks/:id/deliveries        member; { data, nextCursor }, newest first, with payload and attempts, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?status= ?event=; no count (a log)
 POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fresh attempts (same event id); 409 if pending
-GET   /developer/audit                          admin; newest 100 developer audit entries
+GET   /developer/audit                          admin; DeveloperAuditPage { data, nextCursor }, newest first, cursor pages (?limit=1-100 (20) &cursor=; nextCursor null ends; a cursor from another list or filter is a 400)
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
 GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor }, last seen then id newest first, cursor pages (?limit=1-100 (20) &cursor= from the last page's nextCursor; a cursor only works for the same list and filters, else 400; nextCursor null ends the list); ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone

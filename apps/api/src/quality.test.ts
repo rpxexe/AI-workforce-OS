@@ -19,7 +19,7 @@ import {
   type EvaluationRecord,
   type EvaluatorInfo,
   type EvaluatorVersionInfo,
-  type InboxResponse,
+  type InboxPage,
   type QualityOverview,
   type Workspace,
 } from "@workforce/shared";
@@ -370,10 +370,10 @@ test("regression datasets:cases from a real conversation and by hand, replayed a
   assert.ok(chatRequests.every((r) => (r.tools ?? []).every((t) => t.name === "transfer_to_human")));
 
   // Replays stay out of the inbox, the employee's test chats and the overview.
-  const inbox = (await call("GET", `/workspaces/${ws}/inbox?view=all`, undefined, memberOf(orgA))).json<InboxResponse>();
-  assert.ok(!inbox.items.some((c) => c.id === hours?.conversationId));
-  const chats = (await call("GET", `/workspaces/${ws}/employees/${ava}/conversations`)).json<{ id: string }[]>();
-  assert.ok(!chats.some((c) => c.id === hours?.conversationId));
+  const inbox = (await call("GET", `/workspaces/${ws}/inbox?view=all&limit=100`, undefined, memberOf(orgA))).json<InboxPage>();
+  assert.ok(!inbox.data.some((c) => c.id === hours?.conversationId));
+  const chats = (await call("GET", `/workspaces/${ws}/employees/${ava}/conversations?limit=100`)).json<{ data: { id: string }[] }>();
+  assert.ok(!chats.data.some((c) => c.id === hours?.conversationId));
   assert.ok(!(await call("GET", `/workspaces/${ws}/evaluations`)).json<EvaluationRecord[]>().some((e) => e.trigger === "dataset"));
   assert.deepEqual(await queueDueEvaluations({ idleMs: 0, organizationId: orgA }).then((ids) => ids.length), 1); // only the source conversation, not the replays
   const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: hours?.conversationId ?? "" } });

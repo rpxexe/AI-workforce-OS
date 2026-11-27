@@ -31,6 +31,12 @@ export const listKnowledgeSourcesQuery = z.object({
   filter: z.enum(KNOWLEDGE_SOURCE_FILTERS).default("all"),
 });
 
+export const KNOWLEDGE_DOCUMENT_FILTERS = ["all", "ready", "processing", "failed"] as const;
+export type KnowledgeDocumentFilter = (typeof KNOWLEDGE_DOCUMENT_FILTERS)[number];
+
+/** ?status= keeps a source's documents that are ready, processing (pending included) or failed. Paging fields are added by the API. */
+export const listKnowledgeDocumentsQuery = z.object({ status: z.enum(KNOWLEDGE_DOCUMENT_FILTERS).default("all") });
+
 /** Replaces the set of sources an employee answers from. */
 export const employeeKnowledgeSchema = z.object({ sourceIds: z.array(z.string().min(1)).max(20) });
 
@@ -80,7 +86,11 @@ export type KnowledgeSourceCounts = {
   failedDocuments: number;
 };
 
-export type KnowledgeSourceDetail =KnowledgeSource & { documents: KnowledgeDocument[] };
+/** A source with its documents counted (by status, searchable passages, bytes); the documents themselves are paged separately. */
+export type KnowledgeSourceDetail = KnowledgeSourceSummary & { passages: number; totalBytes: number };
+
+/** One page of a source's documents, newest first; `nextCursor` opens the next page, null on the last. */
+export type KnowledgeDocumentPage = { data: KnowledgeDocument[]; nextCursor: string | null };
 
 /** One excerpt found by a search, with enough to trace it back to where it came from. */
 export type KnowledgeMatch = {

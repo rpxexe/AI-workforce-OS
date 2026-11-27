@@ -11,6 +11,7 @@ import {
   type ConversationDetail,
   type EmployeeDetail,
   type KnowledgeDocument,
+  type KnowledgeDocumentPage,
   type KnowledgeMatch,
   type KnowledgeSource,
   type KnowledgeSourceDetail,
@@ -77,7 +78,7 @@ const upload = (name: string, body: Buffer, headers = adminOf(orgA), source = so
     payload: body,
   });
 const documents = async (source = sourceId) =>
-  (await call("GET", `${knowledge()}/sources/${source}`, memberOf(orgA))).json<KnowledgeSourceDetail>().documents;
+  (await call("GET", `${knowledge()}/sources/${source}/documents?limit=100`, memberOf(orgA))).json<KnowledgeDocumentPage>().data;
 /** Processing runs in the background; wait for every document in the source to settle. */
 const settled = async (source = sourceId) => {
   for (let i = 0; i < 100; i++) {
@@ -269,6 +270,7 @@ test("isolation: another organization or workspace cannot read, search, change o
     ["GET", `${knowledge()}/sources`],
     ["GET", `${knowledge()}/sources/summary`],
     ["GET", `${knowledge()}/sources/${sourceId}`],
+    ["GET", `${knowledge()}/sources/${sourceId}/documents`],
     ["DELETE", `${knowledge()}/sources/${sourceId}`],
     ["DELETE", `${knowledge()}/documents/${doc.id}`],
     ["POST", `${knowledge()}/documents/${doc.id}/reprocess`],
@@ -285,6 +287,7 @@ test("isolation: another organization or workspace cannot read, search, change o
     assert.deepEqual((await call("GET", `${knowledge(ws)}/sources`, headers)).json(), { data: [], nextCursor: null });
     assert.equal((await call("GET", `${knowledge(ws)}/sources/summary`, headers)).json<KnowledgeSourceCounts>().sources, 0);
     assert.equal((await call("GET", `${knowledge(ws)}/sources/${sourceId}`, headers)).statusCode, 404);
+    assert.equal((await call("GET", `${knowledge(ws)}/sources/${sourceId}/documents`, headers)).statusCode, 404);
     assert.equal((await call("DELETE", `${knowledge(ws)}/sources/${sourceId}`, headers)).statusCode, 404);
     assert.equal((await call("DELETE", `${knowledge(ws)}/documents/${doc.id}`, headers)).statusCode, 404);
     assert.equal((await upload("a.txt", Buffer.from("hello"), headers, sourceId, ws)).statusCode, 404);
@@ -362,4 +365,71 @@ test("sources are listed by name a page at a time, searched on the server, and c
   // Another organization sees neither the list nor the numbers.
   assert.equal((await list("limit=1", adminOf(orgB))).statusCode, 404);
   assert.equal((await call("GET", `${knowledge(ws)}/sources/summary`, adminOf(orgB))).statusCode, 404);
+});
+
+test("a source's documents come newest first a page at a time, filtered by status on the server, with counts in the detail", async () => {
+  const source = await createSource("Paged documents");
+  const { organizationId, workspaceId } = await prisma.knowledgeSource.findUniqueOrThrow({ where: { id: source.id } });
+  // Written directly, so statuses and times are fixed; two pairs share a timestamp so the id breaks the tie.
+  const statuses = ["READY", "FAILED", "PENDING", "READY", "PROCESSING", "READY", "FAILED"] as const;
+  const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, Math.floor(i / 2)));
+  await prisma.knowledgeDocument.createMany({
+    data: statuses.map((status, i) => ({
+      organizationId,
+      workspaceId,
+      sourceId: source.id,
+      name: `doc-${i}.txt`,
+      kind: "txt",
+      sizeBytes: 100 + i,
+      status,
+      chunkCount: status === "READY" ? 3 : 0,
+      createdAt: at(i),
+      createdBy: "test",
+    })),
+  });
+  const rows = await prisma.knowledgeDocument.findMany({ where: { sourceId: source.id }, select: { id: true, createdAt: true, status: true } });
+  const newestFirst = (list: typeof rows) =>
+    [...list].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).map((d) => d.id);
+
+  const list = (query: string, headers = memberOf(orgA)) => call("GET", `${knowledge()}/sources/${source.id}/documents?${query}`, headers);
+  const all = async (query: string) => {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const res = await list(`${query}&limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      assert.equal(res.statusCode, 200, res.payload);
+      const page = res.json<KnowledgeDocumentPage>();
+      assert.ok(page.data.length <= 2);
+      seen.push(...page.data.map((d) => d.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+    return seen;
+  };
+
+  // Every document once, newest first (id descending on a shared time), across four pages; the last has no cursor.
+  assert.deepEqual(await all("status=all"), newestFirst(rows));
+  // The status filter holds across pages; processing includes pending.
+  assert.deepEqual(await all("status=ready"), newestFirst(rows.filter((d) => d.status === "READY")));
+  assert.deepEqual(await all("status=processing"), newestFirst(rows.filter((d) => d.status === "PENDING" || d.status === "PROCESSING")));
+  assert.deepEqual(await all("status=failed"), newestFirst(rows.filter((d) => d.status === "FAILED")));
+
+  // The detail counts every document without listing them.
+  const detail = (await call("GET", `${knowledge()}/sources/${source.id}`, memberOf(orgA))).json<KnowledgeSourceDetail>();
+  assert.equal("documents" in detail, false);
+  assert.deepEqual(
+    [detail.documentCount, detail.readyDocuments, detail.processingDocuments, detail.failedDocuments, detail.passages, detail.totalBytes],
+    [7, 3, 2, 2, 9, 7 * 100 + 21],
+  );
+
+  // A cursor works only for the source and status it came from.
+  const first = (await list("limit=1")).json<KnowledgeDocumentPage>();
+  assert.ok(first.nextCursor);
+  assert.equal((await list(`status=ready&limit=1&cursor=${first.nextCursor}`)).statusCode, 400);
+  assert.equal((await call("GET", `${knowledge()}/sources/${sourceId}/documents?limit=1&cursor=${first.nextCursor}`, memberOf(orgA))).statusCode, 400);
+  assert.equal((await list("limit=1&cursor=not-a-cursor")).statusCode, 400);
+  assert.equal((await list("status=nope")).statusCode, 400);
+
+  // Another organization, or another workspace of ours, finds neither the source nor its documents.
+  assert.equal((await list("limit=1", adminOf(orgB))).statusCode, 404);
+  assert.equal((await call("GET", `${knowledge(wsA2)}/sources/${source.id}/documents`, adminOf(orgA))).statusCode, 404);
 });

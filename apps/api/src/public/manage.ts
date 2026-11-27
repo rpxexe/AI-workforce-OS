@@ -13,9 +13,10 @@ import {
   updateWebhookEndpointSchema,
   webhookEndpointSchema,
   type ApiKeyInfo,
+  type ApiKeyPage,
   type CreatedApiKey,
   type CreatedWebhookEndpoint,
-  type DeveloperAuditEntry,
+  type DeveloperAuditPage,
   type WebhookAttempt,
   type WebhookDeliveryPage,
   type WebhookDeliveryRecord,
@@ -26,11 +27,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { assertPublicBaseUrl } from "../ai.ts";
 import { guards, httpError, type Authenticate, type Member } from "../auth.ts";
-import { decodeCursor, keysetAfter, keysetPage, pagingContext } from "../cursor.ts";
+import { cursorQuery, decodeCursor, keysetAfter, keysetPage, pagingContext } from "../cursor.ts";
 import { keyInclude, newKey, statusOf, toApiKeyInfo } from "./keys.ts";
 import { newWebhookSecret, type WebhookService } from "./webhooks.ts";
 
 const idParams = z.object({ id: z.string().min(1) });
+const pageQuery = z.object(cursorQuery);
 const WEEK_MS = 7 * 86_400_000;
 
 const endpointInclude = { workspace: { select: { name: true } } } satisfies Prisma.WebhookEndpointInclude;
@@ -64,11 +66,19 @@ export function developerRoutes(app: FastifyInstance, authenticate: Authenticate
     return key;
   };
 
-  app.get("/developer/api-keys", async (req): Promise<ApiKeyInfo[]> => {
+  // Newest first, revoked ones included; cursor pages over the (organizationId, createdAt) index, no count.
+  app.get("/developer/api-keys", async (req): Promise<ApiKeyPage> => {
     const { organizationId } = member(req);
-    // shortcut: newest 200 keys, revoked ones included; page when organizations keep more
-    const keys = await prisma.apiKey.findMany({ where: { organizationId }, include: keyInclude, orderBy: { createdAt: "desc" }, take: 200 });
-    return keys.map(toApiKeyInfo);
+    const { limit, cursor } = pageQuery.parse(req.query);
+    const context = pagingContext(organizationId, "api-keys");
+    const rows = await prisma.apiKey.findMany({
+      where: { organizationId, ...keysetAfter("createdAt", decodeCursor(cursor, context, "date")) },
+      include: keyInclude,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    });
+    const { page, nextCursor } = keysetPage(rows, limit, (r) => r.createdAt, context);
+    return { data: page.map(toApiKeyInfo), nextCursor };
   });
 
   app.post("/developer/api-keys", async (req, reply): Promise<CreatedApiKey> => {
@@ -313,10 +323,20 @@ export function developerRoutes(app: FastifyInstance, authenticate: Authenticate
     return toDelivery(delivery);
   });
 
-  app.get("/developer/audit", async (req): Promise<DeveloperAuditEntry[]> => {
+  // A log: cursor pages over the (organizationId, createdAt) index and no count.
+  app.get("/developer/audit", async (req): Promise<DeveloperAuditPage> => {
     const { organizationId } = admin(req);
-    // shortcut: newest 100 entries; page when people need older ones
-    const rows = await prisma.developerAuditLog.findMany({ where: { organizationId }, orderBy: { createdAt: "desc" }, take: 100 });
-    return rows.map((r) => ({ id: r.id, actorId: r.actorId, action: r.action, targetId: r.targetId, detail: r.detail as Record<string, unknown>, createdAt: r.createdAt.toISOString() }));
+    const { limit, cursor } = pageQuery.parse(req.query);
+    const context = pagingContext(organizationId, "developer-audit");
+    const rows = await prisma.developerAuditLog.findMany({
+      where: { organizationId, ...keysetAfter("createdAt", decodeCursor(cursor, context, "date")) },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    });
+    const { page, nextCursor } = keysetPage(rows, limit, (r) => r.createdAt, context);
+    return {
+      data: page.map((r) => ({ id: r.id, actorId: r.actorId, action: r.action, targetId: r.targetId, detail: r.detail as Record<string, unknown>, createdAt: r.createdAt.toISOString() })),
+      nextCursor,
+    };
   });
 }

@@ -406,6 +406,9 @@ export type WorkflowListItem = WorkflowSummary & {
 /** One page of the workflow list, newest change first. `nextCursor` asks for the page after it (null: the list ends here). */
 export type WorkflowPage = { data: WorkflowListItem[]; nextCursor: string | null };
 
+/** One page of a workflow's runs, newest first; `nextCursor` opens the next page, null on the last. */
+export type WorkflowExecutionPage = { data: WorkflowExecutionSummary[]; nextCursor: string | null };
+
 /** The list's tiles over every workflow matching ?q= in the workspace (not deleted ones), whatever the page or status. */
 export type WorkflowListSummary = {
   total: number;

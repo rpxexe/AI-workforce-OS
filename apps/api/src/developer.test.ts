@@ -16,10 +16,12 @@ import {
   PUBLIC_ROUTES,
   WEBHOOK_EVENTS,
   type ApiKeyInfo,
+  type ApiKeyPage,
   type CreatedApiKey,
   type CreatedWebhookEndpoint,
   type EmployeeDetail,
   type DeveloperAuditEntry,
+  type DeveloperAuditPage,
   type WebhookDeliveryPage,
   type WebhookDeliveryRecord,
   type WebhookEvent,
@@ -80,6 +82,19 @@ const createKey = async (scopes: string[], org = orgA, workspaceId = ws) => {
   const res = await call("POST", "/developer/api-keys", { name: "Integration", workspaceId, scopes }, adminOf(org));
   assert.equal(res.statusCode, 201, res.payload);
   return res.json<CreatedApiKey>();
+};
+/** Every row of a cursor-paged list, following nextCursor to the end; checks each page's status. */
+const allPages = async <T>(path: string, headers: Record<string, string> = adminOf(orgA), limit = 100) => {
+  const rows: T[] = [];
+  let cursor: string | null = null;
+  do {
+    const res = await call("GET", `${path}?limit=${limit}${cursor ? `&cursor=${cursor}` : ""}`, undefined, headers);
+    assert.equal(res.statusCode, 200, res.payload);
+    const page = res.json<{ data: T[]; nextCursor: string | null }>();
+    rows.push(...page.data);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return rows;
 };
 const bearer = (secret: string) => ({ authorization: `Bearer ${secret}` });
 const createKeyWith = async (settings: Record<string, unknown>) => {
@@ -178,7 +193,7 @@ test("API keys: created once, stored as a hash, scoped, rotated, revoked", async
   assert.notEqual(next.secret, secret);
   assert.equal((await call("GET", "/v1/employees", undefined, bearer(secret))).statusCode, 200);
   assert.equal((await call("GET", "/v1/employees", undefined, bearer(next.secret))).statusCode, 200);
-  const old = (await call("GET", "/developer/api-keys")).json<ApiKeyInfo[]>().find((k) => k.id === key.id)!;
+  const old = (await allPages<ApiKeyInfo>("/developer/api-keys")).find((k) => k.id === key.id)!;
   assert.equal(old.status, "expiring");
   assert.equal(old.replacedById, next.key.id);
   assert.equal((await call("POST", `/developer/api-keys/${key.id}/rotate`, {})).statusCode, 409, "an expiring key is not rotated twice");
@@ -466,13 +481,44 @@ test("API key settings: IP allowlist, rate limit, expiry at creation, edits, aud
 
   // The audit log: admins only, names and settings, never secrets.
   assert.equal((await call("GET", "/developer/audit", undefined, memberOf(orgA))).statusCode, 403);
-  const audit = await call("GET", "/developer/audit");
-  const actions = audit.json<DeveloperAuditEntry[]>().map((e) => e.action);
+  const audit = await allPages<DeveloperAuditEntry>("/developer/audit");
+  const actions = audit.map((e) => e.action);
   for (const action of ["api_key.create", "api_key.update", "api_key.rotate", "api_key.revoke", "webhook.create", "webhook.update", "webhook.delete", "webhook.redeliver"])
     assert.ok(actions.includes(action), action);
-  assert.ok(!audit.payload.includes(fenced.secret.slice(fenced.key.prefix.length)));
-  assert.equal((await call("GET", "/developer/audit", undefined, adminOf(orgB))).json<DeveloperAuditEntry[]>().length > 0, true);
-  assert.ok(!(await call("GET", "/developer/audit", undefined, adminOf(orgB))).json<DeveloperAuditEntry[]>().some((e) => e.targetId === fenced.key.id));
+  assert.ok(!JSON.stringify(audit).includes(fenced.secret.slice(fenced.key.prefix.length)));
+  const auditB = await allPages<DeveloperAuditEntry>("/developer/audit", adminOf(orgB));
+  assert.ok(auditB.length > 0);
+  assert.ok(!auditB.some((e) => e.targetId === fenced.key.id));
+});
+
+test("API keys and the audit log page by cursor, newest first, each organization its own", async () => {
+  for (let i = 0; i < 3; i++) await createKeyWith({ scopes: ["employees:read"] });
+  const newestFirst = (rows: { id: string; createdAt: string }[]) =>
+    rows.every((r, i) => i === 0 || rows[i - 1]!.createdAt > r.createdAt || (rows[i - 1]!.createdAt === r.createdAt && rows[i - 1]!.id > r.id));
+  for (const [path, total] of [
+    ["/developer/api-keys", await prisma.apiKey.count({ where: { organizationId: orgA } })],
+    ["/developer/audit", await prisma.developerAuditLog.count({ where: { organizationId: orgA } })],
+  ] as const) {
+    // Two rows a page to the end: every row once, in order, the last page without a cursor.
+    const rows = await allPages<{ id: string; createdAt: string }>(path, adminOf(orgA), 2);
+    assert.equal(rows.length, total, path);
+    assert.equal(new Set(rows.map((r) => r.id)).size, total, `${path}: no row twice`);
+    assert.ok(newestFirst(rows), `${path}: newest first`);
+    const first = (await call("GET", `${path}?limit=2`)).json<ApiKeyPage | DeveloperAuditPage>();
+    assert.ok(first.nextCursor);
+    // A malformed cursor, a cursor of another list or of another organization: refused.
+    assert.equal((await call("GET", `${path}?cursor=nope`)).statusCode, 400);
+    const otherList = (await call("GET", `${path === "/developer/audit" ? "/developer/api-keys" : "/developer/audit"}?limit=1`)).json<ApiKeyPage>().nextCursor;
+    assert.ok(otherList);
+    assert.equal((await call("GET", `${path}?cursor=${otherList}`)).statusCode, 400);
+    assert.equal((await call("GET", `${path}?cursor=${first.nextCursor}`, undefined, adminOf(orgB))).statusCode, 400);
+    // Another organization sees none of these rows.
+    const ids = new Set(rows.map((r) => r.id));
+    assert.ok(!(await allPages<{ id: string }>(path, adminOf(orgB))).some((r) => ids.has(r.id)));
+  }
+  // Who may list stays as it was: members list keys, only admins read the audit log.
+  assert.equal((await call("GET", "/developer/api-keys?limit=1", undefined, memberOf(orgA))).statusCode, 200);
+  assert.equal((await call("GET", "/developer/audit?limit=1", undefined, memberOf(orgA))).statusCode, 403);
 });
 
 test("writes through the API: employees, streaming, resolve, customer memory, knowledge; and their events", async () => {

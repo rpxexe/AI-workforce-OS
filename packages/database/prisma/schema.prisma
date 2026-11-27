@@ -181,6 +181,8 @@ model Conversation {
   @@index([organizationId, workspaceId, status, updatedAt])
   // Conversations started per day (handoff analytics, reports, dashboard).
   @@index([organizationId, workspaceId, createdAt])
+  // The inbox's "All" view, newest change first, for a workspace of any size.
+  @@index([organizationId, workspaceId, updatedAt])
   // The insights sweep: conversations that went quiet in the last 3 days, across every organization.
   @@index([updatedAt])
 }
@@ -309,7 +311,8 @@ model KnowledgeDocument {
   createdAt   DateTime         @default(now())
   processedAt DateTime?
 
-  @@index([organizationId, workspaceId, sourceId])
+  // A source's documents newest first, a page at a time; also serves every lookup by source alone.
+  @@index([organizationId, workspaceId, sourceId, createdAt])
 }
 
 model KnowledgeChunk {

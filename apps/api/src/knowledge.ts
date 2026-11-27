@@ -8,9 +8,11 @@ import {
   knowledgeKindOf,
   knowledgeSearchSchema,
   knowledgeSourceSchema,
+  listKnowledgeDocumentsQuery,
   listKnowledgeSourcesQuery,
   uploadQuerySchema,
   type KnowledgeDocument,
+  type KnowledgeDocumentPage,
   type KnowledgeKind,
   type KnowledgeMatch,
   type KnowledgeSource,
@@ -31,6 +33,7 @@ const workspaceParams = z.object({ workspaceId: id });
 const sourceParams = workspaceParams.extend({ sourceId: id });
 const documentParams = workspaceParams.extend({ documentId: id });
 const listQuery = listKnowledgeSourcesQuery.extend(cursorQuery);
+const documentsQuery = listKnowledgeDocumentsQuery.extend(cursorQuery);
 
 // Never select `content` (the file's bytes) for a listing.
 const documentSelect = {
@@ -214,15 +217,47 @@ export function knowledgeRoutes(
     }
   });
 
+  // The source and its documents counted in the database; the documents themselves come a page at a time from /documents.
   app.get(`${base}/sources/:sourceId`, async (req): Promise<KnowledgeSourceDetail> => {
     const { workspaceId, sourceId } = sourceParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
-    const source = await prisma.knowledgeSource.findFirst({
-      where: { id: sourceId, ...within(scope) },
-      include: { ...sourceInclude, documents: { select: documentSelect, orderBy: { createdAt: "desc" } } },
-    });
+    const [source, groups] = await Promise.all([
+      prisma.knowledgeSource.findFirst({ where: { id: sourceId, ...within(scope) }, include: sourceInclude }),
+      prisma.knowledgeDocument.groupBy({
+        by: ["status"],
+        where: { sourceId, ...within(scope) },
+        _count: { _all: true },
+        _sum: { chunkCount: true, sizeBytes: true },
+      }),
+    ]);
     if (!source) throw httpError(404, "Knowledge source not found");
-    return { ...toSource(source), documents: source.documents.map(toDocument) };
+    return {
+      ...toSource(source),
+      ...byStatus(groups),
+      passages: groups.find((g) => g.status === "READY")?._sum.chunkCount ?? 0,
+      totalBytes: groups.reduce((sum, g) => sum + (g._sum.sizeBytes ?? 0), 0),
+    };
+  });
+
+  // A source's documents, newest first, one page at a time; ?status= keeps ready, processing (pending included) or failed.
+  app.get(`${base}/sources/:sourceId/documents`, async (req): Promise<KnowledgeDocumentPage> => {
+    const { workspaceId, sourceId } = sourceParams.parse(req.params);
+    const { status, limit, cursor } = documentsQuery.parse(req.query);
+    const scope = await inWorkspace(member(req), workspaceId);
+    // A cursor only continues the list it came from: same workspace, source and status.
+    const context = pagingContext(scope.workspaceId, sourceId, status);
+    const after = decodeCursor(cursor, context, "date");
+    const source = await prisma.knowledgeSource.findFirst({ where: { id: sourceId, ...within(scope) }, select: { id: true } });
+    if (!source) throw httpError(404, "Knowledge source not found");
+    const statuses = { all: undefined, ready: ["READY"], processing: ["PENDING", "PROCESSING"], failed: ["FAILED"] } as const;
+    const rows = await prisma.knowledgeDocument.findMany({
+      where: { AND: [{ sourceId, ...within(scope), status: statuses[status] && { in: [...statuses[status]] } }, keysetAfter("createdAt", after)] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      select: documentSelect,
+    });
+    const { page, nextCursor } = keysetPage(rows, limit, (d) => d.createdAt, context);
+    return { data: page.map(toDocument), nextCursor };
   });
 
   // Deleting a source removes its documents, chunks and embeddings, and detaches it from employees.

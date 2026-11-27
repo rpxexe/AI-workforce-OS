@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { runTurn, toMessage, type HandoffNotice, type HeldNotice } from "@workforce/agent-runtime";
+import { runTurn, type HandoffNotice, type HeldNotice } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider, Route } from "@workforce/ai-provider";
 import { prisma } from "@workforce/database";
 import type { MemoryService } from "@workforce/memory";
@@ -10,11 +10,17 @@ import {
   type ChatStreamEvent,
   type ConversationDetail,
   type ConversationSummary,
+  type ConversationSummaryPage,
+  type MessagePage,
+  type NewMessages,
   type UsageLimiter,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
+import { cursorQuery, decodeCursor, keysetAfter, keysetPage, pagingContext } from "./cursor.ts";
 import { configOf, employeeParams, within } from "./employees.ts";
+import { detailQuery, messageWindow, newMessages, olderMessages } from "./messages.ts";
 
 const conversationParams = employeeParams.extend({ conversationId: employeeParams.shape.id });
 
@@ -50,36 +56,47 @@ export function conversationRoutes(
   const { member, admin, inWorkspace } = guards(authenticate);
   const base = "/workspaces/:workspaceId/employees/:id";
 
-  app.get(`${base}/conversations`, async (req): Promise<ConversationSummary[]> => {
+  // One page of test chats, latest activity first (index on tenant, employee, updatedAt).
+  app.get(`${base}/conversations`, async (req): Promise<ConversationSummaryPage> => {
     const { workspaceId, id } = employeeParams.parse(req.params);
+    const { limit, cursor } = z.object(cursorQuery).parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
-    const conversations = await prisma.conversation.findMany({
+    const context = pagingContext(scope.workspaceId, id);
+    const after = decodeCursor(cursor, context, "date");
+    const rows = await prisma.conversation.findMany({
       // Regression replays are listed on their run, not with the test chats.
-      where: { employeeId: id, ...within(scope), channel: { not: EVALUATION_CHANNEL } },
-      orderBy: { updatedAt: "desc" },
-      // shortcut: newest 50 only, add a cursor when people need older test chats
-      take: 50,
+      where: { employeeId: id, ...within(scope), channel: { not: EVALUATION_CHANNEL }, ...keysetAfter("updatedAt", after) },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
     });
-    return conversations.map(toSummary);
+    const { page, nextCursor } = keysetPage(rows, limit, (r) => r.updatedAt, context);
+    return { data: page.map(toSummary), nextCursor };
   });
 
-  app.get(`${base}/conversations/:conversationId`, async (req): Promise<ConversationDetail> => {
+  /** The employee's conversation in the caller's workspace, else 404. */
+  const testChat = async (req: Parameters<typeof member>[0]) => {
     const { workspaceId, id, conversationId } = conversationParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
     const conversation = await prisma.conversation.findFirst({
       where: { id: conversationId, employeeId: id, ...within(scope) },
-      include: {
-        messages: { orderBy: { createdAt: "asc" } },
-        customer: { select: { customer: { select: { externalId: true } } } },
-      },
+      include: { customer: { select: { customer: { select: { externalId: true } } } } },
     });
     if (!conversation) throw httpError(404, "Conversation not found");
-    return {
-      ...toSummary(conversation),
-      messages: conversation.messages.map(toMessage),
-      customer: conversation.customer?.customer.externalId ?? null,
-    };
+    return conversation;
+  };
+
+  // The newest messages; ?after= (the last newestCursor) makes it a poll: only the messages since then.
+  app.get(`${base}/conversations/:conversationId`, async (req): Promise<ConversationDetail> => {
+    const { after } = detailQuery.parse(req.query);
+    const conversation = await testChat(req);
+    const { window } = await messageWindow(conversation, after);
+    return { ...toSummary(conversation), ...window, customer: conversation.customer?.customer.externalId ?? null };
   });
+
+  // Earlier messages: ?cursor= from olderCursor, then each page's nextCursor.
+  app.get(`${base}/conversations/:conversationId/messages`, async (req): Promise<MessagePage> => olderMessages(await testChat(req), req.query));
+  // Messages after ?after=: catches up a poll that found more than one window of new messages.
+  app.get(`${base}/conversations/:conversationId/messages/new`, async (req): Promise<NewMessages> => newMessages(await testChat(req), req.query));
 
   // Answers with server-sent events (`ChatStreamEvent`). Everything that can be refused is
   // refused before the stream opens, so a 4xx is still a normal JSON error.

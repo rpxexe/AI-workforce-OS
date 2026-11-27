@@ -147,6 +147,9 @@ export type ApiKeyInfo = {
   replacedById: string | null;
 };
 
+/** One page of keys, newest first (revoked ones included); pass `nextCursor` back as ?cursor= for the next. */
+export type ApiKeyPage = { data: ApiKeyInfo[]; nextCursor: string | null };
+
 /** The only response that carries a key's secret. It is not stored and cannot be shown again. */
 export type CreatedApiKey = { key: ApiKeyInfo; secret: string };
 
@@ -200,3 +203,6 @@ export type DeveloperAuditEntry = {
   detail: Record<string, unknown>;
   createdAt: string;
 };
+
+/** One page of the developer audit log, newest first; pass `nextCursor` back as ?cursor= for the next. */
+export type DeveloperAuditPage = { data: DeveloperAuditEntry[]; nextCursor: string | null };

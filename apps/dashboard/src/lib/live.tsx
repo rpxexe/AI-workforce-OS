@@ -4,7 +4,7 @@
 // toasts with an Open button, a short sound, desktop notifications while the tab is in the background,
 // the waiting count on Conversations in the sidebar, and that count in the browser tab title.
 import { useAuth } from "@clerk/nextjs";
-import type { InboxResponse, LiveEvent } from "@workforce/shared";
+import type { InboxCounts, LiveEvent } from "@workforce/shared";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -67,8 +67,8 @@ export function LiveNotifications({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const workspaceId = workspace?.id;
 
-  const counts = useApiQuery<InboxResponse>(workspaceId ? `/workspaces/${workspaceId}/inbox?view=queue` : null);
-  const waiting = counts.data?.counts.queue ?? 0;
+  const counts = useApiQuery<InboxCounts>(workspaceId ? `/workspaces/${workspaceId}/inbox/counts` : null);
+  const waiting = counts.data?.queue ?? 0;
 
   // The handler reads the latest values without reconnecting the stream on every render.
   const latest = useRef({ userId, nameOf, pathname, router, reload: counts.reload });

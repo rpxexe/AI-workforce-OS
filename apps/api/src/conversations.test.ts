@@ -9,8 +9,10 @@ import {
   type ApiError,
   type ChatStreamEvent,
   type ConversationDetail,
-  type ConversationSummary,
+  type ConversationSummaryPage,
   type EmployeeDetail,
+  type MessagePage,
+  type NewMessages,
   type Workspace,
 } from "@workforce/shared";
 import { buildApp } from "./app.ts";
@@ -120,10 +122,10 @@ test("a turn streams the reply, saves both messages with usage, and later turns 
       ["ASSISTANT", "Hello (3)"],
     ],
   );
-  const list = (await get(`${employeePath()}/conversations`, memberOf(orgA))).json<ConversationSummary[]>();
+  const list = (await get(`${employeePath()}/conversations`, memberOf(orgA))).json<ConversationSummaryPage>();
   assert.deepEqual(
-    list.map((c) => c.id),
-    [conversationId],
+    [list.data.map((c) => c.id), list.nextCursor],
+    [[conversationId], null],
   );
 });
 
@@ -192,6 +194,93 @@ test("authorization and isolation: members read, admins chat, other tenants see 
     assert.equal((await get(`${path}/conversations/${last.conversation.id}`, adminOf(orgB))).statusCode, 404);
   }
   assert.equal((await get(`${employeePath(wsA)}/conversations`, adminOf(orgB))).statusCode, 404);
-  assert.deepEqual((await get(`${employeePath(wsB)}/conversations`, adminOf(orgB))).json(), []);
+  assert.deepEqual((await get(`${employeePath(wsB)}/conversations`, adminOf(orgB))).json(), { data: [], nextCursor: null });
   assert.equal(requests.length, 0);
+});
+
+test("test chats page by cursor, newest activity first, and a cursor only works for its own list", async () => {
+  const created = await app.inject({
+    method: "POST",
+    url: `/workspaces/${wsA}/employees`,
+    headers: adminOf(orgA),
+    payload: { ...defaultEmployeeConfig(), name: "Bea", role: "Pager" },
+  });
+  const bea = created.json<EmployeeDetail>().id;
+  const at = (minutes: number) => new Date(Date.UTC(2026, 0, 1, 12, minutes));
+  // Two chats share a timestamp: the id breaks the tie, so neither is skipped or repeated across pages.
+  for (const [title, minutes, channel] of [["a", 1, "test"], ["b", 2, "test"], ["c", 2, "test"], ["d", 3, "test"], ["e", 4, "test"], ["replay", 5, "evaluation"]] as const)
+    await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: wsA, employeeId: bea, channel, title, createdBy: "user_admin", updatedAt: at(minutes) } });
+  const expected = await prisma.conversation.findMany({
+    where: { employeeId: bea, channel: "test" },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+    select: { id: true },
+  });
+
+  const path = `${employeePath(wsA, bea)}/conversations`;
+  const seen: string[] = [];
+  const cursors: (string | null)[] = [];
+  let cursor: string | null = null;
+  do {
+    const res = await get(`${path}?limit=2${cursor ? `&cursor=${cursor}` : ""}`, memberOf(orgA));
+    assert.equal(res.statusCode, 200, res.payload);
+    const page = res.json<ConversationSummaryPage>();
+    seen.push(...page.data.map((c) => c.id));
+    cursor = page.nextCursor;
+    cursors.push(cursor);
+  } while (cursor);
+  // Five chats, two a page; the evaluation replay is left out.
+  assert.deepEqual(seen, expected.map((c) => c.id));
+  assert.equal(cursors.length, 3);
+
+  const first = cursors[0]!;
+  assert.equal((await get(`${path}?cursor=not-a-cursor`, memberOf(orgA))).statusCode, 400);
+  // Another employee's list is another list.
+  assert.equal((await get(`${employeePath()}/conversations?cursor=${first}`, memberOf(orgA))).statusCode, 400);
+  // Another organization finds nothing, cursor or not.
+  assert.equal((await get(`${employeePath(wsA, bea)}/conversations?cursor=${first}`, adminOf(orgB))).statusCode, 404);
+  assert.deepEqual((await get(`${employeePath(wsB, bea)}/conversations`, adminOf(orgB))).json(), { data: [], nextCursor: null });
+});
+
+test("a long test chat: the newest 100 messages, earlier pages by cursor, polling with ?after=, scoped to the employee", async () => {
+  const conversation = await prisma.conversation.create({ data: { organizationId: orgA, workspaceId: wsA, employeeId, channel: "test", title: "Long", createdBy: "user_admin" } });
+  const start = Date.UTC(2026, 0, 3);
+  const add = (from: number, count: number) =>
+    prisma.conversationMessage.createMany({
+      data: Array.from({ length: count }, (_, i) => ({
+        organizationId: orgA,
+        workspaceId: wsA,
+        conversationId: conversation.id,
+        role: (from + i) % 2 ? ("ASSISTANT" as const) : ("USER" as const),
+        content: `m${from + i}`,
+        createdAt: new Date(start + (from + i) * 1000),
+      })),
+    });
+  await add(0, 104);
+  const ids = async () =>
+    (await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { id: true } })).map((m) => m.id);
+  const path = `${employeePath()}/conversations/${conversation.id}`;
+
+  const detail = (await get(path, memberOf(orgA))).json<ConversationDetail>();
+  const all = await ids();
+  assert.deepEqual(detail.messages.map((m) => m.id), all.slice(4));
+  assert.ok(detail.olderCursor);
+  const older = (await get(`${path}/messages?cursor=${detail.olderCursor}`, memberOf(orgA))).json<MessagePage>();
+  assert.deepEqual([older.data.map((m) => m.id), older.nextCursor], [all.slice(0, 4), null]);
+
+  // Polling: only what is new since the newest message shown.
+  await add(104, 3);
+  const polled = (await get(`${path}?after=${detail.newestCursor}`, memberOf(orgA))).json<ConversationDetail>();
+  assert.deepEqual([polled.messages.map((m) => m.id), polled.caughtUp, polled.olderCursor], [(await ids()).slice(104), true, null]);
+  const none = (await get(`${path}/messages/new?after=${polled.newestCursor}`, memberOf(orgA))).json<NewMessages>();
+  assert.deepEqual(none, { data: [], cursor: polled.newestCursor, more: false });
+
+  assert.equal((await get(`${path}/messages?cursor=garbage`, memberOf(orgA))).statusCode, 400);
+  assert.equal((await get(`${path}?after=garbage`, memberOf(orgA))).statusCode, 400);
+  // Another employee's path, or another organization: not found.
+  const bea = (
+    await app.inject({ method: "POST", url: `/workspaces/${wsA}/employees`, headers: adminOf(orgA), payload: { ...defaultEmployeeConfig(), name: "Cleo", role: "Other" } })
+  ).json<EmployeeDetail>().id;
+  assert.equal((await get(`${employeePath(wsA, bea)}/conversations/${conversation.id}/messages?cursor=${detail.olderCursor}`, memberOf(orgA))).statusCode, 404);
+  assert.equal((await get(`${path}/messages/new?after=${detail.newestCursor}`, adminOf(orgB))).statusCode, 404);
+  assert.equal((await get(`${employeePath(wsB)}/conversations/${conversation.id}/messages`, adminOf(orgB))).statusCode, 404);
 });

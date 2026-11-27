@@ -19,6 +19,7 @@ import {
   type WorkflowDependencies,
   type WorkflowDetail,
   type WorkflowExecutionDetail,
+  type WorkflowExecutionPage,
   type WorkflowExecutionSummary,
   type WorkflowListSummary,
   type WorkflowPage,
@@ -711,4 +712,50 @@ test("idempotency: a step run again after its runner died does not repeat its ef
   const failed = await settle(ai.executionId);
   assert.equal(failed.status, "FAILED");
   assert.match(failed.error ?? "", /interrupted while the employee was answering/);
+});
+
+test("a workflow's run history pages newest first with cursors", async () => {
+  const { id } = await createWorkflow(blankWorkflow(), "Run history");
+  const other = await createWorkflow(blankWorkflow(), "Other runs");
+  const { organizationId, workspaceId, versions } = await prisma.workflow.findUniqueOrThrow({ where: { id }, include: { versions: true } });
+  const versionId = versions[0]?.id ?? "";
+  // Written directly as finished runs, so times are fixed and the runner leaves them alone; pairs share a time so the id breaks the tie.
+  const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, Math.floor(i / 2)));
+  await prisma.workflowExecution.createMany({
+    data: Array.from({ length: 7 }, (_, i) => ({ organizationId, workspaceId, workflowId: id, versionId, status: "COMPLETED" as const, input: {}, runAt: null, startedBy: "test", createdAt: at(i) })),
+  });
+  const otherVersion = (await prisma.workflowVersion.findFirstOrThrow({ where: { workflowId: other.id } })).id;
+  await prisma.workflowExecution.create({ data: { organizationId, workspaceId, workflowId: other.id, versionId: otherVersion, status: "COMPLETED", input: {}, runAt: null, startedBy: "test" } });
+  const rows = await prisma.workflowExecution.findMany({ where: { workflowId: id }, select: { id: true, createdAt: true } });
+  const expected = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).map((r) => r.id);
+
+  const runs = (query: string, workflow = id, headers: Headers = memberOf(orgA)) => inject("GET", `/workspaces/${ws}/workflows/${workflow}/executions?${query}`, undefined, headers);
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  do {
+    const res = await runs(`limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+    assert.equal(res.statusCode, 200, res.payload);
+    const page = res.json<WorkflowExecutionPage>();
+    assert.ok(page.data.length <= 2);
+    assert.ok(page.data.every((e) => e.workflowId === id));
+    seen.push(...page.data.map((e) => e.id));
+    cursor = page.nextCursor;
+    pages++;
+  } while (cursor);
+  // Every run once, newest first, over four pages; the last page has no cursor.
+  assert.deepEqual(seen, expected);
+  assert.equal(pages, 4);
+
+  // A cursor works only for the workflow it came from; a malformed one is refused.
+  const first = (await runs("limit=1")).json<WorkflowExecutionPage>();
+  assert.ok(first.nextCursor);
+  assert.equal((await runs(`limit=1&cursor=${first.nextCursor}`, other.id)).statusCode, 400);
+  assert.equal((await runs("limit=1&cursor=not-a-cursor")).statusCode, 400);
+  assert.equal((await runs("limit=0")).statusCode, 400);
+
+  // Another organization finds neither the workspace nor, in its own workspace, any run.
+  assert.equal((await runs("limit=1", id, adminOf(orgB))).statusCode, 404);
+  const foreign = await inject("GET", `/workspaces/${wsB}/workflows/${id}/executions`, undefined, adminOf(orgB));
+  assert.deepEqual(foreign.json(), { data: [], nextCursor: null });
 });

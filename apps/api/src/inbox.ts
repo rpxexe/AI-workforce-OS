@@ -5,7 +5,7 @@
 // answering a conversation in WAITING_FOR_HUMAN or HUMAN_ACTIVE (runTurn checks); only returning it
 // to the AI (or resolving and reopening it) lets it answer again.
 import type { LiveBus, Presence } from "./live.ts";
-import { ANALYZER_VERSION, analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toMessage, toSuggestion } from "@workforce/agent-runtime";
+import { ANALYZER_VERSION, analyzeConversation, errorMessage, regionOf, startHandoff, suggest, toSuggestion } from "@workforce/agent-runtime";
 import type { AIProvider, EmbeddingProvider } from "@workforce/ai-provider";
 import { Prisma, prisma } from "@workforce/database";
 import {
@@ -14,8 +14,8 @@ import {
   analyticsQuerySchema,
   conversationActionSchema,
   EVALUATION_CHANNEL,
+  inboxCountsQuerySchema,
   inboxQuerySchema,
-  INBOX_VIEWS,
   REPLY_BANDS,
   RESOLUTIONS,
   SENTIMENTS,
@@ -27,17 +27,22 @@ import {
   type HandoffRecord,
   type HandoffTrigger,
   type InboxConversation,
+  type InboxCounts,
   type InboxItem,
-  type InboxResponse,
+  type InboxPage,
   type InboxView,
   type InsightsOverview,
   type Intent,
+  type MessagePage,
+  type NewMessages,
   toTransferRecord,
 } from "@workforce/shared";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate } from "./auth.ts";
 import type { Ai, ChannelService } from "./channels/service.ts";
+import { decodeCursor, keysetAfter, keysetPage, pagingContext } from "./cursor.ts";
+import { detailQuery, messageWindow, newMessages, olderMessages } from "./messages.ts";
 import { configOf, within } from "./employees.ts";
 
 const workspaceParams = z.object({ workspaceId: z.string().min(1) });
@@ -232,65 +237,51 @@ export function inboxRoutes(
     return { scope, conversation };
   };
 
-  const detail = async (id: string): Promise<InboxConversation> => {
+  /** The conversation for an agent; with `after`, its messages are only the ones after that position (polling). */
+  const detail = async (id: string, after?: string): Promise<InboxConversation> => {
     const transfers = prisma.callTransfer.findMany({ where: { conversationId: id }, orderBy: { createdAt: "asc" } });
     const c = await prisma.conversation.findUniqueOrThrow({
       where: { id },
       include: {
         ...listInclude,
-        // shortcut: the newest 500 messages; page older ones when conversations get that long
-        messages: { orderBy: { createdAt: "desc" }, take: 500 },
         handoffs: { orderBy: { requestedAt: "asc" } },
         suggestions: { orderBy: { createdAt: "desc" }, take: 10 },
       },
     });
-    const messages = c.messages.reverse();
+    const { newestRows, window } = await messageWindow(c, after);
     return {
       ...base(c),
-      messages: messages.map(toMessage),
+      ...window,
       handoffs: c.handoffs.map(toHandoff),
       suggestions: c.suggestions.map(toSuggestion),
       transfers: (await transfers).map(toTransferRecord),
       canReply: REPLY_CHANNELS.includes(c.channel) && (READ_BACK_CHANNELS.includes(c.channel) || c.customer !== null),
-      insight: analyzeConversation({ messages, status: c.status, handoffs: c.handoffs, ...operating(c) }),
+      insight: analyzeConversation({ messages: newestRows, status: c.status, handoffs: c.handoffs, ...operating(c) }),
     };
   };
 
-  app.get("/workspaces/:workspaceId/inbox", async (req): Promise<InboxResponse> => {
+  // One page of a view. No counting here: the tabs' counts come from /inbox/counts.
+  app.get("/workspaces/:workspaceId/inbox", async (req): Promise<InboxPage> => {
     const { workspaceId } = workspaceParams.parse(req.params);
     const scope = await inWorkspace(member(req), workspaceId);
-    const { view, employeeId } = inboxQuerySchema.parse(req.query);
-    const where = { ...within(scope), ...REAL, ...(employeeId && { employeeId }) };
-    const [rows, byStatus, queue, mine] = await Promise.all([
-      prisma.conversation.findMany({
-        where: { ...where, ...viewWhere(view, scope.userId) },
-        // The queue serves whoever has waited longest first.
-        orderBy: { updatedAt: view === "queue" ? "asc" : "desc" },
-        // shortcut: newest 100 per view, add a cursor when inboxes grow past that
-        take: 100,
-        include: {
-          ...listInclude,
-          messages: { orderBy: { createdAt: "desc" }, take: 1, select: { role: true, content: true, createdAt: true } },
-          handoffs: { where: { endedAt: null }, orderBy: { requestedAt: "desc" }, take: 1, select: { trigger: true, reason: true, requestedAt: true } },
-        },
-      }),
-      prisma.conversation.groupBy({ by: ["status"], where, _count: true }),
-      prisma.conversation.count({ where: { ...where, ...viewWhere("queue", scope.userId) } }),
-      prisma.conversation.count({ where: { ...where, ...viewWhere("mine", scope.userId) } }),
-    ]);
-    const count = (s: ConversationStatus) => byStatus.find((g) => g.status === s)?._count ?? 0;
-    const counts = Object.fromEntries(INBOX_VIEWS.map((v) => [v, 0])) as Record<InboxView, number>;
-    Object.assign(counts, {
-      queue,
-      mine,
-      waiting: count("WAITING_FOR_HUMAN"),
-      human_active: count("HUMAN_ACTIVE"),
-      ai_active: count("AI_ACTIVE"),
-      reopened: count("REOPENED"),
-      resolved: count("RESOLVED"),
-      all: byStatus.reduce((sum, g) => sum + g._count, 0),
+    const { view, employeeId, limit, cursor } = inboxQuerySchema.parse(req.query);
+    // The queue serves whoever has waited longest first.
+    const order = view === "queue" ? "asc" : "desc";
+    // A cursor only continues the list it came from: same workspace, view (for "mine", the same person) and employee.
+    const context = pagingContext(scope.workspaceId, view, view === "mine" ? scope.userId : undefined, employeeId);
+    const after = decodeCursor(cursor, context, "date");
+    const rows = await prisma.conversation.findMany({
+      where: { AND: [{ ...within(scope), ...REAL, ...(employeeId && { employeeId }) }, viewWhere(view, scope.userId), keysetAfter("updatedAt", after, order)] },
+      orderBy: [{ updatedAt: order }, { id: order }],
+      take: limit + 1,
+      include: {
+        ...listInclude,
+        messages: { orderBy: { createdAt: "desc" }, take: 1, select: { role: true, content: true, createdAt: true } },
+        handoffs: { where: { endedAt: null }, orderBy: { requestedAt: "desc" }, take: 1, select: { trigger: true, reason: true, requestedAt: true } },
+      },
     });
-    const items = rows.map((c): InboxItem => {
+    const { page, nextCursor } = keysetPage(rows, limit, (c) => c.updatedAt, context);
+    const data = page.map((c): InboxItem => {
       const last = c.messages[0];
       const open = c.handoffs[0];
       return {
@@ -299,12 +290,50 @@ export function inboxRoutes(
         handoff: open ? { trigger: open.trigger as HandoffTrigger, reason: open.reason, requestedAt: open.requestedAt.toISOString() } : null,
       };
     });
-    return { items, counts };
+    return { data, nextCursor };
   });
 
+  // How many conversations each view holds, for the tabs and the queue badge.
+  app.get("/workspaces/:workspaceId/inbox/counts", async (req): Promise<InboxCounts> => {
+    const { workspaceId } = workspaceParams.parse(req.params);
+    const scope = await inWorkspace(member(req), workspaceId);
+    const { employeeId } = inboxCountsQuerySchema.parse(req.query);
+    const where = { ...within(scope), ...REAL, ...(employeeId && { employeeId }) };
+    const [byStatus, queue, mine] = await Promise.all([
+      prisma.conversation.groupBy({ by: ["status"], where, _count: true }),
+      prisma.conversation.count({ where: { ...where, ...viewWhere("queue", scope.userId) } }),
+      prisma.conversation.count({ where: { ...where, ...viewWhere("mine", scope.userId) } }),
+    ]);
+    const count = (s: ConversationStatus) => byStatus.find((g) => g.status === s)?._count ?? 0;
+    return {
+      queue,
+      mine,
+      waiting: count("WAITING_FOR_HUMAN"),
+      human_active: count("HUMAN_ACTIVE"),
+      ai_active: count("AI_ACTIVE"),
+      reopened: count("REOPENED"),
+      resolved: count("RESOLVED"),
+      all: byStatus.reduce((sum, g) => sum + g._count, 0),
+    };
+  });
+
+  // ?after= (the last detail's newestCursor) makes it a poll: only the messages since then.
   app.get(conversationPath, async (req) => {
+    const { after } = detailQuery.parse(req.query);
     const { conversation } = await scoped(req);
-    return detail(conversation.id);
+    return detail(conversation.id, after);
+  });
+
+  // Earlier messages, newest page first: ?cursor= from the detail's olderCursor, then from each page's nextCursor.
+  app.get(`${conversationPath}/messages`, async (req): Promise<MessagePage> => {
+    const { conversation } = await scoped(req);
+    return olderMessages(conversation, req.query);
+  });
+
+  // Messages after ?after=, oldest first: catches up a poll that found more than one window of new messages.
+  app.get(`${conversationPath}/messages/new`, async (req): Promise<NewMessages> => {
+    const { conversation } = await scoped(req);
+    return newMessages(conversation, req.query);
   });
 
   // Take over, assign, hand back to the AI, resolve, reopen. Each moves only from the states it names,
