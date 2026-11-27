@@ -15,6 +15,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { guards, httpError, type Authenticate, type Member } from "./auth.ts";
+import { decodeCursor, keysetAfter, keysetPage, pagingContext } from "./cursor.ts";
 import { within } from "./employees.ts";
 
 const customerParams = z.object({ workspaceId: z.string().min(1), customerId: z.string().min(1) });
@@ -71,8 +72,11 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
 
   app.get("/workspaces/:workspaceId/customers", async (req): Promise<CustomerPage> => {
     const { workspaceId } = customerParams.pick({ workspaceId: true }).parse(req.params);
-    const { q, filter, page, limit } = listCustomersQuery.parse(req.query);
+    const { q, filter, limit, cursor } = listCustomersQuery.parse(req.query);
     const scope = await inWorkspace(member(req), workspaceId);
+    // A cursor only continues the list it came from: same workspace, search and filter.
+    const context = pagingContext(scope.workspaceId, q, filter);
+    const after = decodeCursor(cursor, context);
     const like = { contains: q, mode: "insensitive" as const };
     const where: Prisma.CustomerWhereInput = {
       ...within(scope),
@@ -92,11 +96,10 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
     const term = q ? `%${q.replace(/[\\%_]/g, "\\$&")}%` : null;
     const [rows, [counts]] = await Promise.all([
       prisma.customer.findMany({
-        where: { AND: [where, filters[filter]] },
+        where: { AND: [where, filters[filter], keysetAfter("lastSeenAt", after)] },
         include: { profile: true },
         orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
-        skip: (page - 1) * limit,
-        take: limit,
+        take: limit + 1,
       }),
       // Every tile in one pass over the search's customers, not one count query each.
       prisma.$queryRaw<CustomerCounts[]>`
@@ -113,7 +116,8 @@ export function customerRoutes(app: FastifyInstance, authenticate: Authenticate)
     ]);
     const c = counts!;
     const total = { all: c.total, week: c.seenThisWeek, email: c.withEmail, phone: c.withPhone }[filter];
-    return { data: rows.map(toSummary), total, counts: c };
+    const { page, nextCursor } = keysetPage(rows, limit, (r) => r.lastSeenAt, context);
+    return { data: page.map(toSummary), nextCursor, total, counts: c };
   });
 
   app.get("/workspaces/:workspaceId/customers/:customerId", async (req): Promise<CustomerDetail> => {

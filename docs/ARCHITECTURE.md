@@ -332,7 +332,7 @@ POST  /developer/webhook-deliveries/:id/redeliver   admin; pending again with fr
 GET   /developer/audit                          admin; newest 100 developer audit entries
 GET   /v1/openapi.json                          public; the OpenAPI 3.1 document (routes, scopes, shapes, webhooks)
 *     /v1/...                                   API key (Bearer wfk_...); the routes of PUBLIC_ROUTES (packages/shared/src/public-api.ts), see below
-GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, total, counts }, by last seen then id; ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?page= (from 1) &limit=1-100 (20); total follows ?q= and ?filter=; counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany, one SQL pass) follow ?q= only
+GET   /workspaces/:workspaceId/customers        member; CustomerPage { data, nextCursor, total, counts }, by last seen then id (keyset: ?cursor= from the previous page, only valid for the same workspace, ?q= and ?filter=, 400 otherwise; null nextCursor ends the list); ?q= searches name/email/phone/company/externalId; ?filter=all|week|email|phone; ?limit=1-100 (20); total follows ?q= and ?filter= (display only); counts (total, seenThisWeek, withEmail, withPhone, reachable, withCompany, one SQL pass) follow ?q= only
 GET   .../customers/:customerId                 member; profile, memories, conversations (channel, status) with summaries
 PATCH .../customers/:customerId/memories/:id    admin; { value }; extraction's validation, profile follows, confidence 1; audited
 DELETE .../customers/:customerId/memories/:id   admin; profile field cleared for identity keys; audited

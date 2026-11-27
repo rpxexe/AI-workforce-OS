@@ -14,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useApiQuery } from "@/lib/api";
 import { withWorkspace } from "@/lib/workspace";
-import { TablePager, useServerPaged, type Pager } from "@/components/table-pager";
+import { TablePager, useCursorPaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: CustomerSummary[] = Array.from({ length: 6 }, (_, i) => ({
@@ -37,6 +37,7 @@ const FILTERS: Record<CustomerFilter, { label: string; count: (c: CustomerCounts
 type Filter = CustomerFilter;
 const SAMPLE_PAGE: CustomerPage = {
   data: SAMPLE,
+  nextCursor: null,
   total: 6,
   counts: { total: 6, seenThisWeek: 6, withEmail: 6, withPhone: 6, reachable: 6, withCompany: 6 },
 };
@@ -52,11 +53,13 @@ export default withWorkspace(function CustomersPage({ workspace }) {
   }, [query]);
 
   const base = `/workspaces/${workspace.id}/customers`;
-  // Each page comes from the server; a new search or filter starts at page 1.
-  const paged = useServerPaged(`${search}:${filter}`);
+  // Cursor pages from the server: each page starts after the last row of the one before, so customers seen or
+  // added meanwhile never repeat or skip a row. A new search or filter starts again at page 1 with no cursor.
+  const paged = useCursorPaged(`${search}:${filter}`);
   const path = `${base}?filter=${filter}&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}`;
   const { data, error, loading, reload } = useApiQuery<CustomerPage>(path, { keepPrevious: true });
-  const pager = paged.pager(data?.total ?? 0);
+  // While a page loads, `data` is still the previous one: its cursor must not open yet another page.
+  const pager = paged.pager({ total: data?.total ?? 0, nextCursor: loading ? null : (data?.nextCursor ?? null), rows: loading ? 1 : (data?.data.length ?? 1) });
 
   return (
     <div className="flex flex-col gap-6">

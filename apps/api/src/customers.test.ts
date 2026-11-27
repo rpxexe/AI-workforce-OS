@@ -136,12 +136,14 @@ test("the list pages newest first by last seen, filters on the server, and count
   assert.deepEqual(first.data.map((c) => c.id), ids.slice(0, 3));
   assert.deepEqual(first.counts, { total: 7, seenThisWeek: 4, withEmail: 3, withPhone: 3, reachable: 5, withCompany: 2 });
   assert.equal(first.total, 7);
-  const second = await list("&limit=3&page=2");
+  assert.ok(first.nextCursor);
+  const second = await list(`&limit=3&cursor=${first.nextCursor}`);
   assert.deepEqual(second.data.map((c) => c.id), ids.slice(3, 6));
-  const third = await list("&limit=3&page=3");
-  assert.deepEqual([third.data.map((c) => c.id), third.total], [ids.slice(6), 7]);
+  const third = await list(`&limit=3&cursor=${second.nextCursor}`);
+  // End of the list: no cursor for a page after it.
+  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor, third.total], [ids.slice(6), null, 7]);
   assert.deepEqual(third.counts, first.counts);
-  assert.deepEqual((await list("&limit=3&page=4")).data, []);
+  assert.equal((await list("&limit=7")).nextCursor, null);
 
   const ofFilter = async (filter: string) => (await list(`&filter=${filter}`)).data.map((c) => c.externalId);
   assert.deepEqual(await ofFilter("week"), ["pager-0", "pager-1", "pager-2", "pager-3"]);
@@ -149,13 +151,63 @@ test("the list pages newest first by last seen, filters on the server, and count
   assert.deepEqual(await ofFilter("phone"), ["pager-1", "pager-2", "pager-5"]);
   const both = await list("&filter=phone&limit=2");
   assert.deepEqual([both.data.length, both.total, both.counts.total], [2, 3, 7]);
-  assert.deepEqual((await list("&filter=phone&limit=2&page=2")).data.map((c) => c.externalId), ["pager-5"]);
+  // The cursor carries on inside the filter.
+  const rest = await list(`&filter=phone&limit=2&cursor=${both.nextCursor}`);
+  assert.deepEqual([rest.data.map((c) => c.externalId), rest.nextCursor], [["pager-5"], null]);
+
+  // A cursor only continues the list it came from: another filter, search or workspace is refused, not mixed in.
+  for (const other of [`&filter=email&cursor=${both.nextCursor}`, `x&filter=phone&cursor=${both.nextCursor}`])
+    assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${other}`, memberOf(orgA))).statusCode, 400, other);
 
   // Search wildcards match themselves in the counts, as in the list.
   assert.equal((await list("%25&limit=1")).counts.total, 0);
 
-  for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&page=0", "&page=x"])
+  const forged = Buffer.from(JSON.stringify({ at: "not a date", id: ids[0], context: "x".repeat(16) })).toString("base64url");
+  for (const bad of ["&limit=0", "&limit=101", "&filter=nope", "&cursor=nope", `&cursor=${forged}`])
     assert.equal((await call("GET", `/workspaces/${wsA}/customers?q=pager${bad}`, memberOf(orgA))).statusCode, 400, bad);
+});
+
+test("cursor pages survive rows added, removed and moved between requests, and ties on last seen", async () => {
+  const scope = { organizationId: orgA, workspaceId: wsA };
+  const at = new Date(Date.now() - 60 * 60 * 1000);
+  // Six customers seen at the very same moment: the id decides their order.
+  for (let i = 0; i < 6; i++)
+    await prisma.customer.create({ data: { ...scope, externalId: `keyset-${i}`, lastSeenAt: at, profile: { create: { name: `Keyset ${i}` } } } });
+  // The database's own id order (its collation, not JavaScript's sort).
+  const ids = (await prisma.customer.findMany({ where: { ...scope, externalId: { startsWith: "keyset-" } }, orderBy: { id: "desc" } })).map((c) => c.id);
+  const list = async (query: string) => (await call("GET", `/workspaces/${wsA}/customers?q=keyset${query}`, memberOf(orgA))).json<CustomerPage>();
+  const walk = async () => {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: CustomerPage = await list(`&limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      seen.push(...page.data.map((c) => c.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+    return seen;
+  };
+  assert.deepEqual(await walk(), ids, "ties on lastSeenAt: every row once, in id order");
+
+  // Inserted: a new customer seen just now goes to the top; the next page is unaffected (OFFSET repeated a row here).
+  const first = await list("&limit=2");
+  const added = await prisma.customer.create({ data: { ...scope, externalId: "keyset-new", profile: { create: { name: "Keyset new" } } } });
+  assert.deepEqual((await list(`&limit=2&cursor=${first.nextCursor}`)).data.map((c) => c.id), ids.slice(2, 4));
+
+  // Deleted: a customer already shown is removed; the next page still starts after the last one shown (OFFSET skipped one).
+  await prisma.customer.delete({ where: { id: ids[0]! } });
+  assert.deepEqual((await list(`&limit=2&cursor=${first.nextCursor}`)).data.map((c) => c.id), ids.slice(2, 4));
+
+  // The cursor's own row deleted: the position is in the cursor, so paging still carries on.
+  await prisma.customer.delete({ where: { id: ids[1]! } });
+  assert.deepEqual((await list(`&limit=2&cursor=${first.nextCursor}`)).data.map((c) => c.id), ids.slice(2, 4));
+
+  // Moved: a customer further down is seen again and goes to the top. Pages already shown are not repeated; it is at
+  // the top of the list on the next first page (keyset paging does not freeze the list).
+  const second = await list(`&limit=2&cursor=${first.nextCursor}`);
+  await prisma.customer.update({ where: { id: ids[5]! }, data: { lastSeenAt: new Date() } });
+  const third = await list(`&limit=2&cursor=${second.nextCursor}`);
+  assert.deepEqual([third.data.map((c) => c.id), third.nextCursor], [[ids[4]], null]);
+  assert.deepEqual((await list("&limit=2")).data.map((c) => c.id), [ids[5], added.id]);
 });
 
 test("an admin edits a memory: validated, profile kept in step, confidence 1, audited", async () => {

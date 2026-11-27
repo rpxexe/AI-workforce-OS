@@ -13,12 +13,15 @@ export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 export const CUSTOMER_FILTERS = ["all", "week", "email", "phone"] as const;
 export type CustomerFilter = (typeof CUSTOMER_FILTERS)[number];
 
-/** ?q= search, ?filter= (seen in the last 7 days, has email, has phone), and ?page= (from 1) of ?limit= newest first by last seen. */
+/**
+ * ?q= search, ?filter= (seen in the last 7 days, has email, has phone), ?limit= rows newest first by last seen, and
+ * ?cursor= from the previous page's nextCursor (only valid for the same search and filter).
+ */
 export const listCustomersQuery = z.object({
   q: z.string().trim().max(100).optional(),
   filter: z.enum(CUSTOMER_FILTERS).default("all"),
-  page: z.coerce.number().int().min(1).max(100_000).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(300).optional(),
 });
 
 /** A person correcting a remembered value. The same safety checks as extraction apply on the server. */
@@ -58,8 +61,11 @@ export type CustomerCounts = {
   withCompany: number;
 };
 
-/** One page of the customer list; `total` is how many match the search and filter, for the page count. */
-export type CustomerPage = { data: CustomerSummary[]; total: number; counts: CustomerCounts };
+/**
+ * One page of the customer list. `nextCursor` asks for the page after it (null: the list ends here); `total` is how
+ * many match the search and filter, for display only.
+ */
+export type CustomerPage = { data: CustomerSummary[]; nextCursor: string | null; total: number; counts: CustomerCounts };
 
 export type CustomerDetail = CustomerSummary & {
   memories: CustomerMemoryItem[];
