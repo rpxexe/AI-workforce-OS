@@ -541,3 +541,11 @@ Real sign-in needs a person. To exercise the UI automatically, temporarily alias
 and `@clerk/nextjs/server` to stubs via `turbopack.resolveAlias`, run the API through
 `buildApp({ authenticate })` with a fixed identity, and drive headless Edge over the DevTools
 protocol. Remove all of it afterwards; none of it is in the repo.
+
+## List cursors carry the sort value (apps/api/src/paging.ts)
+
+Customers and employees sort by timestamps that change (lastSeenAt, updatedAt). Prisma's `cursor: { id }` re-reads the
+cursor row, so a row seen or edited between pages restarted the list and a deleted one ended it. Cursors are
+`<iso time>~<id>` and pages filter `(time, id) <` that pair. A row that moves up between pages is not shown again on
+the next page; it is at the top on reload. Migrations that build indexes on big tables use `CREATE INDEX CONCURRENTLY`
+alone in their file (it cannot run in a transaction).
