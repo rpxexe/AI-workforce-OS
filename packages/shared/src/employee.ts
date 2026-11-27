@@ -150,8 +150,16 @@ export const publishSchema = z.object({ version: z.number().int().positive() });
 /** DRAFT is not settable: it only describes an employee that has never been published. */
 export const setStatusSchema = z.object({ status: z.enum(["ACTIVE", "PAUSED", "ARCHIVED"]) });
 
-/** GET employees: the whole list, newest change first; ?archived=true for the archived ones. */
-export const listEmployeesQuery = z.object({ archived: z.enum(["true", "false"]).default("false") });
+/**
+ * GET employees, newest change first; ?archived=true for the archived ones. Without ?page= the whole list (pickers,
+ * the Current tab); with ?page= (from 1) one page of ?limit= and the total, ?q= matching the latest name or role.
+ */
+export const listEmployeesQuery = z.object({
+  archived: z.enum(["true", "false"]).default("false"),
+  q: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).max(100_000).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
 
 // ---- API responses (dates are ISO strings) ----
 
@@ -165,6 +173,9 @@ export type EmployeeSummary = Pick<EmployeeConfig, "name" | "role" | "descriptio
   publishedVersion: number | null;
   updatedAt: string;
 };
+
+/** One ?page= of employees; `total` is how many match ?archived= and ?q=, for the page count. */
+export type EmployeePage = { data: EmployeeSummary[]; total: number };
 
 export type EmployeeDetail = {
   id: string;

@@ -1404,6 +1404,8 @@ model WebhookDelivery {
   @@unique([endpointId, eventId])
   @@index([status, nextAttemptAt])
   @@index([organizationId, createdAt])
+  // One endpoint's delivery log, newest first, a page at a time.
+  @@index([endpointId, createdAt])
 }
 
 /**

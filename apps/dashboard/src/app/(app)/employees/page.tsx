@@ -1,10 +1,10 @@
 "use client";
 
-import type { EmployeeDetail, EmployeeStatus, EmployeeSummary } from "@workforce/shared";
+import type { EmployeeDetail, EmployeePage, EmployeeStatus, EmployeeSummary } from "@workforce/shared";
 import { Archive, Bot, Copy, Ellipsis, Eye, Pencil, Plus, Search, SearchX, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ConfirmDialog, type Confirmation } from "@/components/confirm-dialog";
 import { EmployeeAvatar, StatusBadge, formatDate, versionLabel } from "@/components/employees/meta";
 import { Skeleton as Skullet } from "skullet/react";
@@ -25,7 +25,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LANGUAGES } from "@workforce/shared";
 import { useApi, useApiQuery } from "@/lib/api";
 import { useIsAdmin, withWorkspace } from "@/lib/workspace";
-import { TablePager, usePaged } from "@/components/table-pager";
+import { TablePager, usePaged, useServerPaged, type Pager } from "@/components/table-pager";
 
 // Stands in for the real data so Skullet can draw a skeleton the shape of this page; never shown as data.
 const SAMPLE: EmployeeSummary[] = Array.from({ length: 5 }, (_, i) => ({
@@ -49,11 +49,33 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
 
   const [archived, setArchived] = useState(false);
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  // The Archived tab asks the server; wait for a pause in typing first.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(query.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
   const searchRef = useRef<HTMLInputElement>(null);
-  // The whole tab (plans cap employees at 50): search, counts and pages need no more requests.
-  const { data, error, loading, reload } = useApiQuery<EmployeeSummary[]>(`${base}?archived=${archived}`, { keepPrevious: true });
+
+  // Current: the whole tab (plans cap employees at 50), searched and paged here with no more requests.
+  const current = useApiQuery<EmployeeSummary[]>(archived ? null : `${base}?archived=false`, { keepPrevious: true });
+  const needle = query.trim().toLowerCase();
+  const matches = current.data && (needle ? current.data.filter((e) => e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle)) : current.data);
+  const local = usePaged(matches ?? [], 20, needle);
+  // Archived: not plan-limited, so each page and the search come from the server.
+  const paged = useServerPaged(search);
+  const old = useApiQuery<EmployeePage>(
+    archived ? `${base}?archived=true&${paged.query}${search ? `&q=${encodeURIComponent(search)}` : ""}` : null,
+    { keepPrevious: true },
+  );
+  const serverPager = paged.pager(old.data?.total ?? 0);
+
+  const { error, loading, reload } = archived ? old : current;
+  const view = archived
+    ? old.data && { rows: old.data.data, pager: serverPager, searching: search !== "" }
+    : matches && { rows: local.rows, pager: local.pager, searching: needle !== "" };
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
-  const nameOf = (id: string) => data?.find((e) => e.id === id)?.name ?? "Employee";
+  const nameOf = (id: string) => view?.rows.find((e) => e.id === id)?.name ?? "Employee";
 
   /** Runs a row action, then refreshes the list. */
   const run = async (action: () => Promise<unknown>) => {
@@ -119,17 +141,17 @@ export default withWorkspace(function EmployeesPage({ workspace }) {
               maxLength={100}
             />
           </InputGroup>
-          {data && !archived && <Counts data={data} />}
+          {current.data && !archived && <Counts data={current.data} />}
         </div>
       )}
 
       {error ? (
         <ErrorState message={error.message} onRetry={reload} />
       ) : (
-        <Skullet data={data} sample={SAMPLE} id="employees-list" label="Loading employees">
-          {(all) => (
+        <Skullet data={view} sample={{ rows: SAMPLE, pager: local.pager, searching: false }} id="employees-list" label="Loading employees">
+          {(view) => (
             <EmployeeList
-              all={all}
+              {...view}
               archived={archived}
               query={query}
               clearQuery={() => {
@@ -167,7 +189,9 @@ function Counts({ data }: { data: EmployeeSummary[] }) {
 }
 
 function EmployeeList({
-  all,
+  rows,
+  pager,
+  searching,
   archived,
   query,
   clearQuery,
@@ -178,7 +202,9 @@ function EmployeeList({
   setStatus,
   setConfirm,
 }: {
-  all: EmployeeSummary[];
+  rows: EmployeeSummary[];
+  pager: Pager;
+  searching: boolean;
   archived: boolean;
   query: string;
   clearQuery: () => void;
@@ -189,10 +215,7 @@ function EmployeeList({
   setStatus: (id: string, status: "PAUSED" | "ARCHIVED") => void;
   setConfirm: (confirm: Confirmation) => void;
 }) {
-  const needle = query.trim().toLowerCase();
-  const data = needle ? all.filter((e) => e.name.toLowerCase().includes(needle) || e.role.toLowerCase().includes(needle)) : all;
-  const employees = usePaged(data, 20, `${archived}:${needle}`);
-  return all.length === 0 ? (
+  return pager.total === 0 && !searching ? (
         archived ? (
           <EmptyState icon={Archive} title="No archived employees" description="Employees you archive are kept here and can be restored." />
         ) : (
@@ -208,7 +231,7 @@ function EmployeeList({
             {newButton}
           </EmptyState>
         )
-      ) : data.length === 0 ? (
+      ) : pager.total === 0 ? (
         <EmptyState icon={SearchX} title={`No employees match "${query.trim()}"`} description="Try another name or role.">
           <Button variant="outline" onClick={clearQuery}>
             Clear search
@@ -230,7 +253,7 @@ function EmployeeList({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {employees.rows.map((e) => (
+              {rows.map((e) => (
                 <TableRow key={e.id}>
                   <TableCell>
                     <Link href={`/employees/${e.id}`} className="group flex min-w-0 items-center gap-3">
@@ -314,7 +337,7 @@ function EmployeeList({
               ))}
             </TableBody>
           </Table>
-          <TablePager {...employees.pager} className="px-4 pb-3" />
+          <TablePager {...pager} className="px-4 pb-3" />
         </Card>
       );
 }

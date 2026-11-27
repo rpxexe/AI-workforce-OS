@@ -547,5 +547,6 @@ protocol. Remove all of it afterwards; none of it is in the repo.
 Lists that grow without bound (customers, webhook deliveries) take `?page=&limit=` and return `total`; the dashboard
 drives the shadcn `TablePager` footer with `useServerPaged` (components/table-pager.tsx), so any page can be opened
 directly. Offset pages can shift by a row when rows change between clicks; acceptable for these lists. Bounded lists
-(employees: 50 per plan; workflows) load whole and page in the browser with `usePaged`. Migrations that build
+(current employees: 50 per plan; workflows) load whole and page in the browser with `usePaged`; archived employees
+are not capped, so that tab pages on the server. Migrations that build
 indexes on big tables use `CREATE INDEX CONCURRENTLY` alone in their file (it cannot run in a transaction).

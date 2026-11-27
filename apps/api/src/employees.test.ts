@@ -7,6 +7,7 @@ import {
   type ApiError,
   type EmployeeConfig,
   type EmployeeDetail,
+  type EmployeePage,
   type EmployeeSummary,
   type Workspace,
 } from "@workforce/shared";
@@ -232,6 +233,21 @@ test("list: the whole tab newest change first, archived on its own tab, and noth
   assert.deepEqual((await list()).map((e) => e.name), ["Three", "One"]);
   assert.deepEqual((await list("?archived=true")).map((e) => e.name), ["Two"]);
   assert.equal((await call("GET", `${employees(ws)}?archived=maybe`, memberOf(orgA))).statusCode, 400);
+
+  // ?page=: one page and the total. Archiving One last puts it first; the search reads the latest version only.
+  await call("PATCH", `${employees(ws)}/${ids[2]}/status`, adminOf(orgA), { status: "ARCHIVED" });
+  await call("PUT", `${employees(ws)}/${ids[0]}`, adminOf(orgA), config({ name: "Tres" }));
+  const page = async (query: string) => (await call("GET", `${employees(ws)}?${query}`, memberOf(orgA))).json<EmployeePage>();
+  const first = await page("archived=true&page=1&limit=1");
+  assert.deepEqual([first.data.map((e) => e.name), first.total], [["One"], 2]);
+  assert.deepEqual((await page("archived=true&page=2&limit=1")).data.map((e) => e.name), ["Two"]);
+  assert.deepEqual((await page("archived=true&page=3&limit=1")).data, []);
+  assert.deepEqual(await page("archived=true&page=1&q=TWO"), { data: (await page("archived=true&page=2&limit=1")).data, total: 1 });
+  assert.equal((await page("page=1&q=three")).total, 0);
+  assert.deepEqual((await page("page=1&q=tres")).data.map((e) => e.name), ["Tres"]);
+  assert.equal((await page("page=1&q=%25")).total, 0);
+  for (const bad of ["page=0", "page=1&limit=101"]) assert.equal((await call("GET", `${employees(ws)}?${bad}`, memberOf(orgA))).statusCode, 400, bad);
+  assert.deepEqual(await (await call("GET", `${employees(wsB)}?archived=true&page=1`, adminOf(orgB))).json<EmployeePage>(), { data: [], total: 0 });
   assert.equal((await call("GET", employees(ws), adminOf(orgB))).statusCode, 404);
   assert.deepEqual((await call("GET", employees(wsB), adminOf(orgB))).json<EmployeeSummary[]>(), []);
 });

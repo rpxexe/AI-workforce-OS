@@ -183,7 +183,7 @@ GET   /health                                   public
 GET   /ws                                       WebSocket echo (placeholder transport)
 GET   /workspaces                               member; provisions org + Default on first call
 POST  /workspaces                               admin
-GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; the whole list as an array, newest change first (plans cap employees at 50: the Employees page searches, counts and pages it in the browser; the dashboard calls listEmployees)
+GET   /workspaces/:workspaceId/employees        member; ?archived=true for the archived list; without ?page= the whole list as an array, newest change first (pickers, the Current tab, listEmployees for the dashboard); with ?page= (from 1) &limit=1-100 (20) [&q= latest name/role]: EmployeePage { data, total } (the Archived tab, which plans do not cap)
 POST  /workspaces/:workspaceId/employees        admin; creates employee + version 1
 GET   /workspaces/:workspaceId/employees/:id    member; includes all versions, newest first
 PUT   /workspaces/:workspaceId/employees/:id    admin; appends a new version
